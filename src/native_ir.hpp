@@ -11,7 +11,7 @@ namespace veloz::native {
 
 struct Value {
     Type type; unsigned id;
-    std::optional<unsigned> owner{}; // temporary heap slot, transferred or dropped after the expression
+    std::optional<unsigned> owner{}; // slot that can transfer its heap allocation
     bool freshRegion = false;
 };
 enum class Op {
@@ -125,6 +125,20 @@ class Lowerer {
         emit(Op::ClearOwner, Type::Void, {}, {}, *value.owner);
         value.owner.reset();
         return value;
+    }
+    Value returned(const Expr& e) {
+        if (e.kind != ExprKind::Name || e.type != Type::IntArray) return own(expression(e), e.span);
+        const auto slot = lookup(e.text);
+        auto value = load(slot);
+        // Only heap-owned locals are on the drop list. A return is their last
+        // use on this path. Parameters are borrowed and region storage expires.
+        for (const auto& scope : scopes) {
+            if (std::ranges::find(scope.arrays, slot) != scope.arrays.end()) {
+                value.owner = slot;
+                break;
+            }
+        }
+        return own(value, e.span);
     }
     void dropTemporaries() {
         for (auto it = temporaries.rbegin(); it != temporaries.rend(); ++it) drop(*it);
@@ -372,7 +386,7 @@ class Lowerer {
         case StmtKind::Match: match(s); break;
         case StmtKind::Return: {
             std::optional<Value> v;
-            if (!s.exprs.empty()) v = own(expression(s.exprs[0]), s.exprs[0].span);
+            if (!s.exprs.empty()) v = returned(s.exprs[0]);
             cleanupReturn();
             fn.blocks[here].exit = Exit::Return;
             fn.blocks[here].value = v;

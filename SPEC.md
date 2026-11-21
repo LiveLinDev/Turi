@@ -49,6 +49,8 @@ Una variable `var` permite `a[i] = valor`. Se evalúan índice y valor, en ese o
 
 El backend reserva en una región los temporales que se demuestran confinados a su bloque. Restaura la marca de la región al salir, también tras un retorno y entre iteraciones. En la ruta general un dueño único libera cada reserva. Las copias con valor independiente son profundas cuando el backend necesita conservar una vista prestada. `veloz costes ARCHIVO [FUNCIÓN]` muestra las operaciones dinámicas del IR y la razón de cada región, dueño o copia antes de la optimización de LLVM.
 
+Un `return` del nombre de un arreglo local con dueño único transfiere la reserva al llamador. Si se devuelve un parámetro de solo lectura prestado, el resultado conserva su independencia mediante una copia.
+
 `readByte() -> int` consume un byte de la entrada estándar, incluidos 0 y 255. Devuelve -1 al llegar al fin de archivo o ante un error de lectura. Las pruebas ejecutadas por `check` disponen de una entrada vacía. En Windows se usa modo binario.
 
 ### Límites del núcleo

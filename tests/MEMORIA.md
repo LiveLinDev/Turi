@@ -41,3 +41,20 @@ python tests/rss_windows.py build/veloz.exe
 ```
 
 La revisión independiente incluyó una devolución temprana desde un bucle a través de una identidad genérica, nueve retornos recursivos de copias, autoasignación, modificación de una copia y tres ámbitos de arreglos anidados con cortocircuito. El intérprete y el ejecutable compilado con `-O1 -fsanitize=address` devolvieron 2464 y pasaron las aserciones. También se comprobó en el IR instrumentado que Clang inserta comprobaciones de lecturas y escrituras.
+
+## Transferencia de un dueño al devolver un arreglo local
+
+El IR transfiere la reserva de un arreglo local al resultado cuando su ranura es dueña del heap y el retorno constituye su último uso en ese camino. Primero carga el valor y vacía la ranura, después ejecuta la limpieza normal de todos los ámbitos activos. Un parámetro prestado se copia al devolverlo. La prueba `RETURNS` de `tests/arrays.py` ejercita un parámetro prestado, dos devoluciones tempranas dentro de un bucle con región, una variable interior que oculta a otra y la devolución tras reasignar el dueño exterior. También modifica cada resultado y comprueba la independencia del argumento original.
+
+La auditoría con ASan y el contador anterior dio las mismas cifras en `-O0` y `-O2`.
+
+| Programa | Reservas antes | Reservas después | Pico simultáneo antes / después | Vivas al terminar antes / después |
+|---|---:|---:|---:|---:|
+| Programa de 600 iteraciones, `PROGRAM` | 97 | 96 | 4 / 4 | 0 / 0 |
+| Cuatro rutas de devolución, `RETURNS` | 13 | 10 | 5 / 4 | 0 / 0 |
+
+El comando `allocation_audit.py` de arriba reproduce la primera fila. Para contar las reservas del caso de cuatro retornos con el mismo instrumento usa el siguiente comando desde la raíz.
+
+```powershell
+python -c "import sys; sys.path.insert(0, 'tests'); import arrays, allocation_audit as a; a.PROGRAM, a.EXPECTED = arrays.RETURNS, arrays.RETURN_OUTPUT; a.main()" build/veloz.exe "C:/Program Files/LLVM/bin/clang.exe"
+```

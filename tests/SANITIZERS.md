@@ -1,5 +1,7 @@
 # Verificación del compilador en Windows x64
 
+La versión 0.2 amplió CTest a siete grupos, añadiendo arreglos y eliminación comprobada del primer llenado. El compilador instrumentado y la compilación release pasaron los siete grupos. La instrumentación de los propios programas Turi se detalla en `MEMORIA.md`.
+
 El 20/11/2026 se compiló el compilador C++23 y el ejecutor de pruebas con Clang 23.1.4, AddressSanitizer y UndefinedBehaviorSanitizer, usando CMake y Ninja. CTest pasó los cinco grupos registrados, con un tiempo conjunto de 8,69 s en esta máquina.
 
 | Grupo | Comprobación |

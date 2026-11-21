@@ -43,6 +43,31 @@ fn main() {
 }
 """
 EXPECTED = b"3\n17\n8\n4\n1200\n0\n42\n"
+RETURNS = """fn choose(input: [int], path: int) -> [int] {
+    if path == 0 { return input }
+    var local = repeat(51, 3)
+    for i in 0..2 {
+        let scratch = repeat(i, 1)
+        if path == 1 { return local }
+        if path == 2 {
+            let local = repeat(63 + scratch[0], 2)
+            return local
+        }
+    }
+    local = repeat(85, 1)
+    return local
+}
+fn main() {
+    var source = repeat(7, 1)
+    for path in 0..4 {
+        var result = choose(source, path)
+        result[0] = result[0] + 20
+        print(result[0])
+        assert source[0] == 7
+    }
+}
+"""
+RETURN_OUTPUT = b"27\n71\n83\n105\n"
 TRAPS = [
     ("let a = repeat(1, -1)", "R_ARRAY_SIZE"),
     ("let a = repeat(1, 9223372036854775807)", "R_ALLOC"),
@@ -133,11 +158,21 @@ def main():
         sites = [json.loads(row) for row in ok([cli, "costes", src]).splitlines()]
         assert {s["level"] for s in sites} == {2, 3}, sites
         assert any(s["function"] == "stress" and s["level"] == 2 for s in sites), sites
-        if args.clang_asan:
+        def sanitized(expected):
             ir = base / "array.ll"
             ir.write_bytes(ok([cli, "emit-ir", src]))
             ok([args.clang_asan, "-O1", "-fsanitize=address", ir, "-o", native])
-            assert ok([native]) == EXPECTED
+            assert ok([native]) == expected
+        if args.clang_asan:
+            sanitized(EXPECTED)
+        for result in execute(RETURNS):
+            assert result.returncode == 0 and result.stdout == RETURN_OUTPUT, (result.stdout, result.stderr)
+        sites = [json.loads(row) for row in ok([cli, "costes", src, "choose"]).splitlines()]
+        raw = src.read_bytes()
+        allocated = [raw[s["start"]:s["end"]] for s in sites]
+        assert allocated.count(b"input") == 1 and b"local" not in allocated, allocated
+        if args.clang_asan:
+            sanitized(RETURN_OUTPUT)
         generated_source, generated_output = generated(240519)
         for result in execute(generated_source):
             assert result.returncode == 0 and result.stdout == generated_output, result.stderr
