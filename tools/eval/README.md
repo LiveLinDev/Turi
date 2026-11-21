@@ -1,5 +1,7 @@
 # Piloto de un intento
 
+El piloto original emplea la tarjeta y el núcleo anteriores al soporte de arreglos. El commit `c9d3a9f` contiene los fuentes, la tarjeta utilizada y los registros originales. El SHA-256 del ejecutable y de la tarjeta acompaña cada fila. Para reproducir la condición original se puede crear un worktree local con `git worktree add --detach build-piloto c9d3a9f` y compilar desde allí.
+
 Cincuenta tareas de funciones puras ejercitan enteros, bucles, texto UTF-8, registros, variantes y selección. Cada tarea tiene un ejemplo visible, al menos dos casos ocultos y una solución de referencia. Los casos ocultos y las soluciones están publicados aquí para poder auditar la medición. El cliente envía al modelo únicamente la tarjeta, el enunciado, la firma, los tipos necesarios y el ejemplo visible.
 
 El piloto llama a Ollama en `127.0.0.1:11434`, sin descargas, cuentas ni servicios externos. Compara dos tamaños de Qwen 2.5 que ya estaban instalados. La prueba multilenguaje y los modelos de familias distintas del hito 7 requieren un experimento aparte.

@@ -35,6 +35,30 @@ def generate(rng, number):
 }}"""
 
 
+def nominal_program(rng):
+    # Vary field order, payloads, variant selection and generic instantiations.
+    calls = []
+    for _ in range(12):
+        x, y = rng.randint(-1500, 1500), rng.randint(-1500, 1500)
+        fields = [f"x: {x}", f"y: {y}"]
+        rng.shuffle(fields)
+        value = "Msg.Pair(Point { " + ", ".join(fields) + " })"
+        if rng.randrange(2):
+            value = f"Msg.Number({x})"
+        calls.append(f"    print(score(identity({value})))")
+    return """struct Point { x: int, y: int }
+enum Msg { Pair(data: Point), Number(n: int) }
+fn identity<T>(value: T) -> T { return value }
+fn score(value: Msg) -> int {
+    match value {
+        Msg.Number(n) => return identity(n)
+        Msg.Pair(p) => return p.x - p.y
+    }
+}
+fn main() {
+""" + "\n".join(calls) + "\n}"
+
+
 def run(args):
     return subprocess.run(args, capture_output=True, timeout=30)
 
@@ -74,6 +98,9 @@ def main():
             except Exception:
                 print(f"seed={args.seed} batch={batch}\n{p.read_text(encoding='utf8')}")
                 raise
+        for _ in range(4):
+            p.write_text(nominal_program(rng), encoding="utf8")
+            compare(cli, p, exe)
         for expr in ("9223372036854775807 + 1", "-9223372036854775808 / -1",
                      "0 / 0", "1 % 0", "9223372036854775807 * -2"):
             p.write_text(f"fn main() {{\n print(1)\n print({expr})\n}}", encoding="utf8")

@@ -247,6 +247,11 @@ std::string agentCommand(const std::vector<std::string>& args, const fs::path& f
 }
 std::string explain(std::string_view topic) {
     static const std::map<std::string_view, std::string_view> index{
+        {"E_PYTHON_DEF","Copia la firma con fn. Después del tipo de retorno abre una llave, escribe return para devolver el valor y cierra la llave."},
+        {"R_ARRAY_SIZE","La longitud de repeat es un entero mayor o igual que cero."},
+        {"R_ALLOC","La implementación admite hasta 2²⁴ enteros por arreglo y comprueba el resultado del asignador."},
+        {"R_BOUNDS","Verifica que el índice cumple 0 <= i y que i es estrictamente menor que len(a)."},
+        {"E_ARRAY_FIELD","Los arreglos de este núcleo se admiten como variables, parámetros y resultados de función."},
         {"E_ARITY","Cuenta los parámetros de la firma y los argumentos de la llamada. La posición de la firma aparece en related."},
         {"E_BUSY","Otra edición mantiene el bloqueo del archivo. Espera a que termine y vuelve a leer el símbolo."},
         {"E_CHAR","Revisa el carácter indicado por span. Las palabras y operadores de la gramática usan ASCII."},

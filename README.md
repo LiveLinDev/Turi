@@ -28,5 +28,7 @@ ctest --test-dir build --output-on-failure
 | [Decisiones](DECISIONES.md) | Elecciones de implementación y límites |
 | [Expediente](EXPEDIENTE.md) | Diseño y protocolo de comparación |
 | [Piloto de agentes](tools/eval/README.md) | Evaluador local, tareas y respuestas reproducibles |
+| [Ensayo local de velocidad](bench/local/RESULTADOS.md) | Turi, C, Goose, Rust y Go en tres cargas con entradas dinámicas |
+| [Mediciones de memoria](tests/MEMORIA.md) | Reservas y pico residente en bucles y retornos tempranos |
 
 La cadena de compilación es `Turi → IR de bloques tipados → LLVM IR → ejecutable`. El intérprete de referencia usa una pila de evaluación independiente. `veloz emit-ir archivo.turi` permite inspeccionar el módulo antes de la optimización.

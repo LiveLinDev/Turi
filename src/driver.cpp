@@ -113,7 +113,7 @@ void replaceFile(const fs::path& file, std::string_view text) {
     if (fs::exists(file)) fs::permissions(temp, fs::status(file).permissions());
     publish(temp, file);
 }
-void buildBinary(const Program& program, const fs::path& destination) {
+void buildBinary(const Program& program, const fs::path& destination, const BuildOptions& options) {
     auto ir = emitLLVM(program);
     Stage stage(destination);
     auto source = stage.dir / "program.ll";
@@ -136,7 +136,10 @@ void buildBinary(const Program& program, const fs::path& destination) {
 #else
     if (const char* env = std::getenv("VELOZ_CLANG"); env && *env) clang = pathFrom(env);
 #endif
-    std::vector<fs::path> args{clang, "-O2", "-Wno-override-module", "-x", "ir", source, "-o", exe};
+    std::vector<fs::path> args{clang, options.release ? "-O3" : "-O2"};
+    if (!options.cpu.empty()) args.push_back(pathFrom("-march=" + options.cpu));
+    if (options.release) args.insert(args.end(), {"-flto", "-fuse-ld=lld"});
+    args.insert(args.end(), {"-Wno-override-module", "-x", "ir", source, "-o", exe});
 #ifdef _WIN32
     args.insert(args.end(), {"-Xlinker", "/STACK:33554432"});
 #endif

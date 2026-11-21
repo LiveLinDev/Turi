@@ -535,6 +535,12 @@ public:
         result.source = source;
         newlines();
         while (current().kind != TokenKind::End) {
+            if (at("def")) {
+                Diagnostic d("E_PYTHON_DEF", "En Turi una función empieza con fn, lleva llaves y devuelve el resultado con return.", current().span);
+                d.expected = "fn"; d.actual = "def";
+                d.example = "fn next(n: int) -> int { return n + 1 }";
+                throw d;
+            }
             if (at("struct") || at("enum")) result.data.push_back(dataDeclaration());
             else result.functions.push_back(declaration());
             if (current().kind != TokenKind::End && !newlines()) expected("salto de línea");

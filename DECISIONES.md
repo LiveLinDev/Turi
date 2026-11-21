@@ -13,3 +13,10 @@
 | Clang `-O2` como compilación nativa inicial | Mantiene las comprobaciones de aritmética, la semántica de cortocircuito y el orden de las salidas. Las configuraciones de comparación del expediente se mantienen como trabajo futuro. |
 
 La evidencia de las suites del repositorio es de corrección. Superar C, Rust o Goose en rendimiento y reducir tokens totales frente a otros lenguajes siguen siendo hipótesis.
+
+## Primeras mediciones locales
+
+- El usuario dio prioridad al rendimiento del programa y a los tokens totales hasta que el agente obtiene un resultado correcto. Los ensayos exploratorios se ejecutaron en su Ryzen con Windows. Se conserva el protocolo Intel/Linux del expediente para una comparación competitiva posterior.
+- Se integraron arreglos de enteros con regiones de ámbito y dueños únicos. Un ensayo de temporales de aproximadamente 1 MiB por iteración conservó el pico residente mediano alrededor de 4,54 MiB al pasar de 4 a 2048 iteraciones. El contador del asignador terminó con cero reservas vivas en el programa auditado. Véase `tests/MEMORIA.md`.
+- Se aceptó la eliminación del llenado que precedía a un recorrido completo. La validación reservada obtuvo 1,52× frente al compilador anterior en el caso aplicable. El intervalo del camino de respaldo incluyó 1. Se mantienen las trampas y la semántica de lectura con diez regresiones dirigidas. Véase `bench/local/RESULTADOS.md`.
+- Un piloto sin documentación produjo sintaxis de Python en las doce primeras respuestas Turi. Se añadió el diagnóstico `E_PYTHON_DEF` con ejemplo de función y retorno explícito. La medición original se conserva con el compilador y el protocolo congelados.

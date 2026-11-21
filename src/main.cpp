@@ -3,6 +3,9 @@
 #include <charconv>
 #include <iostream>
 #include <sstream>
+#ifndef VELOZ_VERSION
+#define VELOZ_VERSION "dev"
+#endif
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -25,7 +28,7 @@ std::string jsonString(std::string_view input) {
 namespace {
 constexpr auto help = R"(veloz check ARCHIVO [--format]
 veloz run ARCHIVO [--steps N]
-veloz build ARCHIVO -o EJECUTABLE
+veloz build ARCHIVO -o EJECUTABLE [--release] [--cpu x86-64-v3|native]
 veloz emit-ir ARCHIVO
 veloz sig ARCHIVO [SÍMBOLO] [--offset N]
 veloz types ARCHIVO [FUNCIÓN] [--offset N]
@@ -67,7 +70,7 @@ int dispatch(const std::vector<std::string>& args) {
     std::string source, filename;
     try {
         if (args.size() == 1 && (args[0] == "--help" || args[0] == "-h")) { std::cout << help; return 0; }
-        if (args.size() == 1 && args[0] == "--version") { std::cout << "veloz 0.1.0\n"; return 0; }
+        if (args.size() == 1 && args[0] == "--version") { std::cout << "veloz " << VELOZ_VERSION << '\n'; return 0; }
         if (args.size() < 2) usage();
         const auto& cmd = args[0];
         if (cmd == "explain") {
@@ -101,11 +104,19 @@ int dispatch(const std::vector<std::string>& args) {
             runMain(program, std::cout, limits, &std::cin);
         } else if (cmd == "emit-ir" && args.size() == 2) {
             std::cout << emitLLVM(program);
-        } else if (cmd == "build" && args.size() == 4 && args[2] == "-o") {
+        } else if (cmd == "build" && args.size() >= 4 && args[2] == "-o") {
+            BuildOptions options;
+            for (std::size_t i = 4; i < args.size(); ++i) {
+                if (args[i] == "--release" && !options.release) options.release = true;
+                else if (args[i] == "--cpu" && options.cpu.empty() && i + 1 < args.size()) {
+                    options.cpu = args[++i];
+                    if (options.cpu != "x86-64-v3" && options.cpu != "native") usage();
+                } else usage();
+            }
             auto out = pathFrom(args[3]);
             if ((fs::exists(out) && fs::equivalent(file, out)) || fs::weakly_canonical(out) == fs::weakly_canonical(file))
                 throw Diagnostic("E_OUTPUT", "La salida sobrescribiría el archivo fuente", {});
-            buildBinary(program, out);
+            buildBinary(program, out, options);
         } else usage();
         return 0;
     } catch (const Diagnostic& d) {

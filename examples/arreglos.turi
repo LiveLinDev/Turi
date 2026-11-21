@@ -1,0 +1,21 @@
+// Devuelve una copia independiente que el llamador puede modificar.
+fn filled(n: int) -> [int] {
+    return repeat(7, n)
+}
+
+fn main() {
+    let initial = filled(3)
+    var copy = initial
+    copy[0] = 42
+    print(initial[0])
+    print(copy[0])
+    for i in 1..4 {
+        var scratch = repeat(0, i)
+        scratch[i - 1] = i
+        print(scratch[i - 1])
+    }
+}
+
+test "arreglo vacío" {
+    assert len(filled(0)) == 0
+}

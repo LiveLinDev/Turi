@@ -72,6 +72,8 @@ Construye un struct indicando todos los campos por nombre. Las variantes de enum
 | `return a ? x : y` | `if a { return x } else { return y }` |
 | `x++` | `x += 1` |
 
-El núcleo carece de arreglos, mapas, índices de texto, concatenación, flotantes, entrada estándar, punteros y `break`. Resuelve las tareas del núcleo con escalares, registros, variantes y funciones. Para terminar anticipadamente una búsqueda usa `return` dentro del bucle.
+Para almacenar enteros usa `var a = repeat(0, n)`, de tipo `[int]`. Lee con `a[i]`, escribe con `a[i] = valor` y consulta `len(a)`. El índice empieza en cero. Los arreglos se pueden pasar y devolver por valor. Una copia conserva su contenido cuando cambia la otra variable. Los parámetros y los nombres declarados con `let` son de solo lectura. El compilador libera la memoria. En este núcleo los campos de structs y variantes requieren tipos distintos de arreglo.
+
+`readByte()` lee la entrada estándar y devuelve un entero entre 0 y 255, o -1 al finalizar. Dentro de un bloque `test` la entrada está vacía. Para terminar anticipadamente una búsqueda usa `return` dentro del bucle. Los mapas, índices de texto, concatenación, flotantes y `break` quedan fuera de esta versión.
 
 `veloz check archivo.turi` comprueba el archivo completo y después ejecuta sus bloques `test`. El éxito es silencioso. Lee el JSON de error en stderr. Para aplicar un `fix`, reemplaza el intervalo de bytes UTF-8 `[start,end)` por `replacement`. Usa `veloz run archivo.turi` para ejecutar main, `veloz sig archivo.turi` para consultar firmas y `veloz build archivo.turi -o programa.exe` para generar un ejecutable.

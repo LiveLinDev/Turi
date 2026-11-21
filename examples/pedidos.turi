@@ -14,8 +14,12 @@ fn identity<T>(value: T) -> T {
 
 fn amount(order: Order) -> int {
     match order {
-        Order.Cancelled => { return 0 }
-        Order.Active(line) => { return line.units * line.price }
+        Order.Cancelled => {
+            return 0
+        }
+        Order.Active(line) => {
+            return line.units * line.price
+        }
     }
 }
 
