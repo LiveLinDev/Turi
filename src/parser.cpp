@@ -86,7 +86,7 @@ std::vector<Token> lex(std::string_view source, bool keepComments) {
             constexpr std::array two = {"->", "=>", "..", "==", "!=", "<=", ">=", "&&", "||",
                                         "+=", "-=", "*=", "/=", "%="};
             if (contains(two, source.substr(start, 2))) ++cursor;
-            else if (std::string_view("{}(),:!+-*/%<>=.;").find(c) == std::string_view::npos)
+            else if (std::string_view("{}[](),:!+-*/%<>=.;").find(c) == std::string_view::npos)
                 throw Diagnostic("E_CHAR", "Carácter inesperado.", {start, cursor});
         }
         tokens.push_back({kind, {start, cursor}, std::string(source.substr(start, cursor - start))});
@@ -201,6 +201,7 @@ class Parser {
         return tokens[pos++];
     }
     Type type() {
+        if (take("[")) { need("int"); need("]"); return Type::IntArray; }
         if (take("int")) return Type::Int;
         if (take("bool")) return Type::Bool;
         if (take("str")) return Type::Str;
@@ -314,6 +315,15 @@ class Parser {
         auto left = primary(depth);
         while (true) {
             guardDepth(left.height, left.value.span);
+            if (take("[")) {
+                Tree index = expression(1, depth + 1);
+                need("]");
+                Expr access{ExprKind::Index, {left.value.span.start, previous().span.end}, {}, {}};
+                access.args.push_back(std::move(left.value));
+                access.args.push_back(std::move(index.value));
+                left = {std::move(access), 1 + std::max(left.height, index.height)};
+                continue;
+            }
             if (take(".")) {
                 auto attr = name();
                 auto base = left.value.span;
@@ -426,7 +436,15 @@ class Parser {
             need(")");
         } else {
             auto target = name();
-            if (take("(")) {
+            if (take("[")) {
+                stmt.kind = StmtKind::IndexSet;
+                stmt.name = target.text;
+                stmt.exprs.push_back(expression().value);
+                need("]");
+                need("=");
+                newlines();
+                stmt.exprs.push_back(expression().value);
+            } else if (take("(")) {
                 stmt.kind = StmtKind::Call;
                 unsigned height = 1;
                 auto arguments = args(1, height);

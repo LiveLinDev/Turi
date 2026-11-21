@@ -1,4 +1,5 @@
 #include "commands.hpp"
+#include "native_ir.hpp"
 #include <algorithm>
 #include <charconv>
 #include <iomanip>
@@ -49,10 +50,12 @@ std::map<std::string, Effects> effects(const Program& p) {
         auto& fx = result[f.name];
         auto visit = [&](const Stmt& s) {
             fx.io |= s.kind == StmtKind::Print;
-            fx.trap |= s.kind == StmtKind::Assert;
+            fx.trap |= s.kind == StmtKind::Assert || s.kind == StmtKind::IndexSet;
         };
         auto expr = [&](const Expr& e) {
-            if (e.kind == ExprKind::Call && e.text != "len") {
+            fx.trap |= e.kind == ExprKind::Index || (e.kind == ExprKind::Call && e.text == "repeat");
+            fx.io |= e.kind == ExprKind::Call && e.text == "readByte";
+            if (e.kind == ExprKind::Call && e.text != "len" && e.text != "repeat" && e.text != "readByte") {
                 fx.calls.insert(e.text);
                 fx.trap = true; // Llamar puede agotar la profundidad.
             }
@@ -202,6 +205,30 @@ std::string agentCommand(const std::vector<std::string>& args, const fs::path& f
             page.add("{\"name\":" + jsonString(f.name) + ",\"signature\":" + jsonString(signature(program, f)) +
                 ",\"doc\":" + jsonString(docLine(source, f.span)) + ",\"io\":" + (fx.io ? "true" : "false") +
                 ",\"mayTrap\":" + (fx.trap ? "true" : "false") + ",\"hash\":" + jsonString(hash) + "}");
+        }
+    } else if (command == "costes") {
+        for (const auto& f : checked.functions) {
+            if (f.isTest || (!filter.empty() && f.name != filter && !f.name.starts_with(filter+".g"))) continue;
+            // Inspect the same operations that will reach LLVM, including synthesized copies.
+            const auto ir = native::Lowerer(checked, f).lower();
+            for (const auto& block : ir.blocks) {
+                for (const auto& op : block.ops) {
+                    int level;
+                    std::string reason;
+                    switch (op.op) {
+                        case native::Op::RepeatRegion:
+                            level = 2; reason = "El análisis demuestra que el arreglo permanece en este ámbito."; break;
+                        case native::Op::RepeatHeap:
+                            level = 3; reason = "Este valor usa un dueño único para conservar su contenido fuera de la región."; break;
+                        case native::Op::Clone:
+                            level = 3; reason = "Una copia independiente conserva la semántica de valor."; break;
+                        default: continue;
+                    }
+                    page.add("{\"function\":" + jsonString(f.name) + ",\"start\":" +
+                             std::to_string(op.span.start) + ",\"end\":" + std::to_string(op.span.end) +
+                             ",\"level\":" + std::to_string(level) + ",\"reason\":" + jsonString(reason) + "}");
+                }
+            }
         }
     } else {
         for (const auto& f : checked.functions) {

@@ -8,10 +8,15 @@
 
 namespace veloz::native {
 
-struct Value { Type type; unsigned id; };
+struct Value {
+    Type type; unsigned id;
+    std::optional<unsigned> owner{}; // temporary heap slot, transferred or dropped after the expression
+    bool freshRegion = false;
+};
 enum class Op {
     Int, Bool, Text, Load, Store, Call, Length, Negate, Not, Binary, Print, Assert,
-    Construct, Field, Tag
+    Construct, Field, Tag, RepeatHeap, RepeatRegion, Clone, Drop, ClearOwner,
+    RegionMark, RegionRewind, Index, IndexSet, ReadByte
 };
 struct Operation {
     Op op;
@@ -34,6 +39,7 @@ struct FunctionIR {
     const Function& source;
     std::vector<Type> slots;
     std::vector<Block> blocks{1};
+    bool usesRegion = false;
 };
 
 // Registers are immutable. Locals use typed frame slots allocated once per call.
@@ -41,7 +47,13 @@ struct FunctionIR {
 class Lowerer {
     const Program& program;
     FunctionIR fn;
-    std::vector<std::unordered_map<std::string, unsigned>> scopes{1};
+    struct Scope {
+        std::unordered_map<std::string, unsigned> names;
+        std::vector<unsigned> arrays;
+        std::optional<Value> mark;
+    };
+    std::vector<Scope> scopes{1};
+    std::vector<unsigned> temporaries;
     unsigned here = 0;
     unsigned nextValue = 0;
 
@@ -55,12 +67,12 @@ class Lowerer {
     }
     unsigned declare(const std::string& name, Type type) {
         const auto slot = allocate(type);
-        scopes.back().emplace(name, slot);
+        scopes.back().names.emplace(name, slot);
         return slot;
     }
     unsigned lookup(const std::string& name) const {
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-            if (auto found = it->find(name); found != it->end()) return found->second;
+            if (auto found = it->names.find(name); found != it->names.end()) return found->second;
         }
         throw std::logic_error("unresolved local in checked program");
     }
@@ -94,6 +106,45 @@ class Lowerer {
     }
     Value load(unsigned slot) { return emit(Op::Load, fn.slots.at(slot), {}, {}, slot); }
     void store(unsigned slot, Value value) { emit(Op::Store, Type::Void, {value}, {}, slot); }
+    void drop(unsigned slot) { emit(Op::Drop, Type::Void, {}, {}, slot); }
+    Value track(Value value) {
+        if (value.type == Type::IntArray && !value.freshRegion) {
+            const auto slot = allocate(Type::IntArray);
+            store(slot, value);
+            temporaries.push_back(slot);
+            value.owner = slot;
+        }
+        return value;
+    }
+    Value own(Value value, Span span) {
+        if (value.type != Type::IntArray || value.freshRegion) return value;
+        if (!value.owner) return emit(Op::Clone, Type::IntArray, {value}, {}, 0, span);
+        emit(Op::ClearOwner, Type::Void, {}, {}, *value.owner);
+        value.owner.reset();
+        return value;
+    }
+    void dropTemporaries() {
+        for (auto it = temporaries.rbegin(); it != temporaries.rend(); ++it) drop(*it);
+        temporaries.clear();
+    }
+    void markRegion(const std::vector<Stmt>& statements) {
+        for (const auto& s : statements) {
+            if ((s.kind == StmtKind::Let || s.kind == StmtKind::Var) &&
+                s.exprs.at(0).allocation == ArrayAllocation::Region) {
+                fn.usesRegion = true;
+                scopes.back().mark = emit(Op::RegionMark, Type::Void);
+                return;
+            }
+        }
+    }
+    void release(const Scope& scope) {
+        for (auto it = scope.arrays.rbegin(); it != scope.arrays.rend(); ++it) drop(*it);
+        if (scope.mark) emit(Op::RegionRewind, Type::Void, {*scope.mark});
+    }
+    void cleanupReturn() {
+        dropTemporaries();
+        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) release(*it);
+    }
     void jump(unsigned target) {
         Block& current = fn.blocks[here];
         if (current.exit == Exit::Open) {
@@ -128,6 +179,11 @@ class Lowerer {
         case ExprKind::Boolean: return emit(Op::Bool, e.type, {}, e.text);
         case ExprKind::String: return emit(Op::Text, e.type, {}, e.text);
         case ExprKind::Name: return load(lookup(e.text));
+        case ExprKind::Index: {
+            const auto base = expression(e.args.at(0));
+            const auto index = expression(e.args.at(1));
+            return emit(Op::Index, Type::Int, {base, index}, {}, 0, e.span);
+        }
         case ExprKind::Construct: return construct(e);
         case ExprKind::Field: {
             const auto base = expression(e.args.at(0));
@@ -138,7 +194,13 @@ class Lowerer {
         case ExprKind::Call: {
             std::vector<Value> arguments;
             for (const auto& arg : e.args) arguments.push_back(expression(arg));
-            return emit(e.text == "len" ? Op::Length : Op::Call, e.type, std::move(arguments), e.text, 0, e.span);
+            Op op = e.text == "len" ? Op::Length : Op::Call;
+            if (e.text == "readByte") op = Op::ReadByte;
+            if (e.text == "repeat")
+                op = e.allocation == ArrayAllocation::Region ? Op::RepeatRegion : Op::RepeatHeap;
+            auto value = emit(op, e.type, std::move(arguments), e.text, 0, e.span);
+            value.freshRegion = op == Op::RepeatRegion;
+            return track(value);
         }
         case ExprKind::Binary: {
             if (e.text == "&&" || e.text == "||") return lazy(e);
@@ -153,15 +215,19 @@ class Lowerer {
         for (const auto& stmt : statements) {
             if (fn.blocks[here].exit != Exit::Open) break;
             statement(stmt);
+            dropTemporaries();
         }
     }
     void nested(const std::vector<Stmt>& statements) {
         scopes.emplace_back();
+        markRegion(statements);
         sequence(statements);
+        if (fn.blocks[here].exit == Exit::Open) release(scopes.back());
         scopes.pop_back();
     }
     void ifStatement(const Stmt& s) {
         const auto cond = expression(s.exprs[0]);
+        dropTemporaries();
         const auto yes = block();
         const auto no = block();
         const auto end = block();
@@ -184,6 +250,7 @@ class Lowerer {
         if (counting) {
             const auto lower = expression(s.exprs[0]);
             upper = expression(s.exprs[1]);
+            dropTemporaries();
             scopes.emplace_back();
             iterator = declare(s.name, Type::Int);
             store(*iterator, lower);
@@ -196,10 +263,10 @@ class Lowerer {
         const auto condition = counting
             ? emit(Op::Binary, Type::Bool, {load(*iterator), upper}, "<")
             : expression(s.exprs[0]);
+        dropTemporaries();
         branch(condition, body, end);
         here = body;
-        if (counting) sequence(s.body);
-        else nested(s.body);
+        nested(s.body);
         if (counting && fn.blocks[here].exit == Exit::Open) {
             const auto n = load(*iterator);
             const auto one = emit(Op::Int, Type::Int, {}, "1");
@@ -212,6 +279,7 @@ class Lowerer {
     }
     void match(const Stmt& s) {
         auto candidate = expression(s.exprs.at(0));
+        dropTemporaries();
         const auto& decl = *program.declaration(candidate.type);
         const auto tag = emit(Op::Tag, Type::Int, {candidate});
         const auto dispatch = here;
@@ -229,12 +297,14 @@ class Lowerer {
             here = block();
             fn.blocks[dispatch].targets[variant] = here;
             scopes.emplace_back();
+            markRegion(arm.body);
             const auto& fields = decl.variants[variant].fields;
             for (unsigned i = 0; i < arm.names.size(); ++i) {
                 auto v = field(candidate, fields.at(i).type, {variant + 1, i});
                 store(declare(arm.names[i], v.type), v);
             }
             sequence(arm.body);
+            if (fn.blocks[here].exit == Exit::Open) release(scopes.back());
             scopes.pop_back();
             fallsThrough = fallsThrough || fn.blocks[here].exit == Exit::Open;
             jump(end);
@@ -246,11 +316,26 @@ class Lowerer {
         switch (s.kind) {
         case StmtKind::Let:
         case StmtKind::Var: {
-            const auto v = expression(s.exprs[0]);
-            store(declare(s.name, v.type), v);
+            const auto v = own(expression(s.exprs[0]), s.exprs[0].span);
+            const auto slot = declare(s.name, v.type);
+            store(slot, v);
+            if (v.type == Type::IntArray && !v.freshRegion) scopes.back().arrays.push_back(slot);
             break;
         }
-        case StmtKind::Assign: store(lookup(s.name), expression(s.exprs[0])); break;
+        case StmtKind::Assign: {
+            const auto v = own(expression(s.exprs[0]), s.exprs[0].span);
+            const auto slot = lookup(s.name);
+            if (v.type == Type::IntArray) drop(slot);
+            store(slot, v);
+            break;
+        }
+        case StmtKind::IndexSet: {
+            const auto base = load(lookup(s.name));
+            const auto index = expression(s.exprs.at(0));
+            const auto value = expression(s.exprs.at(1));
+            emit(Op::IndexSet, Type::Void, {base, index, value}, {}, 0, s.span);
+            break;
+        }
         case StmtKind::Call: expression(s.exprs[0]); break;
         case StmtKind::If: ifStatement(s); break;
         case StmtKind::While:
@@ -258,7 +343,8 @@ class Lowerer {
         case StmtKind::Match: match(s); break;
         case StmtKind::Return: {
             std::optional<Value> v;
-            if (!s.exprs.empty()) v = expression(s.exprs[0]);
+            if (!s.exprs.empty()) v = own(expression(s.exprs[0]), s.exprs[0].span);
+            cleanupReturn();
             fn.blocks[here].exit = Exit::Return;
             fn.blocks[here].value = v;
             break;
@@ -271,8 +357,10 @@ public:
     Lowerer(const Program& program, const Function& f) : program(program), fn{f, {}, {Block{}}} {}
     FunctionIR lower() {
         for (const auto& p : fn.source.params) declare(p.name, p.type);
+        markRegion(fn.source.body);
         sequence(fn.source.body);
         if (fn.blocks[here].exit == Exit::Open) {
+            cleanupReturn();
             fn.blocks[here].exit = fn.source.result == Type::Void ? Exit::Return : Exit::Unreachable;
         }
         return std::move(fn);

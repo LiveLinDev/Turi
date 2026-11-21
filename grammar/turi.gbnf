@@ -16,13 +16,13 @@ generics ::= "<" h nl* pascal ("," h nl* pascal)* ">" h
 function ::= "fn" gap name generics? "(" h nl* (param ("," h nl* param)*)? ")" h ("->" h nl* type)? block
 test ::= "test" h string block
 param ::= name ":" h type
-type ::= ("int" | "bool" | "str" | "void") h | pascal
+type ::= ("int" | "bool" | "str" | "void") h | pascal | "[" h "int" h "]" h
 block ::= "{" h nl* (statement (nl+ statement)* nl*)? "}" h
 statement ::= binding | assignment-or-call | conditional | loop | range | result | assertion | print | match
 match ::= "match" after-word "{" h nl* (arm (nl+ arm)* nl*)? "}" h
 arm ::= pascal "." h pascal ("(" h nl* (name ("," h nl* name)*)? ")" h)? "=>" h nl* (block | statement)
 binding ::= ("let" | "var") gap name (":" h type)? "=" h nl* expr
-assignment-or-call ::= name (call | assignment-op h nl* expr)
+assignment-or-call ::= name (call | assignment-op h nl* expr | index "=" h nl* expr)
 assignment-op ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="
 conditional ::= "if" after-word block ("else" (h block | gap conditional))?
 loop ::= "while" after-word block
@@ -34,7 +34,8 @@ after-word ::= gap expr | h punct-expr tail
 expr ::= unary tail
 tail ::= (binary h nl* unary)*
 unary ::= (punct-expr | (number | bool | name call? | construct) access*)
-access ::= "." h name
+access ::= "." h name | index
+index ::= "[" h expr "]" h
 construct ::= pascal ("." h pascal call? | "{" h nl* (named-field ("," h nl* named-field)* nl*)? "}" h)
 named-field ::= name ":" h expr
 punct-expr ::= ("-" | "!") h nl* unary | ("(" h nl* expr ")" h | string) access*

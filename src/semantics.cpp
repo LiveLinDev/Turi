@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <ostream>
+#include <istream>
 #include <optional>
 #include <string_view>
 #include <unordered_map>
@@ -99,7 +100,10 @@ struct Variable {
     Type type;
     bool writable;
     Span declared;
+    Expr* regionSite = nullptr;
 };
+
+enum class ArrayUse { Ordinary, Inspect, Copy };
 
 struct Constructor {
     Type type;
@@ -127,6 +131,9 @@ struct Types {
                                     "enum State { Ready }", seen->second.variant->span);
                 std::unordered_map<std::string, Span> fieldNames;
                 for (const auto& f : v.fields) {
+                    if (f.type == Type::IntArray)
+                        fail("E_ARRAY_FIELD", "Los campos [int] requieren destrucción de agregados, pendiente en este núcleo",
+                             f.span, "fn first(a: [int]) -> int { return a[0] }");
                     const auto [original, unique] = fieldNames.emplace(f.name, f.span);
                     if (!unique) fail("E_DUP_FIELD", "Campo duplicado: " + f.name, f.span,
                                       "struct Point { x: int }", original->second);
@@ -136,7 +143,7 @@ struct Types {
     }
 
     void known(Type type, Span where, bool allowVoid = false) const {
-        if (type == Type::Int || type == Type::Bool || type == Type::Str) return;
+        if (type == Type::Int || type == Type::Bool || type == Type::Str || type == Type::IntArray) return;
         if (type == Type::Void) {
             if (!allowVoid) requireValue(type, where);
             return;
@@ -220,11 +227,12 @@ struct Checker {
         checkTypes(types.program, actual, expected, span, related);
     }
 
-    void declare(const std::string& name, Type type, bool writable, Span span) {
+    Variable& declare(const std::string& name, Type type, bool writable, Span span) {
         const auto [it, added] = locals.levels.back().emplace(name, Variable{type, writable, span});
         if (!added) fail("E_DUP_NAME", "Nombre duplicado en este bloque: " + name,
                          span, "let other = 1", it->second.declared);
         reserveValue(type, span);
+        return it->second;
     }
 
     Variable& lookup(const std::string& name, Span span) {
@@ -244,10 +252,27 @@ struct Checker {
     }
 
     Type inferCall(Expr& expr) {
+        if (expr.text == "readByte") {
+            checkCallArity(expr, 0);
+            return Type::Int;
+        }
         if (expr.text == "len") {
             checkCallArity(expr, 1);
-            requireType(typeOf(expr.args[0]), Type::Str, expr.args[0].span);
+            auto arg = typeOf(expr.args[0], ArrayUse::Inspect);
+            if (arg != Type::Str && arg != Type::IntArray) {
+                Diagnostic d("E_TYPE", "len admite texto o un array de enteros", expr.args[0].span);
+                d.expected = "str | [int]";
+                d.actual = types.program.nameOf(arg);
+                d.example = "len(repeat(1, 4))";
+                throw d;
+            }
             return Type::Int;
+        }
+        if (expr.text == "repeat") {
+            checkCallArity(expr, 2);
+            for (auto& arg : expr.args) requireType(typeOf(arg), Type::Int, arg.span);
+            expr.allocation = ArrayAllocation::Owner;
+            return Type::IntArray;
         }
         if (generics.contains(expr.text)) {
             std::vector<Type> actual;
@@ -275,7 +300,7 @@ struct Checker {
         const auto leftType = typeOf(left);
         if (expr.text == "==" || expr.text == "!=") {
             requireValue(leftType, left.span);
-            if (leftType >= Type::NamedBase)
+            if (leftType >= Type::NamedBase || leftType == Type::IntArray)
                 fail("E_EQUALITY", "El agregado se compara por sus campos escalares", left.span, "a.x == b.x");
             requireType(typeOf(right), leftType, right.span, left.span);
             return Type::Bool;
@@ -309,8 +334,8 @@ struct Checker {
     Type field(Expr& expr) {
         auto& base = expr.args[0];
         const auto type = typeOf(base);
-        if (type == Type::Str && expr.text == "length") {
-            Diagnostic e("E_LENGTH", "La longitud de texto se obtiene con len", expr.span);
+        if ((type == Type::Str || type == Type::IntArray) && expr.text == "length") {
+            Diagnostic e("E_LENGTH", "La longitud se obtiene con len", expr.span);
             e.example = R"(len("hola"))";
             if (base.span.end <= types.program.source.size()) {
                 auto text = types.program.source.substr(base.span.start, base.span.end - base.span.start);
@@ -327,12 +352,24 @@ struct Checker {
         return v.fields[index].type;
     }
 
-    Type typeOf(Expr& expr) {
+    Type typeOf(Expr& expr, ArrayUse use = ArrayUse::Ordinary) {
+        expr.allocation = ArrayAllocation::None;
         switch (expr.kind) {
             case ExprKind::Integer: parseInteger(expr); expr.type = Type::Int; break;
             case ExprKind::Boolean: expr.type = Type::Bool; break;
             case ExprKind::String: expr.type = Type::Str; break;
-            case ExprKind::Name: expr.type = lookup(expr.text, expr.span).type; break;
+            case ExprKind::Name: {
+                auto& var = lookup(expr.text, expr.span);
+                expr.type = var.type;
+                if (var.regionSite && use != ArrayUse::Inspect) var.regionSite->allocation = ArrayAllocation::Owner;
+                if (var.type == Type::IntArray && use == ArrayUse::Copy) expr.allocation = ArrayAllocation::Owner;
+                break;
+            }
+            case ExprKind::Index:
+                requireType(typeOf(expr.args[0], ArrayUse::Inspect), Type::IntArray, expr.args[0].span);
+                requireType(typeOf(expr.args[1]), Type::Int, expr.args[1].span);
+                expr.type = Type::Int;
+                break;
             case ExprKind::Call: expr.type = inferCall(expr); break;
             case ExprKind::Unary: {
                 auto type = expr.text == "!" ? Type::Bool : Type::Int;
@@ -395,13 +432,19 @@ struct Checker {
         switch (s.kind) {
             case StmtKind::Let: case StmtKind::Var: {
                 auto& init = s.exprs[0];
-                const auto type = typeOf(init);
+                const auto type = typeOf(init, ArrayUse::Copy);
                 requireValue(type, init.span);
                 if (s.annotation != Type::Unknown) {
                     types.known(s.annotation, s.span);
                     requireType(type, s.annotation, init.span, s.span);
                 }
-                declare(s.name, type, s.kind == StmtKind::Var, s.span);
+                auto& var = declare(s.name, type, s.kind == StmtKind::Var, s.span);
+                if (init.kind == ExprKind::Call && init.text == "repeat") {
+                    // Every use resolves its actual binding, including inside nested scopes.
+                    // Any use beyond len/index invalidates the provisional region proof.
+                    init.allocation = ArrayAllocation::Region;
+                    var.regionSite = &init;
+                }
                 break;
             }
             case StmtKind::Assign: {
@@ -409,7 +452,17 @@ struct Checker {
                 if (!var.writable)
                     fail("E_IMMUTABLE", "El nombre es de solo lectura: " + s.name, s.span,
                          "var total = 0\ntotal = 1", var.declared);
-                requireType(typeOf(s.exprs[0]), var.type, s.exprs[0].span, var.declared);
+                if (var.regionSite) var.regionSite->allocation = ArrayAllocation::Owner;
+                requireType(typeOf(s.exprs[0], ArrayUse::Copy), var.type, s.exprs[0].span, var.declared);
+                break;
+            }
+            case StmtKind::IndexSet: {
+                auto& var = lookup(s.name, s.span);
+                if (!var.writable)
+                    fail("E_IMMUTABLE", "El array es de solo lectura: " + s.name, s.span,
+                         "var a = repeat(0, 4)\na[0] = 1", var.declared);
+                requireType(var.type, Type::IntArray, s.span, var.declared);
+                for (auto& arg : s.exprs) requireType(typeOf(arg), Type::Int, arg.span);
                 break;
             }
             case StmtKind::Call: typeOf(s.exprs[0]); break;
@@ -433,7 +486,7 @@ struct Checker {
             case StmtKind::Return:
                 if (s.exprs.empty()) requireType(Type::Void, current.result, s.span, current.span);
                 else {
-                    const auto type = typeOf(s.exprs[0]);
+                    const auto type = typeOf(s.exprs[0], ArrayUse::Copy);
                     requireValue(type, s.exprs[0].span);
                     requireType(type, current.result, s.exprs[0].span, current.span);
                 }
@@ -442,7 +495,8 @@ struct Checker {
             case StmtKind::Print: {
                 const auto type = typeOf(s.exprs[0]);
                 requireValue(type, s.exprs[0].span);
-                if (type >= Type::NamedBase) fail("E_PRINT", "print admite int, bool o str", s.span, "print(p.x)");
+                if (type >= Type::NamedBase || type == Type::IntArray)
+                    fail("E_PRINT", "print admite int, bool o str", s.span, "print(42)");
                 break;
             }
             case StmtKind::Match: return match(s);
@@ -459,6 +513,10 @@ void check(Program& program) {
         Types declared(program);
         Layouts layouts{declared, {}, {}};
         for (const auto& d : program.data) sizes.emplace(d.type, layouts.measure(d.type, d.span).bytes);
+    }
+    for (const auto& f : program.functions) {
+        if (!f.isTest && (f.name == "repeat" || f.name == "readByte"))
+            fail("E_RESERVED", "Nombre reservado: " + f.name, f.span, "fn count() -> int { return 3 }");
     }
     GenericInstances generics(program);
     Types types(program);
@@ -496,7 +554,9 @@ namespace {
 // host call stack. Only the bounded syntax tree is visited recursively.
 struct Aggregate;
 using AggregatePtr = std::shared_ptr<const Aggregate>;
-using Value = std::variant<std::monostate, Integer, bool, std::string_view, AggregatePtr>;
+using IntBuffer = std::vector<Integer>;
+using ArrayPtr = std::shared_ptr<IntBuffer>;
+using Value = std::variant<std::monostate, Integer, bool, std::string_view, AggregatePtr, ArrayPtr>;
 struct Aggregate {
     std::string_view tag;
     std::vector<Value> fields;
@@ -504,7 +564,7 @@ struct Aggregate {
 enum class Op {
     Literal, Read, Call, Unary, Binary, ShortCircuit, Bind, Write, Discard, Print,
     Assert, IfFalse, Jump, Enter, Leave, RangeEnter, RangeBind, RangeNext, Return,
-    Construct, Field, MatchArm
+    Construct, Field, MatchArm, Index, IndexSet
 };
 struct Instruction {
     Op op;
@@ -533,6 +593,10 @@ struct EvaluationOrder {
             case ExprKind::Field:
                 expression(e.args[0]);
                 code.push_back({Op::Field, e.span, &e}); return;
+            case ExprKind::Index:
+                expression(e.args[0]);
+                expression(e.args[1]);
+                code.push_back({Op::Index, e.span, &e}); return;
             case ExprKind::Construct:
                 for (const auto& arg : e.args) expression(arg);
                 code.push_back({Op::Construct, e.span, &e}); return;
@@ -568,6 +632,7 @@ struct EvaluationOrder {
         switch (s.kind) {
             case StmtKind::Let: case StmtKind::Var: code.push_back({Op::Bind, s.span, nullptr, &s}); return;
             case StmtKind::Assign: code.push_back({Op::Write, s.span, nullptr, &s}); return;
+            case StmtKind::IndexSet: code.push_back({Op::IndexSet, s.span, nullptr, &s}); return;
             case StmtKind::Call: code.push_back({Op::Discard, s.span}); return;
             case StmtKind::Print: code.push_back({Op::Print, s.span}); return;
             case StmtKind::Assert: code.push_back({Op::Assert, s.span}); return;
@@ -640,6 +705,24 @@ Value binary(const Expr& expr, Value lhs, Value rhs) {
 }
 
 struct Range { Integer cursor, end; };
+
+[[noreturn]] void allocationFailed(Span span) {
+    fail("R_ALLOC", "La reserva del array excede los recursos disponibles", span, "repeat(0, 8)");
+}
+
+ArrayPtr repeatArray(Integer element, Integer count, Span span) {
+    if (count < 0) fail("R_ARRAY_SIZE", "La longitud debe ser no negativa", span, "repeat(0, 8)");
+    if (count > maxArrayLength) allocationFailed(span);
+    try {
+        return std::make_shared<IntBuffer>(static_cast<std::size_t>(count), element);
+    } catch (const std::bad_alloc&) { allocationFailed(span); }
+}
+
+std::size_t arrayIndex(const IntBuffer& array, Integer index, Span where) {
+    if (index < 0 || static_cast<std::uint64_t>(index) >= array.size())
+        fail("R_BOUNDS", "El índice está fuera del array", where, "a[len(a) - 1]");
+    return static_cast<std::size_t>(index);
+}
 struct Frame {
     const Code* code;
     std::size_t ip, base;
@@ -653,6 +736,7 @@ struct Interpreter {
     std::vector<Frame> frames;
     std::vector<Value> operands;
     std::ostream& out;
+    std::istream* input = nullptr;
     Limits limits;
 
     Interpreter(const Program& program, std::ostream& stream, Limits budget) : out(stream), limits(budget) {
@@ -704,12 +788,40 @@ struct Interpreter {
                     break;
                 case Op::Read: operands.push_back(*frame.locals.find(i.expr->text)); break;
                 case Op::Call:
-                    if (i.expr->text == "len") {
-                        const auto length = std::get<std::string_view>(pop()).size();
+                    if (i.expr->text == "readByte") {
+                        auto byte = input ? input->get() : std::char_traits<char>::eof();
+                        operands.emplace_back(static_cast<Integer>(byte == std::char_traits<char>::eof() ? -1 : byte));
+                    } else if (i.expr->text == "len") {
+                        auto value = pop();
+                        const auto array = std::get_if<ArrayPtr>(&value);
+                        const auto length = array ? (*array)->size() : std::get<std::string_view>(value).size();
                         if (length > static_cast<std::uint64_t>(maxInt)) overflow(i.span);
                         operands.emplace_back(static_cast<Integer>(length));
+                    } else if (i.expr->text == "repeat") {
+                        auto count = std::get<Integer>(pop());
+                        auto element = std::get<Integer>(pop());
+                        operands.emplace_back(repeatArray(element, count, i.span));
                     } else activate(*functions.at(i.expr->text), i.span);
                     break;
+                case Op::Index: {
+                    auto index = std::get<Integer>(pop());
+                    auto array = std::get<ArrayPtr>(pop());
+                    operands.emplace_back((*array)[arrayIndex(*array, index, i.span)]);
+                    break;
+                }
+                case Op::IndexSet: {
+                    auto element = std::get<Integer>(pop());
+                    auto index = std::get<Integer>(pop());
+                    auto& array = std::get<ArrayPtr>(*frame.locals.find(i.stmt->name));
+                    auto position = arrayIndex(*array, index, i.span);
+                    // The independent reference VM preserves value semantics using copy-on-write.
+                    if (array.use_count() > 1) {
+                        try { array = std::make_shared<IntBuffer>(*array); }
+                        catch (const std::bad_alloc&) { allocationFailed(i.span); }
+                    }
+                    (*array)[position] = element;
+                    break;
+                }
                 case Op::Unary:
                     if (i.expr->text == "!") operands.emplace_back(!std::get<bool>(pop()));
                     else {
@@ -805,8 +917,9 @@ void runTests(const Program& program, std::ostream& output, Limits limits) {
     }
 }
 
-void runMain(const Program& program, std::ostream& output, Limits limits) {
+void runMain(const Program& program, std::ostream& output, Limits limits, std::istream* input) {
     Interpreter interpreter(program, output, limits);
+    interpreter.input = input;
     const auto main = interpreter.functions.find("main");
     if (main == interpreter.functions.end()) fail("E_MAIN", "Falta la función main", {}, "fn main() {}");
     interpreter.execute(*main->second);

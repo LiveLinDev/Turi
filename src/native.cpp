@@ -1,5 +1,6 @@
 #include "native_ir.hpp"
 #include "native_runtime.hpp"
+#include "native_arrays.hpp"
 
 #include <charconv>
 #include <map>
@@ -14,6 +15,7 @@ std::string llvmType(Type type) {
     case Type::Int: return "i64";
     case Type::Bool: return "i1";
     case Type::Str: return "%text";
+    case Type::IntArray: return "%array";
     case Type::Void: return "void";
     default: throw std::logic_error("unresolved type during LLVM emission");
     }
@@ -41,6 +43,7 @@ class ModuleWriter {
     const Program& program;
     std::map<std::string, unsigned> pool;
     std::ostringstream bodies;
+    bool emitsRegion = false;
 
     static void fieldList(std::ostream& out, const Variant& variant) {
         out << "{ ";
@@ -165,6 +168,33 @@ class ModuleWriter {
             bodies << ")\n";
             break;
         case Op::Length: bodies << "  " << result << " = extractvalue " << first() << ", 1\n"; break;
+        case Op::ReadByte:
+            bodies << "  " << result << ".raw = call i32 @getchar()\n"
+                   << "  " << result << " = sext i32 " << result << ".raw to i64\n";
+            break;
+        case Op::RepeatHeap:
+        case Op::RepeatRegion:
+            bodies << "  " << result << " = call %array @tz.repeat(" << first() << ", " << operand(op.inputs[1])
+                   << ", ptr " << (op.op == Op::RepeatRegion ? "%arena" : "null") << ", "
+                   << diagnostic("R_ARRAY_SIZE", op.span) << ", " << diagnostic("R_ALLOC", op.span) << ")\n";
+            break;
+        case Op::Clone:
+            bodies << "  " << result << " = call %array @tz.clone(" << first() << ", "
+                   << diagnostic("R_ALLOC", op.span) << ")\n";
+            break;
+        case Op::Drop: bodies << "  call void @tz.drop(ptr %slot" << op.slot << ")\n"; break;
+        case Op::ClearOwner: bodies << "  store %array zeroinitializer, ptr %slot" << op.slot << "\n"; break;
+        case Op::RegionMark: bodies << "  " << result << " = call %mark @tz.mark(ptr %arena)\n"; break;
+        case Op::RegionRewind:
+            bodies << "  call void @tz.rewind(ptr %arena, %mark " << reg(op.inputs.at(0)) << ")\n";
+            break;
+        case Op::Index:
+        case Op::IndexSet:
+            bodies << "  " << result << ".ptr = call ptr @tz.at(" << first() << ", " << operand(op.inputs.at(1))
+                   << ", " << diagnostic("R_BOUNDS", op.span) << ")\n";
+            if (op.op == Op::Index) bodies << "  " << result << " = load i64, ptr " << result << ".ptr\n";
+            else bodies << "  store " << operand(op.inputs.at(2)) << ", ptr " << result << ".ptr\n";
+            break;
         case Op::Construct: construct(op); break;
         case Op::Field:
             bodies << "  " << result << " = extractvalue " << first();
@@ -204,7 +234,10 @@ class ModuleWriter {
         bodies << "b" << i << ":\n";
         for (const auto& op : block.ops) operation(op);
         switch (block.exit) {
-        case Exit::Return: bodies << "  ret " << (block.value ? operand(*block.value) : "void") << "\n"; break;
+        case Exit::Return:
+            if (emitsRegion) bodies << "  call void @tz.finish(ptr %arena)\n";
+            bodies << "  ret " << (block.value ? operand(*block.value) : "void") << "\n";
+            break;
         case Exit::Jump: bodies << "  br label %b" << block.yes << "\n"; break;
         case Exit::Branch:
             bodies << "  br " << operand(*block.value) << ", label %b" << block.yes << ", label %b" << block.no << "\n";
@@ -224,12 +257,15 @@ public:
     explicit ModuleWriter(const Program& program) : program(program) {}
     void function(const FunctionIR& ir) {
         const auto& f = ir.source;
+        emitsRegion = ir.usesRegion;
         bodies << "define internal " << llvmType(f.result) << " " << symbol(f.name) << "(i32 %depth";
         for (unsigned i = 0; i < f.params.size(); ++i) bodies << ", " << llvmType(f.params[i].type) << " %arg" << i;
-        bodies << ") {\nentry:\n  %atLimit = icmp uge i32 %depth, 256\n"
+        bodies << ") sanitize_address {\nentry:\n  %atLimit = icmp uge i32 %depth, 256\n"
                << "  %childDepth = add i32 %depth, 1\n";
+        if (ir.usesRegion) bodies << "  %arena = alloca ptr\n  store ptr null, ptr %arena\n";
         for (unsigned i = 0; i < ir.slots.size(); ++i) {
             bodies << "  %slot" << i << " = alloca " << llvmType(ir.slots[i]) << "\n";
+            if (ir.slots[i] == Type::IntArray) bodies << "  store %array zeroinitializer, ptr %slot" << i << "\n";
         }
         for (unsigned i = 0; i < f.params.size(); ++i) {
             bodies << "  store " << llvmType(f.params[i].type) << " %arg" << i << ", ptr %slot" << i << "\n";
@@ -242,9 +278,10 @@ public:
         std::ostringstream out;
         out << "; Turi, whole program\n";
         writeRuntime(out);
+        writeArrayRuntime(out);
         writeTypes(out);
         writeStrings(out);
-        out << bodies.str() << "define i32 @main() {\n  call void @tz.init()\n"
+        out << bodies.str() << "define i32 @main() sanitize_address {\n  call void @tz.init()\n"
             << "  call void @turi.main(i32 1)\n  ret i32 0\n}\n";
         return out.str();
     }
