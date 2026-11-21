@@ -1,0 +1,16 @@
+fn divisorOk(n: int) -> bool {
+    return n != 0 && 42 / n > 0
+}
+
+fn main() {
+    let title = "Perú"
+    print(title)
+    print(len(title))
+    print(divisorOk(0))
+}
+
+test "texto y cortocircuito" {
+    assert len("Perú") == 5
+    assert !divisorOk(0)
+    assert divisorOk(7)
+}

@@ -1,0 +1,19 @@
+// Calcula el máximo común divisor de dos enteros positivos.
+fn gcd(first: int, second: int) -> int {
+    var a = first
+    var b = second
+    while b != 0 {
+        let remainder = a % b
+        a = b
+        b = remainder
+    }
+    return a
+}
+
+fn main() {
+    print(gcd(1071, 462))
+}
+
+test "divisor común" {
+    assert gcd(1071, 462) == 21
+}

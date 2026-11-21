@@ -1,0 +1,30 @@
+struct Line {
+    units: int
+    price: int
+}
+
+enum Order {
+    Cancelled
+    Active(line: Line)
+}
+
+fn identity<T>(value: T) -> T {
+    return value
+}
+
+fn amount(order: Order) -> int {
+    match order {
+        Order.Cancelled => { return 0 }
+        Order.Active(line) => { return line.units * line.price }
+    }
+}
+
+fn main() {
+    let line = Line { price: 25, units: 3 }
+    print(amount(identity(Order.Active(line))))
+}
+
+test "precio de un pedido" {
+    assert amount(Order.Cancelled) == 0
+    assert amount(Order.Active(Line { units: 2, price: 40 })) == 80
+}

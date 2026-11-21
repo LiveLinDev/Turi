@@ -1,0 +1,116 @@
+// Generado desde turi.gbnf mediante sync.py.
+
+// Turi, núcleo de Turi. Las producciones de expresión generan la sintaxis.
+// El compilador aplica las precedencias de SPEC.md al construir el árbol.
+start: BOM? h NL* (declaration (NL+ declaration)* NL*)? COMMENT?
+
+BOM: "\uFEFF"
+h: /[ \t]/*
+GAP: /[ \t]/+
+COMMENT: "//" /[^\r\n]/*
+NL: COMMENT? "\r"? "\n" (/[ \t]/*)
+
+declaration: function
+     | test
+     | STRUCT
+     | ENUM
+
+STRUCT: "struct" GAP PASCAL "{" (/[ \t]/*) NL* (PARAM (DECL_SEPARATOR PARAM)* DECL_SEPARATOR?)? "}" (/[ \t]/*)
+ENUM: "enum" GAP PASCAL "{" (/[ \t]/*) NL* (VARIANT (DECL_SEPARATOR VARIANT)* DECL_SEPARATOR?)? "}" (/[ \t]/*)
+
+DECL_SEPARATOR: "," (/[ \t]/*) NL*
+     | NL+
+
+VARIANT: PASCAL ("(" (/[ \t]/*) NL* (PARAM ("," (/[ \t]/*) NL* PARAM)*)? ")" (/[ \t]/*))?
+PASCAL: /[A-Z]/ /[A-Za-z0-9]/* (/[ \t]/*)
+GENERICS: "<" (/[ \t]/*) NL* PASCAL ("," (/[ \t]/*) NL* PASCAL)* ">" (/[ \t]/*)
+function: "fn" GAP NAME GENERICS? "(" h NL* (PARAM ("," h NL* PARAM)*)? ")" h ("->" h NL* TYPE)? block
+test: "test" h STRING block
+PARAM: NAME ":" (/[ \t]/*) TYPE
+
+TYPE: ("int" | "bool" | "str" | "void") (/[ \t]/*)
+     | PASCAL
+
+block: "{" h NL* (statement (NL+ statement)* NL*)? "}" h
+
+statement: binding
+     | assignment_or_call
+     | conditional
+     | loop
+     | range
+     | result
+     | assertion
+     | print
+     | match
+
+match: "match" after_word "{" h NL* (arm (NL+ arm)* NL*)? "}" h
+arm: PASCAL "." h PASCAL ("(" h NL* (NAME ("," h NL* NAME)*)? ")" h)? "=>" h NL* (block | statement)
+binding: ("let" | "var") GAP NAME (":" h TYPE)? "=" h NL* expr
+assignment_or_call: NAME (call | ASSIGNMENT_OP h NL* expr)
+
+ASSIGNMENT_OP: "="
+     | "+="
+     | "-="
+     | "*="
+     | "/="
+     | "%="
+
+conditional: "if" after_word block ("else" (h block | GAP conditional))?
+loop: "while" after_word block
+range: "for" GAP NAME_TEXT GAP "in" after_word ".." h NL* expr block
+result: "return" (after_word | h)
+assertion: "assert" after_word
+print: "print" h "(" h NL* expr ")" h
+
+after_word: GAP expr
+     | h punct_expr tail
+
+expr: unary tail
+tail: (BINARY h NL* unary)*
+
+unary: punct_expr
+     | (NUMBER | BOOL | NAME call? | construct) ACCESS*
+
+ACCESS: "." (/[ \t]/*) NAME
+construct: PASCAL ("." h PASCAL call? | "{" h NL* (named_field ("," h NL* named_field)* NL*)? "}" h)
+named_field: NAME ":" h expr
+
+punct_expr: ("-" | "!") h NL* unary
+     | ("(" h NL* expr ")" h | STRING) ACCESS*
+
+call: "(" h NL* (expr ("," h NL* expr)*)? ")" h
+
+BINARY: "||"
+     | "&&"
+     | "=="
+     | "!="
+     | "<"
+     | "<="
+     | ">"
+     | ">="
+     | "+"
+     | "-"
+     | "*"
+     | "/"
+     | "%"
+
+NAME: NAME_TEXT (/[ \t]/*)
+
+NAME_TEXT: /[cdghjknoqux-z]/ /[A-Za-z0-9]/*
+     | "a" ((/[0-9A-Za-rt-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-rt-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))?))?))?
+     | "b" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Za-km-z]/ /[A-Za-z0-9]/* | "l" /[A-Za-z0-9]/+))?))?))?
+     | "e" ((/[0-9A-Za-kmo-z]/ /[A-Za-z0-9]/* | "l" ((/[0-9A-Za-hj-rt-z]/ /[A-Za-z0-9]/* | "i" ((/[0-9A-Za-eg-z]/ /[A-Za-z0-9]/* | "f" /[A-Za-z0-9]/+))? | "s" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))? | "n" ((/[0-9A-Za-tv-z]/ /[A-Za-z0-9]/* | "u" ((/[0-9A-Za-ln-z]/ /[A-Za-z0-9]/* | "m" /[A-Za-z0-9]/+))?))?))?
+     | "f" ((/[0-9A-Zb-kmp-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-km-z]/ /[A-Za-z0-9]/* | "l" ((/[0-9A-Za-rt-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))?))? | "l" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Zb-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))? | "n" /[A-Za-z0-9]/+ | "o" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" /[A-Za-z0-9]/+))?))?
+     | "i" ((/[0-9A-Za-eg-lo-z]/ /[A-Za-z0-9]/* | "f" /[A-Za-z0-9]/+ | "m" ((/[0-9A-Za-oq-z]/ /[A-Za-z0-9]/* | "p" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))?))? | "n" (/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+)))?
+     | "l" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?
+     | "m" ((/[0-9A-Zb-tv-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" ((/[0-9A-Zabd-z]/ /[A-Za-z0-9]/* | "c" ((/[0-9A-Za-gi-z]/ /[A-Za-z0-9]/* | "h" /[A-Za-z0-9]/+))?))?))? | "u" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?
+     | "p" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-hj-z]/ /[A-Za-z0-9]/* | "i" ((/[0-9A-Za-mo-z]/ /[A-Za-z0-9]/* | "n" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))?))?
+     | "r" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" ((/[0-9A-Za-tv-z]/ /[A-Za-z0-9]/* | "u" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-mo-z]/ /[A-Za-z0-9]/* | "n" /[A-Za-z0-9]/+))?))?))?))?))?
+     | "s" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" (/[0-9A-Za-tv-z]/ /[A-Za-z0-9]/* | "u" ((/[0-9A-Zabd-z]/ /[A-Za-z0-9]/* | "c" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?)))?))?
+     | "t" ((/[0-9A-Za-df-qs-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Za-rt-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))? | "r" ((/[0-9A-Za-tv-z]/ /[A-Za-z0-9]/* | "u" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))?))?
+     | "v" ((/[0-9A-Zb-np-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" /[A-Za-z0-9]/+))? | "o" ((/[0-9A-Za-hj-z]/ /[A-Za-z0-9]/* | "i" ((/[0-9A-Za-ce-z]/ /[A-Za-z0-9]/* | "d" /[A-Za-z0-9]/+))?))?))?
+     | "w" ((/[0-9A-Za-gi-z]/ /[A-Za-z0-9]/* | "h" ((/[0-9A-Za-hj-z]/ /[A-Za-z0-9]/* | "i" ((/[0-9A-Za-km-z]/ /[A-Za-z0-9]/* | "l" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))?))?))?
+
+NUMBER: /[0-9]/+ (/[ \t]/*)
+BOOL: ("true" | "false") (/[ \t]/*)
+STRING: "\"" ((/[^"\\\x00-\x1F]/ | "\\" /["\\nrt]/))* "\"" (/[ \t]/*)
