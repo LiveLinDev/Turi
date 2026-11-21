@@ -1,0 +1,25 @@
+name: Núcleo y binarios Turi
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Instalar LLVM de la rama 23
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /usr/share/keyrings/llvm.asc > /dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-23 ninja-build
+      - name: Compilar, ejecutar ejemplos y comparar los binarios
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++-23
+          cmake --build build --parallel 4
+          ctest --test-dir build --output-on-failure -j 2
+      - name: Comprobar las gramáticas de generación
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r tests/grammar-requirements.txt
+          .venv/bin/python tests/grammar.py build/veloz
