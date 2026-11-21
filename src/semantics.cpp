@@ -101,6 +101,7 @@ struct Variable {
     bool writable;
     Span declared;
     Expr* regionSite = nullptr;
+    bool scalarParam = false;
 };
 
 enum class ArrayUse { Ordinary, Inspect, Copy };
@@ -449,9 +450,16 @@ struct Checker {
             }
             case StmtKind::Assign: {
                 const auto& var = lookup(s.name, s.span);
-                if (!var.writable)
-                    fail("E_IMMUTABLE", "El nombre es de solo lectura: " + s.name, s.span,
-                         "var total = 0\ntotal = 1", var.declared);
+                if (!var.writable) {
+                    Diagnostic d("E_IMMUTABLE", "El nombre es de solo lectura: " + s.name, s.span);
+                    d.related.push_back(var.declared);
+                    d.example = "var total = 0\ntotal = 1";
+                    if (var.scalarParam) {
+                        d.fix = Edit{{var.declared.start, var.declared.start}, "var "};
+                        d.example = "fn next(var n: int) -> int { n += 1\nreturn n }";
+                    }
+                    throw d;
+                }
                 if (var.regionSite) var.regionSite->allocation = ArrayAllocation::Owner;
                 requireType(typeOf(s.exprs[0], ArrayUse::Copy), var.type, s.exprs[0].span, var.declared);
                 break;
@@ -537,7 +545,10 @@ void check(Program& program) {
         checker.reserveValue(fn.result, fn.span);
         for (const auto& param : fn.params) {
             types.known(param.type, param.span);
-            checker.declare(param.name, param.type, false, param.span);
+            const bool scalar = param.type == Type::Int || param.type == Type::Bool;
+            if (param.writable && !scalar)
+                fail("E_PARAM_VAR", "Un parámetro var admite int o bool.", param.span, "fn step(var n: int) {}");
+            checker.declare(param.name, param.type, param.writable, param.span).scalarParam = scalar;
         }
         if (!checker.block(fn.body, false) && fn.result != Type::Void)
             fail("E_RETURN", "Hay un camino sin valor de retorno en " + fn.name, fn.span,

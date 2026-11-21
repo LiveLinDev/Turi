@@ -24,7 +24,8 @@ DECL_SEPARATOR: "," (/[ \t]/*) NL*
 VARIANT: PASCAL ("(" (/[ \t]/*) NL* (PARAM ("," (/[ \t]/*) NL* PARAM)*)? ")" (/[ \t]/*))?
 PASCAL: /[A-Z]/ /[A-Za-z0-9]/* (/[ \t]/*)
 GENERICS: "<" (/[ \t]/*) NL* PASCAL ("," (/[ \t]/*) NL* PASCAL)* ">" (/[ \t]/*)
-function: "fn" GAP NAME GENERICS? "(" h NL* (PARAM ("," h NL* PARAM)*)? ")" h ("->" h NL* TYPE)? block
+function: "fn" GAP NAME GENERICS? "(" h NL* (FN_PARAM ("," h NL* FN_PARAM)*)? ")" h ("->" h NL* TYPE)? block
+FN_PARAM: ("var" GAP)? PARAM
 test: "test" h STRING block
 PARAM: NAME ":" (/[ \t]/*) TYPE
 

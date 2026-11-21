@@ -65,11 +65,12 @@ struct MatchArm {
     std::vector<std::string> names; // positional field bindings
     std::vector<Stmt> body;
 };
-struct Param { std::string name; Type type; Span span; };
+struct Param { std::string name; Type type; Span span; bool writable = false; };
 struct Function {
     std::string name; Span span; std::vector<Param> params;
     Type result = Type::Void; std::vector<Stmt> body;
     bool isTest = false; // name is the decoded test title
+    std::size_t bodyStart = 0; // first byte following the opening brace
     std::vector<Type> generics; // named type IDs scoped to this function
 };
 struct Variant { std::string name; Span span; std::vector<Param> fields; };
@@ -103,5 +104,13 @@ struct Limits { std::uint64_t steps = 10000000; unsigned depth = 256; };
 // main() has zero parameters and returns void; optional for check.
 void runMain(const Program& program, std::ostream& output, Limits limits = {}, std::istream* input = nullptr);
 void runTests(const Program& program, std::ostream& output, Limits limits = {});
-std::string emitLLVM(const Program& program); // whole checked program
+enum class RuntimeABI { Windows, Linux, Darwin };
+#if defined(_WIN32)
+inline constexpr auto hostABI = RuntimeABI::Windows;
+#elif defined(__APPLE__)
+inline constexpr auto hostABI = RuntimeABI::Darwin;
+#else
+inline constexpr auto hostABI = RuntimeABI::Linux;
+#endif
+std::string emitLLVM(const Program& program, RuntimeABI abi = hostABI);
 }

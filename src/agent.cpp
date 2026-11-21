@@ -90,6 +90,7 @@ std::string signature(const Program& p, const Function& f) {
     result += "(";
     for (size_t i = 0; i < f.params.size(); ++i) {
         if (i) result += ", ";
+        if (f.params[i].writable) result += "var ";
         result += f.params[i].name + ": " + p.nameOf(f.params[i].type);
     }
     result += ")";
@@ -124,6 +125,8 @@ std::string applyPatch(const std::vector<std::string>& args, const fs::path& fil
     if (fingerprint(bytes) != args[3])
         throw Diagnostic("E_STALE", "El hash cambió. Consulta veloz sig.", f.span);
     auto replacement = readFile(pathFrom(args[4]));
+    if (args[0] == "patch-body")
+        replacement = source.substr(f.span.start, f.bodyStart - f.span.start) + "\n" + replacement + "\n}";
     auto parsed = parse(replacement);
     if (!parsed.data.empty() || parsed.functions.size() != 1 || parsed.functions[0].isTest ||
         parsed.functions[0].name != f.name)
@@ -173,7 +176,7 @@ std::string agentCommand(const std::vector<std::string>& args, const fs::path& f
         }
         return {};
     }
-    if (command == "patch") return applyPatch(args, file, source, program);
+    if (command == "patch" || command == "patch-body") return applyPatch(args, file, source, program);
     auto checked = program;
     check(checked);
     std::string filter;
@@ -292,7 +295,8 @@ std::string explain(std::string_view topic) {
         {"E_TYPE","Comprueba el tipo esperado, el obtenido y el tramo relacionado. No hay conversiones implícitas."},
         {"E_NAME","Declara el nombre en el ámbito actual o en uno exterior. Los valores usan camelCase ASCII."},
         {"E_PARSE","Revisa expected, actual y span. Separa las sentencias con un salto de línea."},
-        {"E_IMMUTABLE","Declara con var si necesitas reasignar. Los parámetros y el índice de for son de solo lectura."},
+        {"E_IMMUTABLE","Declara con var el local o parámetro escalar que necesitas reasignar. El índice de for es de solo lectura."},
+        {"E_PARAM_VAR","var en una firma declara una copia local modificable de un int o un bool."},
         {"E_LET_MUT","Sustituye let mut por var. La edición exacta va en fix."},
         {"E_LENGTH","len(texto) devuelve el número de bytes UTF-8."},
         {"E_SEMICOLON","Separa dos sentencias con un salto de línea. Elimina el punto y coma final."},

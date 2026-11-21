@@ -4,6 +4,7 @@
 
 #include <charconv>
 #include <map>
+#include <queue>
 #include <sstream>
 
 namespace veloz::native {
@@ -44,6 +45,7 @@ class ModuleWriter {
     std::map<std::string, unsigned> pool;
     std::ostringstream bodies;
     bool emitsRegion = false;
+    bool checkDepth = true;
 
     static void fieldList(std::ostream& out, const Variant& variant) {
         out << "{ ";
@@ -160,7 +162,8 @@ class ModuleWriter {
             break;
         case Op::Store: bodies << "  store " << first() << ", ptr %slot" << op.slot << "\n"; break;
         case Op::Call:
-            bodies << "  call void @tz.guard(i1 %atLimit, " << diagnostic("R_DEPTH", op.span) << ")\n";
+            if (checkDepth)
+                bodies << "  call void @tz.guard(i1 %atLimit, " << diagnostic("R_DEPTH", op.span) << ")\n";
             bodies << "  ";
             if (op.result.type != Type::Void) bodies << result << " = ";
             bodies << "call " << type << " " << symbol(op.data) << "(i32 %childDepth";
@@ -191,8 +194,14 @@ class ModuleWriter {
             break;
         case Op::Index:
         case Op::IndexSet:
-            bodies << "  " << result << ".ptr = call ptr @tz.at(" << first() << ", " << operand(op.inputs.at(1))
-                   << ", " << diagnostic("R_BOUNDS", op.span) << ")\n";
+            if (op.boundsProven) {
+                bodies << "  " << result << ".base = extractvalue " << first() << ", 0\n"
+                       << "  " << result << ".ptr = getelementptr i64, ptr " << result << ".base, "
+                       << operand(op.inputs.at(1)) << "\n";
+            } else {
+                bodies << "  " << result << ".ptr = call ptr @tz.at(" << first() << ", " << operand(op.inputs.at(1))
+                       << ", " << diagnostic("R_BOUNDS", op.span) << ")\n";
+            }
             if (op.op == Op::Index) bodies << "  " << result << " = load i64, ptr " << result << ".ptr\n";
             else bodies << "  store " << operand(op.inputs.at(2)) << ", ptr " << result << ".ptr\n";
             break;
@@ -256,8 +265,9 @@ class ModuleWriter {
     }
 public:
     explicit ModuleWriter(const Program& program) : program(program) {}
-    void function(const FunctionIR& ir) {
+    void function(const FunctionIR& ir, bool depthKnownSafe) {
         const auto& f = ir.source;
+        checkDepth = !depthKnownSafe;
         emitsRegion = ir.usesRegion;
         bodies << "define internal " << llvmType(f.result) << " " << symbol(f.name) << "(i32 %depth";
         for (unsigned i = 0; i < f.params.size(); ++i) bodies << ", " << llvmType(f.params[i].type) << " %arg" << i;
@@ -275,10 +285,10 @@ public:
         for (unsigned i = 0; i < ir.blocks.size(); ++i) writeBlock(i, ir.blocks[i]);
         bodies << "}\n";
     }
-    std::string finish() {
+    std::string finish(RuntimeABI abi) {
         std::ostringstream out;
         out << "; Turi, whole program\n";
-        writeRuntime(out);
+        writeRuntime(out, abi);
         writeArrayRuntime(out);
         writeTypes(out);
         writeStrings(out);
@@ -288,11 +298,42 @@ public:
     }
 };
 
+// A node reached through a cycle never leaves the pending set. Every other
+// node has an exact static upper bound on active frames, including isolated roots.
+std::vector<bool> safeDepths(const std::vector<FunctionIR>& functions) {
+    const auto n = functions.size();
+    std::map<std::string,std::size_t> index;
+    for (std::size_t i = 0; i < n; ++i) index.emplace(functions[i].source.name, i);
+    std::vector<std::vector<std::size_t>> edges(n);
+    std::vector<std::size_t> pending(n), depth(n, 1);
+    for (std::size_t i = 0; i < n; ++i)
+        for (const auto& block : functions[i].blocks)
+            for (const auto& op : block.ops)
+                if (op.op == Op::Call) {
+                    auto to = index.at(op.data);
+                    edges[i].push_back(to);
+                    ++pending[to];
+                }
+    std::queue<std::size_t> ready;
+    for (std::size_t i = 0; i < n; ++i) if (pending[i] == 0) ready.push(i);
+    std::vector<bool> safe(n, false);
+    while (!ready.empty()) {
+        auto i = ready.front();
+        ready.pop();
+        safe[i] = depth[i] < 256;
+        for (auto to : edges[i]) {
+            depth[to] = std::max(depth[to], depth[i] + 1);
+            if (--pending[to] == 0) ready.push(to);
+        }
+    }
+    return safe;
+}
+
 } // namespace
 } // namespace veloz::native
 
 namespace veloz {
-std::string emitLLVM(const Program& p) {
+std::string emitLLVM(const Program& p, RuntimeABI abi) {
     const auto entry = std::find_if(p.functions.begin(), p.functions.end(),
         [](const Function& f) { return !f.isTest && f.name == "main"; });
     if (entry == p.functions.end() || !entry->params.empty() || entry->result != Type::Void) {
@@ -303,9 +344,12 @@ std::string emitLLVM(const Program& p) {
         throw d;
     }
     native::ModuleWriter module(p);
+    std::vector<native::FunctionIR> functions;
     for (const auto& f : p.functions) {
-        if (!f.isTest) module.function(native::Lowerer(p, f).lower());
+        if (!f.isTest) functions.push_back(native::Lowerer(p, f).lower());
     }
-    return module.finish();
+    const auto safe = native::safeDepths(functions);
+    for (std::size_t i = 0; i < functions.size(); ++i) module.function(functions[i], safe[i]);
+    return module.finish(abi);
 }
 } // namespace veloz

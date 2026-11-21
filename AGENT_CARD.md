@@ -72,7 +72,9 @@ Construye un struct indicando todos los campos por nombre. Las variantes de enum
 | `return a ? x : y` | `if a { return x } else { return y }` |
 | `x++` | `x += 1` |
 
-Para almacenar enteros usa `var a = repeat(0, n)`, de tipo `[int]`. Lee con `a[i]`, escribe con `a[i] = valor` y consulta `len(a)`. El índice empieza en cero. Los arreglos se pueden pasar y devolver por valor. Una copia conserva su contenido cuando cambia la otra variable. Los parámetros y los nombres declarados con `let` son de solo lectura. El compilador libera la memoria. En este núcleo los campos de structs y variantes requieren tipos distintos de arreglo.
+Para almacenar enteros usa `var a = repeat(0, n)`, de tipo `[int]`. Lee con `a[i]`, escribe con `a[i] = valor` y consulta `len(a)`. El índice empieza en cero. Los arreglos se pueden pasar y devolver por valor. Una copia conserva su contenido cuando cambia la otra variable. Los parámetros de arreglo y los nombres declarados con `let` son de solo lectura. El compilador libera la memoria. En este núcleo los campos de structs y variantes requieren tipos distintos de arreglo.
+
+Para reasignar una copia local de un parámetro escalar, escribe `fn step(var n: int) -> int`. También admite `var activo: bool`. `veloz fix archivo.turi` imprime la fuente corregida después de comprobarla y pasar sus pruebas. `veloz patch-body archivo.turi funcion hash cuerpo.txt` permite enviar solo el cuerpo de una función cuya firma ya conoce el editor.
 
 `readByte()` lee la entrada estándar y devuelve un entero entre 0 y 255, o -1 al finalizar. Dentro de un bloque `test` la entrada está vacía. Para terminar anticipadamente una búsqueda usa `return` dentro del bucle. Los mapas, índices de texto, concatenación, flotantes y `break` quedan fuera de esta versión.
 

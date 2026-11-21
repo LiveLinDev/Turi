@@ -116,6 +116,33 @@ def main():
                 b"1\n3\n1\n2\nfalse\ntrue\n9223372036854775806\n-9223372036854775808\n-3\n-2\n")
         compare(cli, folder, RECURSION.replace("DEPTH", "254"), b"11\n3\n")
         compare(cli, folder, RECURSION.replace("DEPTH", "255"), b"11\n", "R_DEPTH")
+        # Length invariants survive nested loops, but rebinding or shadowing
+        # either operand may invalidate the proof.
+        compare(cli, folder, """fn sum(var n: int) -> int {
+            var a = repeat(3, n)
+            var t = 0
+            for i in 0..len(a) { t += a[i] }
+            n += 1
+            return t + n
+        }
+        fn main() { let n = 2
+            print(sum(n))
+            print(n)
+        }""", b"9\n2\n")
+        for body in [
+            "var n = 2\nvar a = repeat(0,n)\nn = 3\nfor i in 0..n { print(a[i]) }",
+            "var a = repeat(0,2)\nfor i in 0..len(a) { a=repeat(0,1)\nprint(a[i]) }",
+            "let n=2\nvar a=repeat(0,n)\nfor i in 0..n { if true { let i=3\nprint(a[i]) } }",
+        ]:
+            expected=b"0\n0\n" if "n = 3" in body else (b"" if "let i=3" in body else b"0\n")
+            compare(cli,folder,"fn main() {\n"+body+"\n}",expected,"R_BOUNDS")
+        chain = "\n".join(f"fn next{i}() -> int {{ return next{i+1}() }}" for i in range(255))
+        compare(cli,folder,chain+"\nfn next255() -> int { return 4 }\nfn main() { print(next0()) }",b"","R_DEPTH")
+        file=folder/"target.turi"
+        file.write_text("fn main() { print(7) }",encoding="utf8")
+        for target,symbol in [("aarch64-linux-gnu", b"@stdout"),("x86_64-windows-msvc", b"@__acrt_iob_func")]:
+            emitted=execute([cli,"emit-ir",file,"--target",target])
+            assert emitted.returncode==0 and symbol in emitted.stdout and target.encode() in emitted.stdout
         for body, trap in [
             ("assert false", "R_ASSERT"),
             ("print(-9223372036854775808 % -1)", "R_OVERFLOW"),
@@ -123,7 +150,7 @@ def main():
             ("print(1 / 0)", "R_DIV_ZERO"),
         ]:
             compare(cli, folder, f"fn main() {{\n print(7)\n {body}\n}}", b"7\n", trap)
-    print("8 casos de equivalencia nativa verificados.")
+    print("Equivalencia nativa, profundidad, índices y ABI verificados.")
 
 
 if __name__ == "__main__":

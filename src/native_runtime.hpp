@@ -5,7 +5,7 @@
 
 namespace veloz::native {
 
-inline void writeRuntime(std::ostream& out) {
+inline void writeRuntime(std::ostream& out, RuntimeABI abi) {
     out << R"ll(
 %text = type { ptr, i64 }
 declare i64 @fwrite(ptr, i64, i64, ptr)
@@ -18,8 +18,8 @@ declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)
 declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)
 
 )ll";
-#ifdef _WIN32
-    out << R"ll(declare ptr @__acrt_iob_func(i32)
+    if (abi == RuntimeABI::Windows) {
+        out << R"ll(declare ptr @__acrt_iob_func(i32)
 declare i32 @_setmode(i32, i32)
 define internal void @tz.init() sanitize_address {
   call i32 @_setmode(i32 0, i32 32768)
@@ -33,20 +33,15 @@ define internal ptr @tz.stream(i1 %error) sanitize_address {
   ret ptr %stream
 }
 )ll";
-#else
-#ifdef __APPLE__
-    constexpr auto stdoutName = "@__stdoutp";
-    constexpr auto stderrName = "@__stderrp";
-#else
-    constexpr auto stdoutName = "@stdout";
-    constexpr auto stderrName = "@stderr";
-#endif
-    out << stdoutName << " = external global ptr\n" << stderrName << " = external global ptr\n"
-        << "define internal void @tz.init() sanitize_address { ret void }\n"
-        << "define internal ptr @tz.stream(i1 %error) sanitize_address {\n"
-        << "  %ref = select i1 %error, ptr " << stderrName << ", ptr " << stdoutName
-        << "\n  %stream = load ptr, ptr %ref\n  ret ptr %stream\n}\n";
-#endif
+    } else {
+        const auto stdoutName = abi == RuntimeABI::Darwin ? "@__stdoutp" : "@stdout";
+        const auto stderrName = abi == RuntimeABI::Darwin ? "@__stderrp" : "@stderr";
+        out << stdoutName << " = external global ptr\n" << stderrName << " = external global ptr\n"
+            << "define internal void @tz.init() sanitize_address { ret void }\n"
+            << "define internal ptr @tz.stream(i1 %error) sanitize_address {\n"
+            << "  %ref = select i1 %error, ptr " << stderrName << ", ptr " << stdoutName
+            << "\n  %stream = load ptr, ptr %ref\n  ret ptr %stream\n}\n";
+    }
     out << R"ll(
 define internal void @tz.write(%text %s, i1 %error) sanitize_address {
   %p = extractvalue %text %s, 0
@@ -55,15 +50,20 @@ define internal void @tz.write(%text %s, i1 %error) sanitize_address {
   call i64 @fwrite(ptr %p, i64 1, i64 %n, ptr %stream)
   ret void
 }
-define internal void @tz.guard(i1 %bad, %text %message) sanitize_address {
-  br i1 %bad, label %trap, label %ok
-trap:
+define internal void @tz.abort(%text %message) cold noinline noreturn sanitize_address {
   call void @tz.write(%text %message, i1 true)
   call void @exit(i32 1)
+  unreachable
+}
+define internal void @tz.guard(i1 %bad, %text %message) alwaysinline sanitize_address {
+  br i1 %bad, label %trap, label %ok, !prof !0
+trap:
+  call void @tz.abort(%text %message)
   unreachable
 ok:
   ret void
 }
+!0 = !{!"branch_weights", i32 1, i32 1048575}
 define internal i1 @tz.eq(%text %a, %text %b) sanitize_address {
   %na = extractvalue %text %a, 1
   %nb = extractvalue %text %b, 1

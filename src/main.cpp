@@ -29,12 +29,14 @@ namespace {
 constexpr auto help = R"(veloz check ARCHIVO [--format]
 veloz run ARCHIVO [--steps N]
 veloz build ARCHIVO -o EJECUTABLE [--release] [--cpu x86-64-v3|native]
-veloz emit-ir ARCHIVO
+veloz emit-ir ARCHIVO [--target x86_64-windows-msvc|x86_64-linux-gnu|aarch64-linux-gnu|arm64-apple-darwin]
 veloz sig ARCHIVO [SÍMBOLO] [--offset N]
 veloz types ARCHIVO [FUNCIÓN] [--offset N]
 veloz costes ARCHIVO [FUNCIÓN] [--offset N]
 veloz fmt ARCHIVO [--check]
 veloz patch ARCHIVO FUNCIÓN HASH REEMPLAZO
+veloz patch-body ARCHIVO FUNCIÓN HASH CUERPO
+veloz fix ARCHIVO
 veloz explain ID
 )";
 std::string spanJson(Span span, std::string_view source) {
@@ -81,8 +83,27 @@ int dispatch(const std::vector<std::string>& args) {
         filename = args[1];
         auto file = pathFrom(filename);
         source = readFile(file);
+        if (cmd == "fix") {
+            if (args.size() != 2) usage();
+            for (unsigned edits = 0; ; ++edits) {
+                try {
+                    auto fixed = parse(source);
+                    check(fixed);
+                    Discard discard;
+                    std::ostream quiet(&discard);
+                    runTests(fixed, quiet);
+                    std::cout << source;
+                    return 0;
+                } catch (const Diagnostic& d) {
+                    if (edits == 64 || !d.fix || (d.id != "E_SEMICOLON" && d.id != "E_LET_MUT" &&
+                        d.id != "E_ELIF" && d.id != "E_PRINTLN" && d.id != "E_IMMUTABLE")) throw;
+                    const auto& edit = *d.fix;
+                    source.replace(edit.span.start, edit.span.end - edit.span.start, edit.replacement);
+                }
+            }
+        }
         auto program = parse(source);
-        if (cmd == "fmt" || cmd == "patch" || cmd == "sig" || cmd == "types" || cmd == "costes") {
+        if (cmd == "fmt" || cmd == "patch" || cmd == "patch-body" || cmd == "sig" || cmd == "types" || cmd == "costes") {
             std::cout << agentCommand(args, file, source, program);
             return 0;
         }
@@ -102,8 +123,18 @@ int dispatch(const std::vector<std::string>& args) {
                 if (ec != std::errc{} || end != value.data()+value.size() || !limits.steps) usage();
             }
             runMain(program, std::cout, limits, &std::cin);
-        } else if (cmd == "emit-ir" && args.size() == 2) {
-            std::cout << emitLLVM(program);
+        } else if (cmd == "emit-ir") {
+            auto abi = hostABI;
+            if (args.size() != 2) {
+                if (args.size() != 4 || args[2] != "--target") usage();
+                if (args[3] == "x86_64-windows-msvc") abi = RuntimeABI::Windows;
+                else if (args[3] == "x86_64-linux-gnu" || args[3] == "aarch64-linux-gnu") abi = RuntimeABI::Linux;
+                else if (args[3] == "arm64-apple-darwin") abi = RuntimeABI::Darwin;
+                else usage();
+            }
+            auto module = emitLLVM(program, abi);
+            if (args.size() == 4) std::cout << "target triple = \"" << args[3] << "\"\n";
+            std::cout << module;
         } else if (cmd == "build" && args.size() >= 4 && args[2] == "-o") {
             BuildOptions options;
             for (std::size_t i = 4; i < args.size(); ++i) {

@@ -45,6 +45,23 @@ with tempfile.TemporaryDirectory() as directory:
     call("patch", file, "outer", digest, patch)
     assert call("run", file) == b"99\n"
     assert call("patch", file, "outer", digest, patch, ok=False)["id"] == "E_STALE"
+    current = json.loads(call("sig", file, "outer"))["hash"]
+    patch.write_text("print(31)",encoding="utf8")
+    call("patch-body",file,"outer",current,patch)
+    assert call("run",file)==b"31\n"
+    source=file.read_bytes()
+    patch.write_text("}\nfn foreign() {",encoding="utf8")
+    current=json.loads(call("sig",file,"outer"))["hash"]
+    call("patch-body",file,"outer",current,patch,ok=False)
+    assert file.read_bytes()==source
+    source=b"fn step(n: int) -> int { n += 1; return n; }\n"
+    file.write_bytes(source)
+    fixed=call("fix",file)
+    assert b"var n: int" in fixed and b";" not in fixed and file.read_bytes()==source
+    file.write_bytes(fixed)
+    assert "var n: int" in json.loads(call("sig",file,"step"))["signature"]
+    file.write_text("fn f(a: [int]) { a[0]=5 }",encoding="utf8")
+    assert call("fix",file,ok=False)["id"]=="E_IMMUTABLE"
     # Every complete program printed on the agent card is runnable with check.
     for snippet in (root / "AGENT_CARD.md").read_text(encoding="utf8").split("```turi\n")[1:]:
         file.write_text(snippet.split("```", 1)[0], encoding="utf8")

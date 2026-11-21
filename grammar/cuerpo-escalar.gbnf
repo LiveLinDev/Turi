@@ -1,0 +1,17 @@
+# Continuación de una función escalar después de su llave de apertura.
+root ::= h nl* (statement nl+)* result nl* "}"
+h ::= [ \t]{0,24}
+gap ::= [ \t]{1,8}
+nl ::= "\r"? "\n" h
+ident ::= [a-z] [A-Za-z0-9]{0,30}
+expr ::= atom (h operator h atom)*
+atom ::= "-" atom | "!" atom | "(" h expr h ")" | [0-9]{1,19} | "true" | "false" | ident
+operator ::= "+" | "-" | "*" | "/" | "%" | "==" | "!=" | ">=" | "<=" | ">" | "<" | "&&" | "||"
+result ::= "return" gap expr h
+statement ::= binding | assign | conditional | loop | range | result
+binding ::= ("let" | "var") gap ident h "=" h expr h
+assign ::= ident h ("=" | "+=" | "-=" | "*=" | "/=" | "%=") h expr h
+conditional ::= "if" gap expr h block (h "else" gap (block | conditional))? h
+loop ::= "while" gap expr h block h
+range ::= "for" gap ident gap "in" gap expr h ".." h expr h block h
+block ::= "{" h nl* (statement (nl+ statement)* nl*)? "}"

@@ -66,7 +66,9 @@ entry:
   %empty = icmp eq ptr %existing, null
   br i1 %empty, label %first, label %capacity
 first:
-  %base = call ptr @tz.chunk(ptr null, i64 4096, %text %msg)
+  %tiny = icmp ult i64 %bytes, 256
+  %firstSpace = select i1 %tiny, i64 256, i64 %bytes
+  %base = call ptr @tz.chunk(ptr null, i64 %firstSpace, %text %msg)
   store ptr %base, ptr %arena
   br label %capacity
 capacity:
@@ -107,7 +109,11 @@ check:
   %prev = load ptr, ptr %p
   %atGoal = icmp eq ptr %p, %goal
   %atBase = icmp eq ptr %prev, null
-  %keep = or i1 %atGoal, %atBase
+  %limitp = getelementptr %chunk, ptr %p, i32 0, i32 1
+  %capacity = load i64, ptr %limitp
+  %cacheable = icmp ule i64 %capacity, 4096
+  %keepBase = and i1 %atBase, %cacheable
+  %keep = or i1 %atGoal, %keepBase
   br i1 %keep, label %reset, label %free
 free:
   store ptr %prev, ptr %arena

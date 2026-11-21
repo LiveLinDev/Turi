@@ -217,13 +217,16 @@ class Parser {
         return {id.text, annotation, {id.span.start, previous().span.end}};
     }
 
-    std::vector<Param> parameters() {
+    std::vector<Param> parameters(bool functionParams = false) {
         std::vector<Param> fields;
         newlines();
         if (!take(")")) {
             do {
                 newlines();
-                fields.push_back(parameter());
+                const bool writable = functionParams && take("var");
+                auto p = parameter();
+                p.writable = writable;
+                fields.push_back(std::move(p));
             } while (take(","));
             need(")");
         }
@@ -519,12 +522,13 @@ class Parser {
                 need(">");
             }
             need("(");
-            fn.params = parameters();
+            fn.params = parameters(true);
             if (take("->")) {
                 newlines();
                 fn.result = type();
             }
         }
+        fn.bodyStart = current().span.end;
         fn.body = block(1);
         fn.span = {start, previous().span.end};
         return fn;

@@ -27,7 +27,7 @@ Todos los escalares admiten `==` y `!=` entre valores del mismo tipo. El orden `
 
 ## Ámbitos y control
 
-`let` crea un nombre inmutable. `var` permite reasignarlo, conservando su tipo. Ambos requieren un inicializador y aceptan anotación local. Las asignaciones compuestas `+= -= *= /= %=` aplican las mismas comprobaciones que la operación ordinaria. Un bloque anidado puede ocultar un nombre exterior. Los parámetros y el índice de un rango son inmutables.
+`let` crea un nombre inmutable. `var` permite reasignarlo, conservando su tipo. Ambos requieren un inicializador y aceptan anotación local. Las asignaciones compuestas `+= -= *= /= %=` aplican las mismas comprobaciones que la operación ordinaria. Un bloque anidado puede ocultar un nombre exterior. Los parámetros son de solo lectura por defecto. En `fn next(var n: int) -> int`, `n` es una copia local modificable. El marcador admite `int` y `bool`. El índice de un rango es inmutable.
 
 `if condición { ... } else { ... }` y `while condición { ... }` exigen booleanos. `} else if` se escribe en la misma línea. `for i in a..b` evalúa los límites enteros una vez y recorre el intervalo ascendente, excluido `b`. Si `a >= b`, el cuerpo se ejecuta cero veces. `return` sale de toda la función. Un resultado con valor requiere retorno explícito en todos los caminos. El comprobador verifica también código inalcanzable.
 
@@ -45,7 +45,7 @@ Una función `fn id<T>(x: T) -> T { return x }` acepta argumentos de tipo inferi
 
 `repeat(elemento, cantidad)` evalúa dos enteros y devuelve un `[int]` de esa longitud, inicializado con el elemento. Los índices válidos están en `0..len(a)`. Un índice inválido produce `R_BOUNDS`. Un tamaño negativo produce `R_ARRAY_SIZE`. El máximo de implementación es 2²⁴ enteros por arreglo. Una solicitud mayor o un fallo del asignador produce `R_ALLOC`. Un arreglo de longitud cero es válido.
 
-Una variable `var` permite `a[i] = valor`. Se evalúan índice y valor, en ese orden, antes del acceso comprobado. `let` y los parámetros son de solo lectura. Los arreglos se pueden devolver y pasar por valor, con copias independientes al modificar una de las variables. Una asignación conserva el valor anterior de su derecha incluso en una autoasignación. La implementación actual acepta `[int]` como local, parámetro y resultado. Los campos de structs, los payloads de enums y los arreglos multidimensionales quedan fuera de este corte.
+Una variable `var` permite `a[i] = valor`. Se evalúan índice y valor, en ese orden, antes del acceso comprobado. `let` y los parámetros de arreglo son de solo lectura. Los arreglos se pueden devolver y pasar por valor, con copias independientes al modificar una de las variables. Una asignación conserva el valor anterior de su derecha incluso en una autoasignación. La implementación actual acepta `[int]` como local, parámetro y resultado. Los campos de structs, los payloads de enums y los arreglos multidimensionales quedan fuera de este corte.
 
 El backend reserva en una región los temporales que se demuestran confinados a su bloque. Restaura la marca de la región al salir, también tras un retorno y entre iteraciones. En la ruta general un dueño único libera cada reserva. Las copias con valor independiente son profundas cuando el backend necesita conservar una vista prestada. `veloz costes ARCHIVO [FUNCIÓN]` muestra las operaciones dinámicas del IR y la razón de cada región, dueño o copia antes de la optimización de LLVM.
 

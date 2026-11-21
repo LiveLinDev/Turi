@@ -38,6 +38,7 @@ def main():
         'fn f(x: int) -> int { return(x - 1) }',
         'test "alternativas" { if true {} else if false {} else {} }',
         'fn f(\n a: int,\n b: bool) {}',
+        'fn bump(var n: int, var active: bool) -> int { if active { n += 1 }\nreturn n }',
         '''struct Point { x: int,\ny: int }
 enum Search { Missing\nFound(p: Point) }
 fn id<T>(x: T) -> T { return x }

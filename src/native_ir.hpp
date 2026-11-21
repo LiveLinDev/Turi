@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace veloz::native {
@@ -28,6 +29,7 @@ struct Operation {
     Span span;
     std::vector<unsigned> fields;
     bool initialize = true;
+    bool boundsProven = false;
 };
 enum class Exit { Open, Jump, Branch, Switch, Return, Unreachable };
 struct Block {
@@ -57,8 +59,24 @@ class Lowerer {
     std::vector<Scope> scopes{1};
     std::vector<unsigned> temporaries;
     std::unordered_map<const Expr*, Value> forwardedReads;
+    std::unordered_set<std::string> reassigned;
+    std::unordered_multimap<unsigned, unsigned> arraysWithLength;
+    std::vector<std::pair<unsigned, unsigned>> validIndices;
     unsigned here = 0;
     unsigned nextValue = 0;
+
+    void findAssignments(const std::vector<Stmt>& body) {
+        for (const auto& s : body) {
+            if (s.kind == StmtKind::Assign) reassigned.insert(s.name);
+            findAssignments(s.body);
+            findAssignments(s.otherwise);
+            for (const auto& arm : s.arms) findAssignments(arm.body);
+        }
+    }
+    bool inBounds(unsigned array, const Expr& index) const {
+        return index.kind == ExprKind::Name &&
+               std::ranges::find(validIndices, std::pair{array, lookup(index.text)}) != validIndices.end();
+    }
 
     unsigned block() {
         fn.blocks.emplace_back();
@@ -211,7 +229,11 @@ class Lowerer {
             if (auto it = forwardedReads.find(&e); it != forwardedReads.end()) return it->second;
             const auto base = expression(e.args.at(0));
             const auto index = expression(e.args.at(1));
-            return emit(Op::Index, Type::Int, {base, index}, {}, 0, e.span);
+            const auto value = emit(Op::Index, Type::Int, {base, index}, {}, 0, e.span);
+            const auto& array = e.args.at(0);
+            fn.blocks[here].ops.back().boundsProven =
+                array.kind == ExprKind::Name && inBounds(lookup(array.text), e.args.at(1));
+            return value;
         }
         case ExprKind::Construct: return construct(e);
         case ExprKind::Field: {
@@ -240,7 +262,14 @@ class Lowerer {
     }
     void bind(const Stmt& decl, Value init) {
         const auto value = own(init, decl.exprs.at(0).span);
+        const auto& rhs = decl.exprs.at(0);
+        std::optional<unsigned> sizeSlot;
+        if (rhs.kind == ExprKind::Call && rhs.text == "repeat" && !reassigned.contains(decl.name)) {
+            const auto& size = rhs.args.at(1);
+            if (size.kind == ExprKind::Name && !reassigned.contains(size.text)) sizeSlot = lookup(size.text);
+        }
         const auto slot = declare(decl.name, value.type);
+        if (sizeSlot) arraysWithLength.emplace(*sizeSlot, slot);
         store(slot, value);
         if (value.type == Type::IntArray && !value.freshRegion) scopes.back().arrays.push_back(slot);
     }
@@ -312,7 +341,22 @@ class Lowerer {
         dropTemporaries();
         branch(condition, body, end);
         here = body;
+        const auto saved = validIndices.size();
+        if (counting && s.exprs[0].kind == ExprKind::Integer && s.exprs[0].text == "0") {
+            const auto& bound = s.exprs[1];
+            // The bounds were evaluated before the iterator was declared.
+            // A shadowing iterator can only make this conservative.
+            if (bound.kind == ExprKind::Name && bound.text != s.name) {
+                const auto [first,last] = arraysWithLength.equal_range(lookup(bound.text));
+                for (auto it = first; it != last; ++it) validIndices.emplace_back(it->second, *iterator);
+            } else if (bound.kind == ExprKind::Call && bound.text == "len" &&
+                       bound.args[0].kind == ExprKind::Name && bound.args[0].type == Type::IntArray &&
+                       bound.args[0].text != s.name && !reassigned.contains(bound.args[0].text)) {
+                validIndices.emplace_back(lookup(bound.args[0].text), *iterator);
+            }
+        }
         nested(s.body);
+        validIndices.resize(saved);
         if (counting && fn.blocks[here].exit == Exit::Open) {
             const auto n = load(*iterator);
             const auto one = emit(Op::Int, Type::Int, {}, "1");
@@ -373,10 +417,12 @@ class Lowerer {
             break;
         }
         case StmtKind::IndexSet: {
-            const auto base = load(lookup(s.name));
+            const auto array = lookup(s.name);
+            const auto base = load(array);
             const auto index = expression(s.exprs.at(0));
             const auto value = expression(s.exprs.at(1));
             emit(Op::IndexSet, Type::Void, {base, index, value}, {}, 0, s.span);
+            fn.blocks[here].ops.back().boundsProven = inBounds(array, s.exprs[0]);
             break;
         }
         case StmtKind::Call: expression(s.exprs[0]); break;
@@ -399,6 +445,7 @@ class Lowerer {
 public:
     Lowerer(const Program& program, const Function& f) : program(program), fn{f, {}, {Block{}}} {}
     FunctionIR lower() {
+        findAssignments(fn.source.body);
         for (const auto& p : fn.source.params) declare(p.name, p.type);
         markRegion(fn.source.body);
         sequence(fn.source.body);

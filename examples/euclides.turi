@@ -1,7 +1,5 @@
 // Calcula el máximo común divisor de dos enteros positivos.
-fn gcd(first: int, second: int) -> int {
-    var a = first
-    var b = second
+fn gcd(var a: int, var b: int) -> int {
     while b != 0 {
         let remainder = a % b
         a = b
