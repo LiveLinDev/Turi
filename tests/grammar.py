@@ -51,6 +51,8 @@ fn main() {
         'fn main() { print(Pair { x: 1 }.x) }',
         'fn main() { let strict = 18\nprint(strict) }',
         'fn main() { print(3 > (2) && true) }',
+        'fn f(a: [int]) -> [int] { return a }\nfn main() { var a=f(repeat(3,2))\na[0]=1\nprint(a[1]) }',
+        'fn main() { print(repeat(1, 2)[1 -\n 1]) }',
     ]
     invalid = [
         "fn main() { let a = 7 let b = 4 }", "fn main() { let a = 2; }",
@@ -61,6 +63,7 @@ fn main() {
         'fn main() { let x = "bad\\m" }', 'struct point {}', 'enum Tree { leaf }',
         'fn id<t>(x: t) -> t { return x }', 'fn f(x: Event) { match x { Event.A -> print(1) } }',
         'fn a() { print(Pair { x: 1 y: 2 }) }',
+        'fn f(a: [str]) {}', 'fn main() { var a=repeat(1,1)\na[]=0 }', 'fn f(a: [int) {}',
     ]
     tokenizer = LLTokenizer(TokenizerWrapper(ByteVocabulary()))
     samples = [(s, True) for s in valid] + [(s, False) for s in invalid]

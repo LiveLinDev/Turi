@@ -30,6 +30,7 @@ PARAM: NAME ":" (/[ \t]/*) TYPE
 
 TYPE: ("int" | "bool" | "str" | "void") (/[ \t]/*)
      | PASCAL
+     | "[" (/[ \t]/*) "int" (/[ \t]/*) "]" (/[ \t]/*)
 
 block: "{" h NL* (statement (NL+ statement)* NL*)? "}" h
 
@@ -46,7 +47,7 @@ statement: binding
 match: "match" after_word "{" h NL* (arm (NL+ arm)* NL*)? "}" h
 arm: PASCAL "." h PASCAL ("(" h NL* (NAME ("," h NL* NAME)*)? ")" h)? "=>" h NL* (block | statement)
 binding: ("let" | "var") GAP NAME (":" h TYPE)? "=" h NL* expr
-assignment_or_call: NAME (call | ASSIGNMENT_OP h NL* expr)
+assignment_or_call: NAME (call | ASSIGNMENT_OP h NL* expr | index "=" h NL* expr)
 
 ASSIGNMENT_OP: "="
      | "+="
@@ -69,14 +70,17 @@ expr: unary tail
 tail: (BINARY h NL* unary)*
 
 unary: punct_expr
-     | (NUMBER | BOOL | NAME call? | construct) ACCESS*
+     | (NUMBER | BOOL | NAME call? | construct) access*
 
-ACCESS: "." (/[ \t]/*) NAME
+access: "." h NAME
+     | index
+
+index: "[" h expr "]" h
 construct: PASCAL ("." h PASCAL call? | "{" h NL* (named_field ("," h NL* named_field)* NL*)? "}" h)
 named_field: NAME ":" h expr
 
 punct_expr: ("-" | "!") h NL* unary
-     | ("(" h NL* expr ")" h | STRING) ACCESS*
+     | ("(" h NL* expr ")" h | STRING) access*
 
 call: "(" h NL* (expr ("," h NL* expr)*)? ")" h
 

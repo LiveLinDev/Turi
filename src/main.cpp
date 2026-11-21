@@ -29,6 +29,7 @@ veloz build ARCHIVO -o EJECUTABLE
 veloz emit-ir ARCHIVO
 veloz sig ARCHIVO [SÍMBOLO] [--offset N]
 veloz types ARCHIVO [FUNCIÓN] [--offset N]
+veloz costes ARCHIVO [FUNCIÓN] [--offset N]
 veloz fmt ARCHIVO [--check]
 veloz patch ARCHIVO FUNCIÓN HASH REEMPLAZO
 veloz explain ID
@@ -78,7 +79,7 @@ int dispatch(const std::vector<std::string>& args) {
         auto file = pathFrom(filename);
         source = readFile(file);
         auto program = parse(source);
-        if (cmd == "fmt" || cmd == "patch" || cmd == "sig" || cmd == "types") {
+        if (cmd == "fmt" || cmd == "patch" || cmd == "sig" || cmd == "types" || cmd == "costes") {
             std::cout << agentCommand(args, file, source, program);
             return 0;
         }
@@ -97,7 +98,7 @@ int dispatch(const std::vector<std::string>& args) {
                 auto [end, ec] = std::from_chars(value.data(), value.data()+value.size(), limits.steps);
                 if (ec != std::errc{} || end != value.data()+value.size() || !limits.steps) usage();
             }
-            runMain(program, std::cout, limits);
+            runMain(program, std::cout, limits, &std::cin);
         } else if (cmd == "emit-ir" && args.size() == 2) {
             std::cout << emitLLVM(program);
         } else if (cmd == "build" && args.size() == 4 && args[2] == "-o") {
@@ -120,6 +121,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> args;
 #ifdef _WIN32
     (void)argv;
+    _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
     auto wide = CommandLineToArgvW(GetCommandLineW(), &argc);

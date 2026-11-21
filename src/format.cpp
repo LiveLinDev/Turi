@@ -27,7 +27,7 @@ bool binary(std::string_view text) {
 }
 
 bool prefixPosition(std::string_view prev) {
-    constexpr std::array starts = {""sv, "("sv, ","sv, ":"sv, "!"sv, "{"sv, "return"sv,
+    constexpr std::array starts = {""sv, "("sv, "["sv, ","sv, ":"sv, "!"sv, "{"sv, "return"sv,
         "if"sv, "while"sv, "in"sv, "assert"sv, "match"sv};
     return oneOf(prev, starts) || binary(prev);
 }
@@ -61,9 +61,10 @@ class Formatter {
         out += comment.text;
     }
     bool needsSpace(std::string_view raw, bool genericOpen, bool genericClose) const {
-        if (prev.empty() || raw == "," || raw == ":" || raw == ")" || raw == "." ||
+        if (prev.empty() || raw == "," || raw == ":" || raw == ")" || raw == "]" || raw == "." ||
             raw == ".." || genericClose || genericOpen) return false;
-        if (prev == "(" || prev == "." || prev == ".." || prefix || (generics && prev == "<")) return false;
+        if (prev == "(" || prev == "[" || prev == "." || prev == ".." || prefix || (generics && prev == "<")) return false;
+        if (raw == "[") return prev == ":" || prev == "->";
         if (raw == "}") return prev != "{";
         if (raw == "(") {
             constexpr std::array expressionWords = {"assert"sv, "return"sv, "if"sv, "while"sv, "in"sv, "match"sv};
