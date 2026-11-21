@@ -1,6 +1,7 @@
 #pragma once
 
 #include "veloz.hpp"
+#include "native_fill.hpp"
 #include <algorithm>
 #include <stdexcept>
 #include <unordered_map>
@@ -26,6 +27,7 @@ struct Operation {
     unsigned slot;
     Span span;
     std::vector<unsigned> fields;
+    bool initialize = true;
 };
 enum class Exit { Open, Jump, Branch, Switch, Return, Unreachable };
 struct Block {
@@ -54,6 +56,7 @@ class Lowerer {
     };
     std::vector<Scope> scopes{1};
     std::vector<unsigned> temporaries;
+    std::unordered_map<const Expr*, Value> forwardedReads;
     unsigned here = 0;
     unsigned nextValue = 0;
 
@@ -173,6 +176,17 @@ class Lowerer {
         here = end;
         return load(slot);
     }
+    struct Repetition { Value array, element; };
+    Repetition repeat(const Expr& e, bool initialize) {
+        const auto element = expression(e.args.at(0));
+        const auto size = expression(e.args.at(1));
+        const bool region = e.allocation == ArrayAllocation::Region;
+        auto array = emit(region ? Op::RepeatRegion : Op::RepeatHeap, e.type,
+                          {element, size}, {}, 0, e.span);
+        fn.blocks[here].ops.back().initialize = initialize;
+        array.freshRegion = region;
+        return {track(array), element};
+    }
     Value expression(const Expr& e) {
         switch (e.kind) {
         case ExprKind::Integer: return emit(Op::Int, e.type, {}, e.text);
@@ -180,6 +194,7 @@ class Lowerer {
         case ExprKind::String: return emit(Op::Text, e.type, {}, e.text);
         case ExprKind::Name: return load(lookup(e.text));
         case ExprKind::Index: {
+            if (auto it = forwardedReads.find(&e); it != forwardedReads.end()) return it->second;
             const auto base = expression(e.args.at(0));
             const auto index = expression(e.args.at(1));
             return emit(Op::Index, Type::Int, {base, index}, {}, 0, e.span);
@@ -192,14 +207,12 @@ class Lowerer {
         case ExprKind::Unary:
             return emit(e.text == "!" ? Op::Not : Op::Negate, e.type, {expression(e.args[0])}, {}, 0, e.span);
         case ExprKind::Call: {
+            if (e.text == "repeat") return repeat(e, true).array;
             std::vector<Value> arguments;
             for (const auto& arg : e.args) arguments.push_back(expression(arg));
             Op op = e.text == "len" ? Op::Length : Op::Call;
             if (e.text == "readByte") op = Op::ReadByte;
-            if (e.text == "repeat")
-                op = e.allocation == ArrayAllocation::Region ? Op::RepeatRegion : Op::RepeatHeap;
             auto value = emit(op, e.type, std::move(arguments), e.text, 0, e.span);
-            value.freshRegion = op == Op::RepeatRegion;
             return track(value);
         }
         case ExprKind::Binary: {
@@ -211,9 +224,28 @@ class Lowerer {
         }
         throw std::logic_error("unknown expression in lowering");
     }
+    void bind(const Stmt& decl, Value init) {
+        const auto value = own(init, decl.exprs.at(0).span);
+        const auto slot = declare(decl.name, value.type);
+        store(slot, value);
+        if (value.type == Type::IntArray && !value.freshRegion) scopes.back().arrays.push_back(slot);
+    }
     void sequence(const std::vector<Stmt>& statements) {
-        for (const auto& stmt : statements) {
+        for (std::size_t i = 0; i < statements.size(); ++i) {
             if (fn.blocks[here].exit != Exit::Open) break;
+            const Stmt& stmt = statements[i];
+            if (i + 1 < statements.size()) {
+                if (const auto reads = firstFullWrite(stmt, statements[i + 1])) {
+                    const auto fill = repeat(stmt.exprs.at(0), false);
+                    bind(stmt, fill.array);
+                    dropTemporaries();
+                    for (const auto* read : *reads) forwardedReads.emplace(read, fill.element);
+                    statement(statements[++i]);
+                    for (const auto* read : *reads) forwardedReads.erase(read);
+                    dropTemporaries();
+                    continue;
+                }
+            }
             statement(stmt);
             dropTemporaries();
         }
@@ -316,10 +348,7 @@ class Lowerer {
         switch (s.kind) {
         case StmtKind::Let:
         case StmtKind::Var: {
-            const auto v = own(expression(s.exprs[0]), s.exprs[0].span);
-            const auto slot = declare(s.name, v.type);
-            store(slot, v);
-            if (v.type == Type::IntArray && !v.freshRegion) scopes.back().arrays.push_back(slot);
+            bind(s, expression(s.exprs[0]));
             break;
         }
         case StmtKind::Assign: {
