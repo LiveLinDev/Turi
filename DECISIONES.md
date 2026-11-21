@@ -1,5 +1,12 @@
 # Decisiones de implementación
 
+## Comparación de 100 cargas en dos arquitecturas
+
+- El backend demuestra longitudes estables de arreglos y límites de profundidad en el grafo de llamadas. Conserva la trampa dinámica cuando la prueba estática resulta insuficiente. La recursión y los cambios de tamaño tienen pruebas de regresión.
+- Una región dimensiona su primer bloque a partir de la primera reserva, con un mínimo de 256 bytes. Al volver a una marca vacía solo puede conservar un bloque de hasta 4 KiB. Un bloque grande que contiene valores aún vivos se conserva hasta su marca correspondiente.
+- Un parámetro escalar marcado con `var` se modifica dentro de la llamada. El diagnóstico sobre la escritura de un parámetro escalar inmutable incluye la edición exacta de su declaración. `veloz fix` comprueba el programa y sus pruebas antes de emitir una corrección.
+- `emit-ir --target` selecciona el ABI del runtime al generar LLVM para otro sistema. Se ejecutaron binarios AArch64 generados en Windows sobre la CPU de la Spark. [Resultados y límites](bench/amplia/RESULTADOS.md).
+
 ## 20 de noviembre de 2026
 
 | Elección | Motivo y evidencia |

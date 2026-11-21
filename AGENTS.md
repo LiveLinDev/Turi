@@ -13,5 +13,7 @@ Lee `ESTADO.md`, `SPEC.md` y `DECISIONES.md` al empezar. El contrato publicado e
 | Evaluación con modelos locales | `tools/eval/` |
 | Tarjeta mínima medida para funciones escalares | `tools/eval/paired/cards/turi.txt` (279 tokens de Qwen 2.5) |
 | Rendimiento local | `bench/local/PROTOCOLO.md`, `bench/local/resultados/` |
+| 100 cargas, Windows x64 y Linux ARM64 | `bench/amplia/PROTOCOLO.md`, `bench/amplia/RESULTADOS.md` |
+| Caché real y corrección con pruebas privadas | `tools/eval/contexto/`, `bench/amplia/resultados/final/tokens.csv` |
 
 Conserva en los informes los fallos, timeouts y entradas de reproducción. Mantén separados los resultados funcionales y las comparaciones de velocidad del expediente.

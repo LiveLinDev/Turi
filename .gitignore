@@ -3,3 +3,10 @@
 /out/
 __pycache__/
 *.pyc
+/bench/amplia/resultados/ryzen/???.json
+/bench/amplia/resultados/spark/???.json
+/bench/amplia/resultados/final/ryzen/???.json
+/bench/amplia/resultados/final/spark/???.json
+/bench/amplia/resultados/ia/
+/bench/amplia/resultados/reserva/
+/bench/amplia/resultados/final/supervisor/

@@ -1,0 +1,10 @@
+import ("fmt"; "os"; "strconv")
+func main() {
+    var a [4]int64
+    for i, v := range os.Args[1:] { x, e := strconv.ParseInt(v,10,64); if e!=nil { panic(e) }; a[i]=x }
+    var sum int64
+    start:=startClock()
+    for i:=int64(0);i<a[3];i++ { sum+=v_dispatch(a[0],a[1],a[2]+(i%4)*7) }
+    ns:=elapsedNS(start)
+    fmt.Printf("%d %d %d 0 0 0 0\n",sum,ns,rss())
+}

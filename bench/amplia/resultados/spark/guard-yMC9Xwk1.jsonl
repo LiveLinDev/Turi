@@ -1,0 +1,9 @@
+{"event": "start", "time": 1795223636.7921333, "cpu": 19, "scheduler": "SCHED_IDLE", "nice": 19, "rss_limit": 134217728, "quiet_s": 8, "machine": "aarch64", "kernel": "6.17.0-1026-nvidia"}
+{"event": "pause", "time": 1795223636.804862, "case": 0, "reasons": ["sensor_gpu"]}
+{"event": "pause", "time": 1795223637.1192582, "case": 0, "reasons": ["solicitud"]}
+{"event": "pause", "time": 1795223640.5735838, "case": 0, "reasons": ["gpu", "solicitud"]}
+{"event": "pause", "time": 1795223641.5171497, "case": 0, "reasons": ["solicitud"]}
+{"event": "pause", "time": 1795223645.2951245, "case": 0, "reasons": ["solicitud", "otra_cpu"]}
+{"event": "pause", "time": 1795223645.608755, "case": 0, "reasons": ["solicitud"]}
+{"event": "pause", "time": 1795223663.2994578, "case": 0, "reasons": ["solicitud", "otra_cpu"]}
+{"event": "pause", "time": 1795223663.621306, "case": 0, "reasons": ["solicitud"]}

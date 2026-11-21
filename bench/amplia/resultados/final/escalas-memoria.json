@@ -1,0 +1,272 @@
+[
+ {
+  "name": "sparsePages",
+  "n": 8192,
+  "lang": "c-audit",
+  "peak": 65536,
+  "allocations": 1,
+  "requested": 65536,
+  "rss": 3825664,
+  "live": 0
+ },
+ {
+  "name": "sparsePages",
+  "n": 8192,
+  "lang": "turi-audit",
+  "peak": 65560,
+  "allocations": 1,
+  "requested": 65560,
+  "rss": 3829760,
+  "live": 0
+ },
+ {
+  "name": "sparsePages",
+  "n": 8192,
+  "lang": "turi-asan",
+  "peak": 65560,
+  "allocations": 1,
+  "requested": 65560,
+  "rss": 42557440,
+  "live": 0
+ },
+ {
+  "name": "sparsePages",
+  "n": 131072,
+  "lang": "c-audit",
+  "peak": 1048576,
+  "allocations": 1,
+  "requested": 1048576,
+  "rss": 4788224,
+  "live": 0
+ },
+ {
+  "name": "sparsePages",
+  "n": 131072,
+  "lang": "turi-audit",
+  "peak": 1048600,
+  "allocations": 1,
+  "requested": 1048600,
+  "rss": 4788224,
+  "live": 0
+ },
+ {
+  "name": "sparsePages",
+  "n": 131072,
+  "lang": "turi-asan",
+  "peak": 1048600,
+  "allocations": 1,
+  "requested": 1048600,
+  "rss": 43614208,
+  "live": 0
+ },
+ {
+  "name": "sparsePages",
+  "n": 1048576,
+  "lang": "c-audit",
+  "peak": 8388608,
+  "allocations": 1,
+  "requested": 8388608,
+  "rss": 12124160,
+  "live": 0
+ },
+ {
+  "name": "sparsePages",
+  "n": 1048576,
+  "lang": "turi-audit",
+  "peak": 8388632,
+  "allocations": 1,
+  "requested": 8388632,
+  "rss": 12132352,
+  "live": 0
+ },
+ {
+  "name": "sparsePages",
+  "n": 1048576,
+  "lang": "turi-asan",
+  "peak": 8388632,
+  "allocations": 1,
+  "requested": 8388632,
+  "rss": 51871744,
+  "live": 0
+ },
+ {
+  "name": "copyIsolation",
+  "n": 8192,
+  "lang": "c-audit",
+  "peak": 131072,
+  "allocations": 2,
+  "requested": 131072,
+  "rss": 3883008,
+  "live": 0
+ },
+ {
+  "name": "copyIsolation",
+  "n": 8192,
+  "lang": "turi-audit",
+  "peak": 131072,
+  "allocations": 2,
+  "requested": 131072,
+  "rss": 3883008,
+  "live": 0
+ },
+ {
+  "name": "copyIsolation",
+  "n": 8192,
+  "lang": "turi-asan",
+  "peak": 131072,
+  "allocations": 2,
+  "requested": 131072,
+  "rss": 42635264,
+  "live": 0
+ },
+ {
+  "name": "copyIsolation",
+  "n": 131072,
+  "lang": "c-audit",
+  "peak": 2097152,
+  "allocations": 2,
+  "requested": 2097152,
+  "rss": 5840896,
+  "live": 0
+ },
+ {
+  "name": "copyIsolation",
+  "n": 131072,
+  "lang": "turi-audit",
+  "peak": 2097152,
+  "allocations": 2,
+  "requested": 2097152,
+  "rss": 5840896,
+  "live": 0
+ },
+ {
+  "name": "copyIsolation",
+  "n": 131072,
+  "lang": "turi-asan",
+  "peak": 2097152,
+  "allocations": 2,
+  "requested": 2097152,
+  "rss": 44814336,
+  "live": 0
+ },
+ {
+  "name": "copyIsolation",
+  "n": 1048576,
+  "lang": "c-audit",
+  "peak": 16777216,
+  "allocations": 2,
+  "requested": 16777216,
+  "rss": 20525056,
+  "live": 0
+ },
+ {
+  "name": "copyIsolation",
+  "n": 1048576,
+  "lang": "turi-audit",
+  "peak": 16777216,
+  "allocations": 2,
+  "requested": 16777216,
+  "rss": 20516864,
+  "live": 0
+ },
+ {
+  "name": "copyIsolation",
+  "n": 1048576,
+  "lang": "turi-asan",
+  "peak": 16777216,
+  "allocations": 2,
+  "requested": 16777216,
+  "rss": 61321216,
+  "live": 0
+ },
+ {
+  "name": "interleaveBuffers",
+  "n": 8192,
+  "lang": "c-audit",
+  "peak": 262144,
+  "allocations": 3,
+  "requested": 262144,
+  "rss": 4018176,
+  "live": 0
+ },
+ {
+  "name": "interleaveBuffers",
+  "n": 8192,
+  "lang": "turi-audit",
+  "peak": 262216,
+  "allocations": 3,
+  "requested": 262216,
+  "rss": 4026368,
+  "live": 0
+ },
+ {
+  "name": "interleaveBuffers",
+  "n": 8192,
+  "lang": "turi-asan",
+  "peak": 262216,
+  "allocations": 3,
+  "requested": 262216,
+  "rss": 42778624,
+  "live": 0
+ },
+ {
+  "name": "interleaveBuffers",
+  "n": 131072,
+  "lang": "c-audit",
+  "peak": 4194304,
+  "allocations": 3,
+  "requested": 4194304,
+  "rss": 7938048,
+  "live": 0
+ },
+ {
+  "name": "interleaveBuffers",
+  "n": 131072,
+  "lang": "turi-audit",
+  "peak": 4194376,
+  "allocations": 3,
+  "requested": 4194376,
+  "rss": 7950336,
+  "live": 0
+ },
+ {
+  "name": "interleaveBuffers",
+  "n": 131072,
+  "lang": "turi-asan",
+  "peak": 4194376,
+  "allocations": 3,
+  "requested": 4194376,
+  "rss": 47206400,
+  "live": 0
+ },
+ {
+  "name": "interleaveBuffers",
+  "n": 1048576,
+  "lang": "c-audit",
+  "peak": 33554432,
+  "allocations": 3,
+  "requested": 33554432,
+  "rss": 37302272,
+  "live": 0
+ },
+ {
+  "name": "interleaveBuffers",
+  "n": 1048576,
+  "lang": "turi-audit",
+  "peak": 33554504,
+  "allocations": 3,
+  "requested": 33554504,
+  "rss": 37306368,
+  "live": 0
+ },
+ {
+  "name": "interleaveBuffers",
+  "n": 1048576,
+  "lang": "turi-asan",
+  "peak": 33554504,
+  "allocations": 3,
+  "requested": 33554504,
+  "rss": 80220160,
+  "live": 0
+ }
+]

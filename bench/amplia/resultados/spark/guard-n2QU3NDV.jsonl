@@ -1,0 +1,53 @@
+{"event": "start", "time": 1795223745.5203245, "cpu": 19, "scheduler": "SCHED_IDLE", "nice": 19, "rss_limit": 134217728, "quiet_s": 8, "machine": "aarch64", "kernel": "6.17.0-1026-nvidia"}
+{"event": "pause", "time": 1795223745.530113, "case": 0, "reasons": ["sensor_gpu"]}
+{"event": "pause", "time": 1795223753.2819912, "case": 0, "reasons": ["otra_cpu"]}
+{"event": "resume", "time": 1795223776.7351506, "case": 0}
+{"event": "accepted", "time": 1795223780.127233, "case": 0}
+{"event": "accepted", "time": 1795223780.1369543, "case": 1}
+{"event": "accepted", "time": 1795223780.1370106, "case": 2}
+{"event": "accepted", "time": 1795223780.1370485, "case": 3}
+{"event": "accepted", "time": 1795223780.1370828, "case": 4}
+{"event": "accepted", "time": 1795223780.1371164, "case": 5}
+{"event": "accepted", "time": 1795223780.1371484, "case": 6}
+{"event": "accepted", "time": 1795223780.1371806, "case": 7}
+{"event": "accepted", "time": 1795223780.137213, "case": 8}
+{"event": "accepted", "time": 1795223780.1372435, "case": 9}
+{"event": "pause", "time": 1795223783.332811, "case": 10, "reasons": ["otra_cpu"]}
+{"event": "resume", "time": 1795223806.6863582, "case": 10}
+{"event": "accepted", "time": 1795223810.0776534, "case": 10}
+{"event": "accepted", "time": 1795223810.0777159, "case": 11}
+{"event": "accepted", "time": 1795223810.0777357, "case": 12}
+{"event": "accepted", "time": 1795223810.0777526, "case": 13}
+{"event": "accepted", "time": 1795223810.0777688, "case": 14}
+{"event": "accepted", "time": 1795223810.0777836, "case": 15}
+{"event": "accepted", "time": 1795223810.077799, "case": 16}
+{"event": "accepted", "time": 1795223810.077815, "case": 17}
+{"event": "accepted", "time": 1795223810.0778303, "case": 18}
+{"event": "accepted", "time": 1795223810.0778458, "case": 19}
+{"event": "pause", "time": 1795223813.4969478, "case": 20, "reasons": ["otra_cpu"]}
+{"event": "pause", "time": 1795223820.6288865, "case": 20, "reasons": ["gpu"]}
+{"event": "pause", "time": 1795223828.3787975, "case": 20, "reasons": ["otra_cpu"]}
+{"event": "resume", "time": 1795223851.8893967, "case": 20}
+{"event": "accepted", "time": 1795223855.4355576, "case": 20}
+{"event": "accepted", "time": 1795223855.435626, "case": 21}
+{"event": "accepted", "time": 1795223855.4356453, "case": 22}
+{"event": "accepted", "time": 1795223855.4356627, "case": 23}
+{"event": "accepted", "time": 1795223855.4356797, "case": 24}
+{"event": "accepted", "time": 1795223855.4356964, "case": 25}
+{"event": "accepted", "time": 1795223855.4357123, "case": 26}
+{"event": "accepted", "time": 1795223855.4357276, "case": 27}
+{"event": "accepted", "time": 1795223855.435744, "case": 28}
+{"event": "accepted", "time": 1795223855.43576, "case": 29}
+{"event": "pause", "time": 1795223856.3759842, "case": 30, "reasons": ["otra_cpu"]}
+{"event": "resume", "time": 1795223882.1143138, "case": 30}
+{"event": "accepted", "time": 1795223885.6599553, "case": 30}
+{"event": "accepted", "time": 1795223885.6600199, "case": 31}
+{"event": "accepted", "time": 1795223885.66004, "case": 32}
+{"event": "accepted", "time": 1795223885.6600573, "case": 33}
+{"event": "accepted", "time": 1795223885.6600738, "case": 34}
+{"event": "accepted", "time": 1795223885.6600902, "case": 35}
+{"event": "accepted", "time": 1795223885.660106, "case": 36}
+{"event": "accepted", "time": 1795223885.6601236, "case": 37}
+{"event": "accepted", "time": 1795223885.6601396, "case": 38}
+{"event": "accepted", "time": 1795223885.6601555, "case": 39}
+{"event": "pause", "time": 1795223888.4617863, "case": 40, "reasons": ["otra_cpu"]}

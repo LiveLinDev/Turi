@@ -1,0 +1,7 @@
+{
+  "funcion": "gcd",
+  "modelo": "Qwen2.5 7B",
+  "original": 57,
+  "con_parametros_var": 47,
+  "oraculo": 21
+}

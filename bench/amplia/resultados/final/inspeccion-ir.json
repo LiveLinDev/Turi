@@ -1,0 +1,44 @@
+[
+  {
+    "caso": "matrixMultiply",
+    "lenguaje": "c",
+    "overflow_sites": 0,
+    "conditional_branches": 21,
+    "integer_vector_operations": 18
+  },
+  {
+    "caso": "matrixMultiply",
+    "lenguaje": "turi",
+    "overflow_sites": 13,
+    "conditional_branches": 41,
+    "integer_vector_operations": 0
+  },
+  {
+    "caso": "sparsePages",
+    "lenguaje": "c",
+    "overflow_sites": 0,
+    "conditional_branches": 22,
+    "integer_vector_operations": 18
+  },
+  {
+    "caso": "sparsePages",
+    "lenguaje": "turi",
+    "overflow_sites": 7,
+    "conditional_branches": 30,
+    "integer_vector_operations": 5
+  },
+  {
+    "caso": "affineStream",
+    "lenguaje": "c",
+    "overflow_sites": 0,
+    "conditional_branches": 5,
+    "integer_vector_operations": 0
+  },
+  {
+    "caso": "affineStream",
+    "lenguaje": "turi",
+    "overflow_sites": 2,
+    "conditional_branches": 7,
+    "integer_vector_operations": 0
+  }
+]

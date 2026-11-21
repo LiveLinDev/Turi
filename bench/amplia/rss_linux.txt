@@ -1,0 +1,11 @@
+package main
+import ("os"; "strings"; "strconv"; "time")
+func startClock() time.Time { return time.Now() }
+func elapsedNS(start time.Time) int64 { return time.Since(start).Nanoseconds() }
+func rss() uint64 {
+    b,e:=os.ReadFile("/proc/self/status"); if e!=nil {panic(e)}
+    for _,line:=range strings.Split(string(b),"\n") {
+        if strings.HasPrefix(line,"VmHWM:") {n,e:=strconv.ParseUint(strings.Fields(line)[1],10,64);if e!=nil {panic(e)};return 1024*n}
+    }
+    panic("VmHWM")
+}

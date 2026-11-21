@@ -1,0 +1,15 @@
+{
+  "model": "qwen2.5:7b",
+  "gguf": "sha256:2bada8a7450677000f678be90653b85d364de7db25eb5ea54136ada5f3933730",
+  "server_build": "b12600",
+  "server_sha256": "0f8ec28998ac8f3eb2648d6432ef176817c44e6e81aa5d54ec95d331e76ef781",
+  "grammar_sha256": "5791c6e9dc1e7977c72e2dfb103357c5577d5f1727942dc0c93cfa036231fe72",
+  "cases_sha256": "5e36785ae19a7e7913565173967fef703e95ac532861040b834e7a51bed6cda2",
+  "runner_sha256": "e682df1896322ec696b37e82647f95044669da341d21ca148a67ba90674ada1b",
+  "temperature": 0,
+  "seed": 20261121,
+  "max_attempts": 3,
+  "context": 4096,
+  "slot": 0,
+  "compiler_sha256": "4b8d1c21fca06ba563b80541bb3d7a95ade2a1baf8d067032725876438404528"
+}

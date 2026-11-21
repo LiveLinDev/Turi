@@ -1,0 +1,5 @@
+﻿modo,card,prefix,intentos,primera,primera_sin_fix,solucionadas,logical,fresh_out,cached,out,por_acierto,prefill_ms,grammar_bytes
+Turi-bare,0,36,48,0,0,0,12894,5231,7663,3330,,966.1,0
+Turi-fixed-cold,279,315,31,6,6,7,17304,17304,0,2892,2472.0,2179.5,0
+Turi-fixed,279,315,31,5,5,6,18249,5058,13191,3455,843.0,677.8,0
+Turi-full,279,315,31,5,5,6,18345,5158,13187,3495,859.7,740.0,0

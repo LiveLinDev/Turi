@@ -1,0 +1,476 @@
+{
+  "tiempos": {
+    "primera": {
+      "ryzen": {
+        "c": {
+          "razon": 0.8726079456585187,
+          "gana": 14,
+          "indeterminado": 21,
+          "pierde": 65
+        },
+        "cpp": {
+          "razon": 0.875495500485083,
+          "gana": 11,
+          "indeterminado": 29,
+          "pierde": 60
+        },
+        "rust": {
+          "razon": 0.9168266196929533,
+          "gana": 15,
+          "indeterminado": 31,
+          "pierde": 54
+        },
+        "goose": {
+          "razon": 0.8201675801448337,
+          "gana": 14,
+          "indeterminado": 9,
+          "pierde": 77
+        },
+        "go": {
+          "razon": 1.1407341862377491,
+          "gana": 46,
+          "indeterminado": 40,
+          "pierde": 14
+        },
+        "turi-base": {
+          "razon": 1.0209529211385537,
+          "gana": 21,
+          "indeterminado": 74,
+          "pierde": 5
+        }
+      },
+      "spark": {
+        "c": {
+          "razon": 0.7277105459260871,
+          "gana": 5,
+          "indeterminado": 14,
+          "pierde": 81
+        },
+        "cpp": {
+          "razon": 0.8868095419731974,
+          "gana": 17,
+          "indeterminado": 19,
+          "pierde": 64
+        },
+        "rust": {
+          "razon": 0.7692639443843198,
+          "gana": 4,
+          "indeterminado": 16,
+          "pierde": 80
+        },
+        "goose": {
+          "razon": 0.7978522181448674,
+          "gana": 12,
+          "indeterminado": 13,
+          "pierde": 75
+        },
+        "go": {
+          "razon": 1.400771039203965,
+          "gana": 86,
+          "indeterminado": 8,
+          "pierde": 6
+        },
+        "turi-base": {
+          "razon": 1.0002963271208203,
+          "gana": 7,
+          "indeterminado": 84,
+          "pierde": 9
+        }
+      }
+    },
+    "final": {
+      "ryzen": {
+        "c": {
+          "razon": 0.8858604437584975,
+          "gana": 12,
+          "indeterminado": 30,
+          "pierde": 58
+        },
+        "cpp": {
+          "razon": 0.8886379289457951,
+          "gana": 14,
+          "indeterminado": 26,
+          "pierde": 60
+        },
+        "rust": {
+          "razon": 0.9320312747892738,
+          "gana": 11,
+          "indeterminado": 43,
+          "pierde": 46
+        },
+        "goose": {
+          "razon": 0.8355559002522731,
+          "gana": 15,
+          "indeterminado": 14,
+          "pierde": 71
+        },
+        "go": {
+          "razon": 1.3064493925111127,
+          "gana": 69,
+          "indeterminado": 16,
+          "pierde": 15
+        },
+        "turi-base": {
+          "razon": 1.0395793979104468,
+          "gana": 25,
+          "indeterminado": 71,
+          "pierde": 4
+        },
+        "turi-v1": {
+          "razon": 1.01496771548146,
+          "gana": 10,
+          "indeterminado": 84,
+          "pierde": 6
+        }
+      },
+      "spark": {
+        "c": {
+          "razon": 0.7400996469516702,
+          "gana": 7,
+          "indeterminado": 11,
+          "pierde": 82
+        },
+        "cpp": {
+          "razon": 0.9039672763536504,
+          "gana": 22,
+          "indeterminado": 17,
+          "pierde": 61
+        },
+        "rust": {
+          "razon": 0.7819108555157416,
+          "gana": 5,
+          "indeterminado": 16,
+          "pierde": 79
+        },
+        "goose": {
+          "razon": 0.8108810583278633,
+          "gana": 12,
+          "indeterminado": 14,
+          "pierde": 74
+        },
+        "go": {
+          "razon": 1.4384241556191422,
+          "gana": 86,
+          "indeterminado": 8,
+          "pierde": 6
+        },
+        "turi-base": {
+          "razon": 1.0173497038793105,
+          "gana": 18,
+          "indeterminado": 80,
+          "pierde": 2
+        },
+        "turi-v1": {
+          "razon": 1.016432292544614,
+          "gana": 14,
+          "indeterminado": 84,
+          "pierde": 2
+        }
+      }
+    }
+  },
+  "memoria": {
+    "ryzen": {
+      "con_heap": 64,
+      "mejor_pico": 57,
+      "peor_pico": 5,
+      "igual_pico": 2,
+      "pico_mediana_antes": 25900.0,
+      "pico_mediana_despues": 21780.0,
+      "asignaciones_antes": 120,
+      "asignaciones_despues": 97,
+      "casos_con_fuga": 0
+    },
+    "spark": {
+      "con_heap": 64,
+      "mejor_pico": 58,
+      "peor_pico": 5,
+      "igual_pico": 1,
+      "pico_mediana_antes": 25916.0,
+      "pico_mediana_despues": 21796.0,
+      "asignaciones_antes": 121,
+      "asignaciones_despues": 240,
+      "casos_con_fuga": 0
+    }
+  },
+  "ia": {
+    "Go-body": {
+      "card": 51,
+      "prefix": 102,
+      "intentos": 19,
+      "primera": 13,
+      "primera_sin_fix": 13,
+      "solucionadas": 14,
+      "logical": 4643,
+      "fresh_out": 2247,
+      "cached": 2396,
+      "out": 849,
+      "por_acierto": 160.5,
+      "prefill_ms": 1416.5,
+      "grammar_bytes": 0
+    },
+    "Go-full": {
+      "card": 283,
+      "prefix": 318,
+      "intentos": 23,
+      "primera": 11,
+      "primera_sin_fix": 11,
+      "solucionadas": 13,
+      "logical": 11325,
+      "fresh_out": 2907,
+      "cached": 8418,
+      "out": 1429,
+      "por_acierto": 223.6,
+      "prefill_ms": 1694.3,
+      "grammar_bytes": 0
+    },
+    "Rust-body": {
+      "card": 69,
+      "prefix": 120,
+      "intentos": 21,
+      "primera": 10,
+      "primera_sin_fix": 10,
+      "solucionadas": 13,
+      "logical": 5611,
+      "fresh_out": 2299,
+      "cached": 3312,
+      "out": 713,
+      "por_acierto": 176.8,
+      "prefill_ms": 1630.9,
+      "grammar_bytes": 0
+    },
+    "Rust-full": {
+      "card": 285,
+      "prefix": 320,
+      "intentos": 26,
+      "primera": 8,
+      "primera_sin_fix": 8,
+      "solucionadas": 8,
+      "logical": 14821,
+      "fresh_out": 4075,
+      "cached": 10746,
+      "out": 2486,
+      "por_acierto": 509.4,
+      "prefill_ms": 1855.6,
+      "grammar_bytes": 0
+    },
+    "Turi-bare": {
+      "card": 0,
+      "prefix": 36,
+      "intentos": 48,
+      "primera": 0,
+      "primera_sin_fix": 0,
+      "solucionadas": 0,
+      "logical": 10556,
+      "fresh_out": 4290,
+      "cached": 6266,
+      "out": 2415,
+      "por_acierto": null,
+      "prefill_ms": 2915.1,
+      "grammar_bytes": 0
+    },
+    "Turi-fixed-cold": {
+      "card": 279,
+      "prefix": 315,
+      "intentos": 20,
+      "primera": 13,
+      "primera_sin_fix": 10,
+      "solucionadas": 13,
+      "logical": 9155,
+      "fresh_out": 9155,
+      "cached": 0,
+      "out": 939,
+      "por_acierto": 704.2,
+      "prefill_ms": 4521.2,
+      "grammar_bytes": 0
+    },
+    "Turi-fixed": {
+      "card": 279,
+      "prefix": 315,
+      "intentos": 19,
+      "primera": 13,
+      "primera_sin_fix": 10,
+      "solucionadas": 13,
+      "logical": 8600,
+      "fresh_out": 2206,
+      "cached": 6394,
+      "out": 896,
+      "por_acierto": 169.7,
+      "prefill_ms": 1442.7,
+      "grammar_bytes": 0
+    },
+    "Turi-full": {
+      "card": 279,
+      "prefix": 315,
+      "intentos": 27,
+      "primera": 10,
+      "primera_sin_fix": 10,
+      "solucionadas": 10,
+      "logical": 13085,
+      "fresh_out": 2888,
+      "cached": 10197,
+      "out": 1378,
+      "por_acierto": 288.8,
+      "prefill_ms": 1814.7,
+      "grammar_bytes": 0
+    },
+    "Turi-guided-cold": {
+      "card": 124,
+      "prefix": 176,
+      "intentos": 20,
+      "primera": 12,
+      "primera_sin_fix": 9,
+      "solucionadas": 12,
+      "logical": 6153,
+      "fresh_out": 6153,
+      "cached": 0,
+      "out": 561,
+      "por_acierto": 512.8,
+      "prefill_ms": 2922.8,
+      "grammar_bytes": 894
+    },
+    "Turi-guided": {
+      "card": 124,
+      "prefix": 176,
+      "intentos": 20,
+      "primera": 12,
+      "primera_sin_fix": 9,
+      "solucionadas": 12,
+      "logical": 7174,
+      "fresh_out": 2721,
+      "cached": 4453,
+      "out": 888,
+      "por_acierto": 226.8,
+      "prefill_ms": 1723.6,
+      "grammar_bytes": 894
+    }
+  },
+  "ia_3b": {
+    "Turi-bare": {
+      "card": 0,
+      "prefix": 36,
+      "intentos": 48,
+      "primera": 0,
+      "primera_sin_fix": 0,
+      "solucionadas": 0,
+      "logical": 12894,
+      "fresh_out": 5231,
+      "cached": 7663,
+      "out": 3330,
+      "por_acierto": null,
+      "prefill_ms": 966.1,
+      "grammar_bytes": 0
+    },
+    "Turi-fixed-cold": {
+      "card": 279,
+      "prefix": 315,
+      "intentos": 31,
+      "primera": 6,
+      "primera_sin_fix": 6,
+      "solucionadas": 7,
+      "logical": 17304,
+      "fresh_out": 17304,
+      "cached": 0,
+      "out": 2892,
+      "por_acierto": 2472.0,
+      "prefill_ms": 2179.5,
+      "grammar_bytes": 0
+    },
+    "Turi-fixed": {
+      "card": 279,
+      "prefix": 315,
+      "intentos": 31,
+      "primera": 5,
+      "primera_sin_fix": 5,
+      "solucionadas": 6,
+      "logical": 18249,
+      "fresh_out": 5058,
+      "cached": 13191,
+      "out": 3455,
+      "por_acierto": 843.0,
+      "prefill_ms": 677.8,
+      "grammar_bytes": 0
+    },
+    "Turi-full": {
+      "card": 279,
+      "prefix": 315,
+      "intentos": 31,
+      "primera": 5,
+      "primera_sin_fix": 5,
+      "solucionadas": 6,
+      "logical": 18345,
+      "fresh_out": 5158,
+      "cached": 13187,
+      "out": 3495,
+      "por_acierto": 859.7,
+      "prefill_ms": 740.0,
+      "grammar_bytes": 0
+    }
+  },
+  "supervision": [
+    {
+      "archivo": "guard-n2QU3NDV.jsonl",
+      "ronda": "primera",
+      "aceptados": 40,
+      "pausas": 8,
+      "descartes": 0,
+      "final": null
+    },
+    {
+      "archivo": "guard-wtlx1W3h.jsonl",
+      "ronda": "primera",
+      "aceptados": 60,
+      "pausas": 7,
+      "descartes": 0,
+      "final": {
+        "event": "complete",
+        "time": 1795224140.0240304,
+        "scans": 634,
+        "min_available_bytes": 17248223232,
+        "max_sensor_gap_s": 0.313,
+        "start_counts": [
+          5880.0,
+          5880.0,
+          263.0
+        ],
+        "end_counts": [
+          5880.0,
+          5880.0,
+          263.0
+        ]
+      }
+    },
+    {
+      "archivo": "guard-yMC9Xwk1.jsonl",
+      "ronda": "primera",
+      "aceptados": 0,
+      "pausas": 8,
+      "descartes": 0,
+      "final": null
+    },
+    {
+      "archivo": "guard-ZVqMvn1F.jsonl",
+      "ronda": "final",
+      "aceptados": 100,
+      "pausas": 18,
+      "descartes": 0,
+      "final": {
+        "event": "complete",
+        "time": 1795224560.6188874,
+        "scans": 1095,
+        "min_available_bytes": 17231085568,
+        "max_sensor_gap_s": 0.321,
+        "start_counts": [
+          5880.0,
+          5880.0,
+          263.0
+        ],
+        "end_counts": [
+          5881.0,
+          5881.0,
+          263.0
+        ]
+      }
+    }
+  ]
+}

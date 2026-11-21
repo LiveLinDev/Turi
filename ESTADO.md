@@ -1,5 +1,7 @@
 # Estado · 20 de noviembre de 2026
 
+Las dos campañas completas de 100 algoritmos por CPU, los contadores de memoria y las pruebas funcionales de generación se encuentran en [Resultados de Ryzen y DGX Spark](bench/amplia/RESULTADOS.md). La tabla siguiente conserva el punto de partida histórico.
+
 | Hito | Estado comprobado |
 |---|---|
 | 1 · Esqueleto | Núcleo C++23, gramáticas Lark y GBNF, intérprete, pruebas y diagnósticos JSON. |
