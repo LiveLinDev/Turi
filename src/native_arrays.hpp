@@ -126,7 +126,7 @@ define internal void @tz.finish(ptr %arena) sanitize_address {
   call void @free(ptr %base)
   ret void
 }
-define internal %array @tz.repeat(i64 %value, i64 %count, ptr %arena, %text %sizeMsg, %text %allocMsg) sanitize_address {
+define internal %array @tz.repeat(i64 %value, i64 %count, ptr %arena, i1 %initialize, %text %sizeMsg, %text %allocMsg) sanitize_address {
 entry:
   %n = call i64 @tz.arrayBytes(i64 %count, %text %sizeMsg, %text %allocMsg)
   %empty = icmp eq i64 %count, 0
@@ -144,7 +144,7 @@ region:
   br label %begin
 begin:
   %p = phi ptr [ %h, %heap ], [ %r, %region ]
-  br label %fill
+  br i1 %initialize, label %fill, label %result
 fill:
   %i = phi i64 [ 0, %begin ], [ %next, %fill ]
   %dest = getelementptr i64, ptr %p, i64 %i

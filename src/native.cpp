@@ -175,7 +175,8 @@ class ModuleWriter {
         case Op::RepeatHeap:
         case Op::RepeatRegion:
             bodies << "  " << result << " = call %array @tz.repeat(" << first() << ", " << operand(op.inputs[1])
-                   << ", ptr " << (op.op == Op::RepeatRegion ? "%arena" : "null") << ", "
+                   << ", ptr " << (op.op == Op::RepeatRegion ? "%arena" : "null") << ", i1 "
+                   << (op.initialize ? "true" : "false") << ", "
                    << diagnostic("R_ARRAY_SIZE", op.span) << ", " << diagnostic("R_ALLOC", op.span) << ")\n";
             break;
         case Op::Clone:
