@@ -28,6 +28,7 @@ ctest --test-dir build --output-on-failure
 | [Decisiones](DECISIONES.md) | Elecciones de implementación y límites |
 | [Expediente](EXPEDIENTE.md) | Diseño y protocolo de comparación |
 | [Piloto de agentes](tools/eval/README.md) | Evaluador local, tareas y respuestas reproducibles |
+| [Coste en tokens frente a Go y Rust](tools/eval/paired/cards/README.md) | 12 tareas emparejadas, tarjetas breves y reparaciones |
 | [Ensayo local de velocidad](bench/local/RESULTADOS.md) | Turi, C, Goose, Rust y Go en tres cargas con entradas dinámicas |
 | [Mediciones de memoria](tests/MEMORIA.md) | Reservas y pico residente en bucles y retornos tempranos |
 

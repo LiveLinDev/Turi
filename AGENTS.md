@@ -11,6 +11,7 @@ Lee `ESTADO.md`, `SPEC.md` y `DECISIONES.md` al empezar. El contrato publicado e
 | CLI, archivos y ediciones por símbolo | `src/main.cpp`, `src/agent.cpp`, `src/driver.cpp` |
 | Pruebas ejecutables y diferencial | `examples/`, `tests/` |
 | Evaluación con modelos locales | `tools/eval/` |
+| Tarjeta mínima medida para funciones escalares | `tools/eval/paired/cards/turi.txt` (279 tokens de Qwen 2.5) |
 | Rendimiento local | `bench/local/PROTOCOLO.md`, `bench/local/resultados/` |
 
 Conserva en los informes los fallos, timeouts y entradas de reproducción. Mantén separados los resultados funcionales y las comparaciones de velocidad del expediente.

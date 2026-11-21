@@ -1,0 +1,14 @@
+Rust. Escribe fn nombre(x: i64) -> i64 y el cuerpo entre llaves. i64 tiene 64 bits con signo; bool contiene true o false. Los parámetros son inmutables por defecto. let declara un nombre local y let mut lo hace modificable. Los literales enteros infieren su tipo por el contexto; la anotación let mut n: i64 = 0 lo fija. Las asignaciones y las declaraciones terminan en punto y coma. return valor; entrega el resultado; también puede hacerlo una expresión final sin punto y coma. Las condiciones de if y while van sin paréntesis. La alternativa se escribe } else {. for i in 0..n excluye n. La división entera trunca hacia cero. El resto es %, la igualdad ==, la conjunción && y la disyunción ||. Usa los nombres exactos de la firma.
+
+fn adjust(value: i64, steps: i64) -> i64 {
+    let mut result = value;
+    let mut left = steps;
+    while left > 0 {
+        result += 3;
+        left -= 1;
+    }
+    if result == 12 {
+        return 99;
+    }
+    return result;
+}

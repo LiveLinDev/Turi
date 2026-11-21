@@ -12,6 +12,8 @@ Qwen 2.5 3B alcanzó 31/50 al primer intento de compilación a LLVM IR y Qwen 2.
 
 Siete grupos de CTest pasaron en Windows x64, tanto en release como con el compilador instrumentado con ASan y UBSan. La suite semántica contiene 3.405 programas. Se realizaron 40.000 ejecuciones con mutación guiada por cobertura del núcleo previo a los arreglos. Véanse `tests/SANITIZERS.md` y `tests/MEMORIA.md`.
 
+**Tokens y compilación.** En las mismas 12 tareas escalares con Qwen 2.5 7B, una tarjeta de 279 tokens llevó a Turi de 0/12 a 7/12 al primer intento. Con tarjetas de tamaño comparable y hasta tres intentos, Turi compiló 8/12 con 10.692 tokens acumulados, Go 11/12 con 8.444 y Rust 12/12 con 5.429. Los totales incluyen errores y reparaciones. Esta segunda prueba mide compilación. Todavía no demuestra un ahorro hasta una solución funcional. Datos y causas en `tools/eval/paired/cards/README.md`.
+
 **Rendimiento local.** En el Ryzen 7 7700X se verificaron 693 ejecuciones en la serie integrada. Turi aventajó a C y Goose en el escalar y con arreglos temporales. En el recorrido de arreglo la diferencia fue inconclusa. Rust ganó en escalar. La prueba reservada para la eliminación del llenado dio 1,52× frente al compilador Turi anterior. Fuentes, datos y límites en `bench/local/RESULTADOS.md`.
 
 **Siguiente cuello de botella.** Ampliar la propiedad de arreglos a campos de agregados, con destrucción en todos los caminos. Seguir con pools generacionales, recursos de ámbito y cargas de larga vida según `bench/HITO4.md`. El benchmark formal requiere las ocho implementaciones, sus controles de memoria y una máquina física adecuada al protocolo. La reducción de tokens hasta un programa funcional frente a Go y Rust sigue abierta.
