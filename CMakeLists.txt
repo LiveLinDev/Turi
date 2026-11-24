@@ -4,9 +4,21 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_program(VELOZ_CLANG NAMES clang-23 clang PATHS "C:/Program Files/LLVM/bin")
+set(VELOZ_CLANG_MAJOR 23)
+if(VELOZ_CLANG)
+  execute_process(
+    COMMAND "${VELOZ_CLANG}" --version
+    OUTPUT_VARIABLE _veloz_clang_ver
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  if(_veloz_clang_ver MATCHES "version ([0-9]+)\\.")
+    set(VELOZ_CLANG_MAJOR "${CMAKE_MATCH_1}")
+  endif()
+endif()
 function(add_veloz target param_var)
   add_executable(${target} src/main.cpp src/agent.cpp src/format.cpp src/driver.cpp src/generics.cpp src/parser.cpp src/project.cpp src/semantics.cpp src/native.cpp src/tooling.cpp)
-  target_compile_definitions(${target} PRIVATE VELOZ_VERSION="${PROJECT_VERSION}" TURI_PARAM_VAR=${param_var})
+  target_compile_definitions(${target} PRIVATE VELOZ_VERSION="${PROJECT_VERSION}" TURI_PARAM_VAR=${param_var} VELOZ_CLANG_MAJOR=${VELOZ_CLANG_MAJOR})
   if(VELOZ_CLANG)
     target_compile_definitions(${target} PRIVATE VELOZ_CLANG_PATH="${VELOZ_CLANG}")
   endif()

@@ -500,10 +500,7 @@ fn main() {{
             assert op == 8, op
 
         # Graceful shutdown
-        proc.stdin.write("q\n")
-        proc.stdin.flush()
-        proc.stdin.close()
-        out, err = proc.communicate(timeout=10)
+        out, err = proc.communicate(input="q\n", timeout=10)
         assert proc.returncode == 0, (proc.returncode, out, err)
         assert "SALIDA_LIMPIA" in out, (out, err)
     finally:
@@ -708,10 +705,7 @@ fn main() {{
             r_ok = subprocess.run([str(tls_cli_exe)], env=env_ca, capture_output=True, text=True, timeout=15)
             assert r_ok.returncode == 0 and r_ok.stdout.strip() == "OK:200:pong-tls", (r_ok.stdout, r_ok.stderr)
 
-            tproc.stdin.write("q\n")
-            tproc.stdin.flush()
-            tproc.stdin.close()
-            tout, terr = tproc.communicate(timeout=10)
+            tout, terr = tproc.communicate(input="q\n", timeout=10)
             assert tproc.returncode == 0 and "TLS_SALIDA_LIMPIA" in tout, (tproc.returncode, tout, terr)
         finally:
             if tproc.poll() is None:

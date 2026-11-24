@@ -36,10 +36,15 @@ declare i32 @llvm.smax.i32(i32, i32)
 declare i16 @llvm.smin.i16(i16, i16)
 declare i16 @llvm.smax.i16(i16, i16)
 declare i32 @llvm.bswap.i32(i32)
-declare void @llvm.lifetime.start.p0(ptr)
-declare void @llvm.lifetime.end.p0(ptr)
 
 )ll";
+#if defined(VELOZ_CLANG_MAJOR) && VELOZ_CLANG_MAJOR < 22
+    out << "declare void @llvm.lifetime.start.p0(i64, ptr)\n"
+        << "declare void @llvm.lifetime.end.p0(i64, ptr)\n\n";
+#else
+    out << "declare void @llvm.lifetime.start.p0(ptr)\n"
+        << "declare void @llvm.lifetime.end.p0(ptr)\n\n";
+#endif
     const auto table = [&](std::string_view name, const std::vector<std::string>& entries) {
         out << '@' << name << " = private unnamed_addr constant [" << entries.size() << " x %text] [\n";
         for (std::size_t i = 0; i < entries.size(); ++i)

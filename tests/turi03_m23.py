@@ -527,7 +527,7 @@ fn main() {
     assert chk.returncode == 0, chk.stderr
     interp = run_cmd([str(cli), "run", str(main_file)])
     assert interp.returncode == 0, interp.stderr
-    exe = workdir / ("pkg_m23" + (".exe" if os.name == "nt" else ""))
+    exe = workdir / ("pkg_m23_bin" + (".exe" if os.name == "nt" else ""))
     bld = run_cmd([str(cli), "build", str(main_file), "-o", str(exe)])
     assert bld.returncode == 0, bld.stderr
     nat = run_cmd([str(exe)])

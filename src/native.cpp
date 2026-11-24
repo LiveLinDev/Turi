@@ -3548,7 +3548,11 @@ class ModuleWriter {
             if (emitsRegion) {
                 if (!curPureStackArena) bodies << "  call void @tz.finish(ptr %arena)\n";
                 if (emitsStackArena)
+#if defined(VELOZ_CLANG_MAJOR) && VELOZ_CLANG_MAJOR < 22
+                    bodies << "  call void @llvm.lifetime.end.p0(i64 -1, ptr %arenaStack)\n";
+#else
                     bodies << "  call void @llvm.lifetime.end.p0(ptr %arenaStack)\n";
+#endif
             }
             bodies << "  ret " << (block.value ? operand(*block.value) : "void") << "\n";
             break;
@@ -3864,7 +3868,11 @@ public:
         }
         if (ir.usesRegion) {
             if (ir.canStackArena) {
+#if defined(VELOZ_CLANG_MAJOR) && VELOZ_CLANG_MAJOR < 22
+                bodies << "  call void @llvm.lifetime.start.p0(i64 -1, ptr %arenaStack)\n"
+#else
                 bodies << "  call void @llvm.lifetime.start.p0(ptr %arenaStack)\n"
+#endif
                        << "  store %chunk { ptr null, i64 " << stackArenaBytes << ", i64 0, i64 0 }, ptr %arenaStack\n"
                        << "  store ptr %arenaStack, ptr %arena\n";
             } else {

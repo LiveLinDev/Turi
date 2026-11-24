@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory() as td:
         chk = run_cli("check", entry)
         assert chk.returncode == 0, (tmpl, chk.stdout, chk.stderr)
         if has_main:
-            exe = tmp / f"{name}.exe" if sys.platform == "win32" else tmp / name
+            exe = tmp / (f"{name}_bin.exe" if sys.platform == "win32" else f"{name}_bin")
             bld = run_cli("build", entry, "-o", exe, "--release")
             assert bld.returncode == 0, (tmpl, bld.stdout, bld.stderr)
             run_p = subprocess.run([str(exe)], capture_output=True, text=True, encoding="utf-8", timeout=20)

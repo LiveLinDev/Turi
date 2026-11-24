@@ -666,7 +666,7 @@ fn main() {
 
     interp = run_cmd([str(cli), "run", str(app_entry)])
     assert interp.returncode == 0, interp.stderr
-    exe = workdir / ("pkg_dyn.exe" if os.name == "nt" else "pkg_dyn")
+    exe = workdir / ("pkg_dyn_bin.exe" if os.name == "nt" else "pkg_dyn_bin")
     bld = run_cmd([str(cli), "build", str(app_entry), "-o", str(exe)])
     assert bld.returncode == 0, bld.stderr
     nat = run_cmd([str(exe)])
