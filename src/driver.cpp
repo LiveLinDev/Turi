@@ -1,7 +1,17 @@
 #include "commands.hpp"
+#include "native_collections_rt.hpp"
+#include "native_conc_rt.hpp"
+#include "native_crypto_rt.hpp"
+#include "native_gpu_rt.hpp"
+#include "native_pg_rt.hpp"
+#include "native_sys_rt.hpp"
+#include "native_web_rt.hpp"
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <random>
@@ -74,7 +84,7 @@ std::wstring quoteArgument(std::wstring_view arg) {
     return result + L'"';
 }
 #endif
-int clangProcess(const std::vector<fs::path>& args) {
+int spawnProcess(const std::vector<fs::path>& args, const char* errId, const char* errMsg) {
 #ifdef _WIN32
     std::wstring line;
     for (const auto& arg : args) {
@@ -84,7 +94,7 @@ int clangProcess(const std::vector<fs::path>& args) {
     STARTUPINFOW si{}; si.cb = sizeof(si);
     PROCESS_INFORMATION info{};
     if (!CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &info))
-        throw Diagnostic("E_CLANG", "No se pudo iniciar Clang. Configura VELOZ_CLANG.", {});
+        throw Diagnostic(errId, errMsg, {});
     CloseHandle(info.hThread);
     WaitForSingleObject(info.hProcess, INFINITE);
     DWORD code = 1;
@@ -97,13 +107,76 @@ int clangProcess(const std::vector<fs::path>& args) {
     argv.push_back(nullptr);
     pid_t child;
     if (posix_spawnp(&child, argv[0], nullptr, nullptr, argv.data(), environ))
-        throw Diagnostic("E_CLANG", "No se pudo iniciar Clang. Configura VELOZ_CLANG.", {});
+        throw Diagnostic(errId, errMsg, {});
     int status = 0;
     while (waitpid(child, &status, 0) < 0) {
         if (errno != EINTR) return 1;
     }
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 #endif
+}
+int clangProcess(const std::vector<fs::path>& args) {
+    return spawnProcess(args, "E_CLANG", "No se pudo iniciar Clang. Configura VELOZ_CLANG.");
+}
+fs::path envPath(const char* asciiName) {
+#ifdef _WIN32
+    std::wstring wname(asciiName, asciiName + std::strlen(asciiName));
+    wchar_t* val = nullptr;
+    std::size_t len = 0;
+    fs::path out;
+    if (!_wdupenv_s(&val, &len, wname.c_str()) && len > 1 && val) out = fs::path(val);
+    std::free(val);
+    return out;
+#else
+    if (const char* env = std::getenv(asciiName); env && *env) return pathFrom(env);
+    return {};
+#endif
+}
+fs::path selfExeDir() {
+#ifdef _WIN32
+    std::wstring buf(32768, L'\0');
+    DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n > 0 && n < buf.size()) return fs::path(buf.substr(0, n)).parent_path();
+#else
+    std::array<char, 4096> buf{};
+    ssize_t n = readlink("/proc/self/exe", buf.data(), buf.size() - 1);
+    if (n > 0) return fs::path(std::string(buf.data(), static_cast<std::size_t>(n))).parent_path();
+#endif
+    return fs::current_path();
+}
+fs::path findSuperoptScript() {
+    if (auto env = envPath("VELOZ_SUPEROPT"); !env.empty() && fs::exists(env)) return env;
+    auto checkAncestors = [](fs::path dir) -> fs::path {
+        for (int i = 0; i < 6 && !dir.empty(); ++i) {
+            auto cand = dir / "tools" / "superopt" / "superopt.py";
+            if (fs::exists(cand)) return cand;
+            auto parent = dir.parent_path();
+            if (parent == dir) break;
+            dir = parent;
+        }
+        return {};
+    };
+    if (auto p = checkAncestors(fs::current_path()); !p.empty()) return p;
+    return checkAncestors(selfExeDir());
+}
+std::string jsonEscape(std::string_view text) {
+    std::string out = "\"";
+    for (unsigned char c : text) {
+        if (c == '\\') out += "\\\\";
+        else if (c == '"') out += "\\\"";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else if (c < 0x20) {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+            out += buf;
+        } else {
+            out += static_cast<char>(c);
+        }
+    }
+    out += '"';
+    return out;
 }
 }
 void replaceFile(const fs::path& file, std::string_view text) {
@@ -139,12 +212,230 @@ void buildBinary(const Program& program, const fs::path& destination, const Buil
     std::vector<fs::path> args{clang, options.release ? "-O3" : "-O2"};
     if (!options.cpu.empty()) args.push_back(pathFrom("-march=" + options.cpu));
     if (options.release) args.insert(args.end(), {"-flto", "-fuse-ld=lld"});
-    args.insert(args.end(), {"-Wno-override-module", "-x", "ir", source, "-o", exe});
+    if (options.hasPgoGen) {
+        args.push_back(options.pgoGen.empty() ? fs::path("-fprofile-generate")
+                                              : pathFrom("-fprofile-generate=" + options.pgoGen));
+    } else if (!options.pgoUse.empty()) {
+        args.push_back(pathFrom("-fprofile-use=" + options.pgoUse));
+    }
+    args.insert(args.end(), {"-Wno-override-module"});
+    std::vector<fs::path> extraC;
+    std::vector<std::string> cFlags;
+    const bool usesNet = (ir.find("@tz_sys_tcp_") != std::string::npos ||
+                          ir.find("@tz_sys_sock_") != std::string::npos);
+    [[maybe_unused]] const bool usesMutex = (ir.find("@tz_sys_mutex_") != std::string::npos ||
+                                             ir.find("@tz_sys_lock_") != std::string::npos);
+    if (ir.find("@tz_sys_") != std::string::npos) {
+        auto rtSource = stage.dir / "turi_rt.c";
+        writeFile(rtSource, native::turiSysRuntimeC());
+        if (usesNet) {
+            args.emplace_back("-DTZ_USE_NET");
+            cFlags.emplace_back("-DTZ_USE_NET");
+        }
+        args.insert(args.end(), {"-x", "c", rtSource});
+        extraC.push_back(rtSource);
+    }
+    const bool usesConc = (ir.find("@tz_conc_") != std::string::npos);
+    if (ir.find("@tz_col_") != std::string::npos) {
+        auto colRtSource = stage.dir / "turi_col_rt.c";
+        writeFile(colRtSource, native::turiCollectionsRuntimeC());
+        args.insert(args.end(), {"-x", "c", colRtSource});
+        extraC.push_back(colRtSource);
+    }
+    if (usesConc) {
+        auto concRtSource = stage.dir / "turi_conc_rt.c";
+        writeFile(concRtSource, native::turiConcurrencyRuntimeC());
+        args.insert(args.end(), {"-x", "c", concRtSource});
+        extraC.push_back(concRtSource);
+    }
+    auto hasIrCallOrRef = [&](std::string_view prefix) {
+        std::size_t pos = 0;
+        while ((pos = ir.find(prefix, pos)) != std::string::npos) {
+            const std::size_t lineStart = ir.rfind('\n', pos);
+            const std::size_t start = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+            const std::size_t lineEnd = ir.find('\n', pos);
+            const std::string_view line = std::string_view(ir).substr(
+                start, (lineEnd == std::string::npos ? ir.size() : lineEnd) - start);
+            if (!line.starts_with("declare ")) return true;
+            pos += prefix.size();
+        }
+        return false;
+    };
+    const bool needWs = hasIrCallOrRef("@tz_web_ws_");
+    const bool needSrv = options.web || needWs || hasIrCallOrRef("@tz_web_srv_");
+    const bool needClient = hasIrCallOrRef("@tz_web_cli_");
+    const bool needSql = hasIrCallOrRef("@tz_web_sql_");
+    const bool needTls = hasIrCallOrRef("@tz_web_tls_");
+    const bool usesWeb = needSrv || needClient || needSql || needTls;
+    if (usesWeb) {
+        auto webRtSource = stage.dir / "turi_web_rt.c";
+        writeFile(webRtSource, native::turiWebRuntimeC(needSrv, needWs, needClient, needSql, needTls));
+        args.insert(args.end(), {"-x", "c", webRtSource});
+        extraC.push_back(webRtSource);
+    }
+    const bool usesGpu = options.gpu || hasIrCallOrRef("@tz_gpu_");
+    if (usesGpu) {
+        auto gpuRtSource = stage.dir / "turi_gpu_rt.c";
+        writeFile(gpuRtSource, native::turiGpuRuntimeC());
+        args.insert(args.end(), {"-x", "c", gpuRtSource});
+        extraC.push_back(gpuRtSource);
+    }
+    const bool usesCrypto = hasIrCallOrRef("@tz_crypto_");
+    if (usesCrypto) {
+        auto cryptoRtSource = stage.dir / "turi_crypto_rt.c";
+        writeFile(cryptoRtSource, native::turiCryptoRuntimeC());
+        args.insert(args.end(), {"-x", "c", cryptoRtSource});
+        extraC.push_back(cryptoRtSource);
+    }
+    const bool usesPg = hasIrCallOrRef("@tz_pg_");
+    if (usesPg) {
+        auto pgRtSource = stage.dir / "turi_pg_rt.c";
+        writeFile(pgRtSource, native::turiPgRuntimeC());
+        args.insert(args.end(), {"-x", "c", pgRtSource});
+        extraC.push_back(pgRtSource);
+    }
+    std::vector<fs::path> linkFlags;
+    std::vector<std::string> rawLinkFlags;
+    auto pushLink = [&](std::string s) {
+        linkFlags.push_back(pathFrom(s));
+        rawLinkFlags.push_back(std::move(s));
+    };
+    std::vector<std::string> seenLibs;
+    std::vector<std::string> libFileInputs;
+    for (const auto& lib : program.linkLibs) {
+        if (lib.empty() || std::find(seenLibs.begin(), seenLibs.end(), lib) != seenLibs.end()) continue;
+        seenLibs.push_back(lib);
+        const bool isPath = lib.find('/') != std::string::npos || lib.find('\\') != std::string::npos ||
+                            lib.ends_with(".o") || lib.ends_with(".obj") || lib.ends_with(".a") ||
+                            lib.ends_with(".lib") || lib.ends_with(".so") || lib.ends_with(".dylib") ||
+                            lib.ends_with(".dll");
+        if (isPath) libFileInputs.push_back(lib);
+        else pushLink("-l" + lib);
+    }
 #ifdef _WIN32
-    args.insert(args.end(), {"-Xlinker", "/STACK:33554432"});
+    if (usesNet || usesWeb) pushLink("-lws2_32");
+    if (needSrv) pushLink("-lmswsock");
+    if (usesCrypto) pushLink("-lbcrypt");
+    if (usesWeb && options.release) {
+        pushLink("-Xlinker"); pushLink("/OPT:REF");
+        pushLink("-Xlinker"); pushLink("/OPT:ICF");
+    }
+    pushLink("-Xlinker"); pushLink("/STACK:33554432");
+#else
+    if (ir.find("@tz_sys_") != std::string::npos ||
+        ir.find("@tz_col_") != std::string::npos ||
+        ir.find("@llvm.sin.") != std::string::npos ||
+        ir.find("@llvm.cos.") != std::string::npos ||
+        ir.find("@llvm.pow.") != std::string::npos ||
+        ir.find("@llvm.round.") != std::string::npos ||
+        ir.find("@llvm.fma.") != std::string::npos ||
+        ir.find("@llvm.sqrt.") != std::string::npos) {
+        pushLink("-lm");
+    }
+    if (usesMutex || usesConc || usesWeb) pushLink("-lpthread");
+    if (needSql || needTls || needClient || usesGpu || usesPg) pushLink("-ldl");
+    if (usesWeb && options.release) {
+        pushLink("-ffunction-sections");
+        pushLink("-fdata-sections");
+        pushLink("-Wl,--gc-sections");
+    }
 #endif
-    if (clangProcess(args))
-        throw Diagnostic("E_CLANG", "Clang no pudo producir el ejecutable", {});
+    args.insert(args.end(), {"-x", "ir", source});
+    if (!libFileInputs.empty()) {
+        args.push_back("-x");
+        args.push_back("none");
+        for (const auto& lib : libFileInputs) {
+            args.push_back(pathFrom(lib));
+            rawLinkFlags.push_back(lib);
+        }
+    }
+    args.insert(args.end(), {"-o", exe});
+    args.insert(args.end(), linkFlags.begin(), linkFlags.end());
+    if (options.extreme && !options.hasPgoGen && options.pgoUse.empty()) {
+        fs::path script = findSuperoptScript();
+        if (script.empty()) {
+            throw Diagnostic("E_EXTREME", "No se encontró tools/superopt/superopt.py (configura VELOZ_SUPEROPT).", {});
+        }
+        fs::path py = envPath("VELOZ_PYTHON");
+        if (py.empty()) {
+#ifdef _WIN32
+            py = pathFrom("python");
+#else
+            py = pathFrom("python3");
+#endif
+        }
+        fs::path cacheDir = options.extremeCache.empty()
+                                ? (fs::absolute(destination).parent_path() / ".turi-extreme-cache")
+                                : pathFrom(options.extremeCache);
+        std::string jobJson = "{\n";
+        jobJson += "  \"ir\": " + jsonEscape(pathText(source)) + ",\n";
+        jobJson += "  \"source_path\": " + jsonEscape(options.sourcePath) + ",\n";
+        jobJson += "  \"output\": " + jsonEscape(pathText(exe)) + ",\n";
+        jobJson += "  \"clang\": " + jsonEscape(pathText(clang)) + ",\n";
+        jobJson += "  \"cpu\": " + jsonEscape(options.cpu) + ",\n";
+        jobJson += "  \"release\": " + std::string(options.release ? "true" : "false") + ",\n";
+        jobJson += "  \"budget\": " + std::to_string(options.extremeBudget) + ",\n";
+        jobJson += "  \"cache\": " + jsonEscape(pathText(cacheDir)) + ",\n";
+        jobJson += "  \"train\": " + jsonEscape(options.extremeTrain) + ",\n";
+        jobJson += "  \"proposer_cmd\": " + jsonEscape(options.extremeProposer) + ",\n";
+        jobJson += "  \"extra_c\": [";
+        for (std::size_t i = 0; i < extraC.size(); ++i) {
+            if (i) jobJson += ", ";
+            jobJson += jsonEscape(pathText(extraC[i]));
+        }
+        jobJson += "],\n  \"c_flags\": [";
+        for (std::size_t i = 0; i < cFlags.size(); ++i) {
+            if (i) jobJson += ", ";
+            jobJson += jsonEscape(cFlags[i]);
+        }
+        jobJson += "],\n  \"link_flags\": [";
+        for (std::size_t i = 0; i < rawLinkFlags.size(); ++i) {
+            if (i) jobJson += ", ";
+            jobJson += jsonEscape(rawLinkFlags[i]);
+        }
+        jobJson += "]\n}\n";
+        auto jobPath = stage.dir / "superopt_job.json";
+        writeFile(jobPath, jobJson);
+        if (spawnProcess({py, script, "--job", jobPath, "--quiet"},
+                         "E_EXTREME", "No se pudo iniciar Python para --extreme (configura VELOZ_PYTHON).") ||
+            !fs::exists(exe)) {
+            throw Diagnostic("E_EXTREME", "La optimización --extreme falló sin producir el ejecutable", {});
+        }
+    } else if (options.release && !options.cpu.empty()) {
+        // Compile LLVM IR to native object first so lld LTO does not drop -march=<cpu> target features.
+        auto irObj = stage.dir / "program.o";
+        std::vector<fs::path> irArgs{clang, "-O3", pathFrom("-march=" + options.cpu)};
+        if (options.hasPgoGen) {
+            irArgs.push_back(options.pgoGen.empty() ? fs::path("-fprofile-generate")
+                                                    : pathFrom("-fprofile-generate=" + options.pgoGen));
+        } else if (!options.pgoUse.empty()) {
+            irArgs.push_back(pathFrom("-fprofile-use=" + options.pgoUse));
+        }
+        irArgs.insert(irArgs.end(), {"-Wno-override-module", "-c", "-x", "ir", source, "-o", irObj});
+        if (clangProcess(irArgs))
+            throw Diagnostic("E_CLANG", "Clang no pudo compilar el IR nativo", {});
+
+        std::vector<fs::path> linkArgs{clang, "-O3", pathFrom("-march=" + options.cpu), "-fuse-ld=lld"};
+        if (options.hasPgoGen) {
+            linkArgs.push_back(options.pgoGen.empty() ? fs::path("-fprofile-generate")
+                                                      : pathFrom("-fprofile-generate=" + options.pgoGen));
+        } else if (!options.pgoUse.empty()) {
+            linkArgs.push_back(pathFrom("-fprofile-use=" + options.pgoUse));
+        }
+        linkArgs.push_back("-Wno-override-module");
+        for (const auto& cf : cFlags) linkArgs.push_back(pathFrom(cf));
+        for (const auto& ec : extraC) linkArgs.insert(linkArgs.end(), {"-x", "c", ec});
+        if (!extraC.empty()) linkArgs.push_back("-x"), linkArgs.push_back("none");
+        linkArgs.push_back(irObj);
+        for (const auto& lib : libFileInputs) linkArgs.push_back(pathFrom(lib));
+        linkArgs.insert(linkArgs.end(), {"-o", exe});
+        linkArgs.insert(linkArgs.end(), linkFlags.begin(), linkFlags.end());
+        if (clangProcess(linkArgs))
+            throw Diagnostic("E_CLANG", "Clang no pudo enlazar el ejecutable", {});
+    } else {
+        if (clangProcess(args))
+            throw Diagnostic("E_CLANG", "Clang no pudo producir el ejecutable", {});
+    }
     publish(exe, destination);
 }
 }

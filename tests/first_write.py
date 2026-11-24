@@ -61,7 +61,7 @@ def main():
             src.write_bytes((prelude + "\nfn main() {\n" + body + "\n}\n").encode())
             ir = execute(cli, "emit-ir", src)
             assert ir.returncode == 0, ir.stderr
-            sites = re.findall(rb"call %array @tz\.repeat\([^\n]*?ptr (?:%arena|null), i1 (true|false),", ir.stdout)
+            sites = re.findall(rb"call %array @tz\.repeat(?:\.i\d+)?\([^\n]*?ptr (?:%arena|null), i1 (true|false),", ir.stdout)
             assert sites == [b"false" if elide else b"true"], (body, sites)
             build = execute(cli, "build", src, "-o", exe)
             assert build.returncode == 0, build.stderr

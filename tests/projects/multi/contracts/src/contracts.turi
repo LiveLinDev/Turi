@@ -1,0 +1,7 @@
+interface Scored {
+    fn scoreOf(value: Self) -> int
+}
+
+test "la dependencia no se ejecuta" {
+    assert false
+}

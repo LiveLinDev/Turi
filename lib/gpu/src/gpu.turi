@@ -1,0 +1,363 @@
+// Cómputo GPU opt-in sobre OpenCL cargado dinámicamente (cero dependencias cuando no se importa).
+
+extern "C" {
+    fn tz_gpu_available() -> i32
+    fn tz_gpu_device_name(outLen: MutPtr<i64>) -> Ptr<u8>
+    fn tz_gpu_init(errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> MutPtr<void>
+    fn tz_gpu_free(ctx: MutPtr<void>)
+    fn tz_gpu_saxpy_f32(ctx: MutPtr<void>, alpha: f32, x: Ptr<f32>, y: MutPtr<f32>, n: i64,
+                        outH2dMs: MutPtr<f64>, outKernMs: MutPtr<f64>, outD2hMs: MutPtr<f64>,
+                        errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> i32
+    fn tz_gpu_matmul_f32(ctx: MutPtr<void>, a: Ptr<f32>, b: Ptr<f32>, cOut: MutPtr<f32>,
+                         m: i64, k: i64, n: i64,
+                         outH2dMs: MutPtr<f64>, outKernMs: MutPtr<f64>, outD2hMs: MutPtr<f64>,
+                         errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> i32
+    fn tz_gpu_buf_alloc(ctx: MutPtr<void>, count: i64) -> MutPtr<void>
+    fn tz_gpu_buf_free(buf: MutPtr<void>)
+    fn tz_gpu_buf_upload(ctx: MutPtr<void>, buf: MutPtr<void>, src: Ptr<f32>, count: i64, outMs: MutPtr<f64>) -> i32
+    fn tz_gpu_buf_download(ctx: MutPtr<void>, buf: MutPtr<void>, dst: MutPtr<f32>, count: i64, outMs: MutPtr<f64>) -> i32
+    fn tz_gpu_saxpy_resident_f32(ctx: MutPtr<void>, alpha: f32, bx: MutPtr<void>, by: MutPtr<void>,
+                                 n: i64, outKernMs: MutPtr<f64>) -> i32
+    fn tz_gpu_matmul_resident_f32(ctx: MutPtr<void>, ba: MutPtr<void>, bb: MutPtr<void>, bc: MutPtr<void>,
+                                  m: i64, k: i64, n: i64, outKernMs: MutPtr<f64>) -> i32
+    fn tz_gpu_cache_hit() -> i64
+    fn tz_gpu_relu_f32(ctx: MutPtr<void>, x: Ptr<f32>, y: MutPtr<f32>, n: i64,
+                       outH2dMs: MutPtr<f64>, outKernMs: MutPtr<f64>, outD2hMs: MutPtr<f64>,
+                       errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> i32
+    fn tz_gpu_vec_add_f32(ctx: MutPtr<void>, a: Ptr<f32>, b: Ptr<f32>, out: MutPtr<f32>, n: i64,
+                          outH2dMs: MutPtr<f64>, outKernMs: MutPtr<f64>, outD2hMs: MutPtr<f64>,
+                          errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> i32
+    fn tz_gpu_vec_mul_f32(ctx: MutPtr<void>, a: Ptr<f32>, b: Ptr<f32>, out: MutPtr<f32>, n: i64,
+                          outH2dMs: MutPtr<f64>, outKernMs: MutPtr<f64>, outD2hMs: MutPtr<f64>,
+                          errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> i32
+}
+
+struct ContextoGpu {
+    ptr: MutPtr<void>
+}
+
+struct BufferF32 {
+    ptr: MutPtr<void>
+    longitud: int
+}
+
+struct TiempoGpu {
+    h2dMs: float
+    kernelMs: float
+    d2hMs: float
+    totalMs: float
+}
+
+fn disponible() -> bool {
+    trusted {
+        return tz_gpu_available() != i32(0)
+    }
+}
+
+fn nombreDispositivo() -> str {
+    trusted {
+        var n = i64(0)
+        let p = tz_gpu_device_name(mutPtrOf(mut n))
+        return strFromPtr(p, n)
+    }
+}
+
+fn iniciar() -> Result<ContextoGpu, str> {
+    trusted {
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let p = tz_gpu_init(mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ptrIsNull(p) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(ContextoGpu { ptr: p })
+    }
+}
+
+fn cerrar(ctx: ContextoGpu) {
+    trusted {
+        if !ptrIsNull(ctx.ptr) {
+            tz_gpu_free(ctx.ptr)
+        }
+    }
+}
+
+fn saxpyF32(ctx: ContextoGpu, alpha: f32, x: [f32], y: mut [f32]) -> Result<TiempoGpu, str> {
+    if ptrIsNull(ctx.ptr) {
+        return Err("ContextoGpu cerrado o nulo")
+    }
+    let n = len(x)
+    if len(y) != n {
+        return Err("Longitudes distintas en saxpyF32")
+    }
+    trusted {
+        var h2d = 0.0
+        var kern = 0.0
+        var d2h = 0.0
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_gpu_saxpy_f32(
+            ctx.ptr, alpha, slicePtr(x), mutSlicePtr(mut y), i64(n),
+            mutPtrOf(mut h2d), mutPtrOf(mut kern), mutPtrOf(mut d2h),
+            mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(TiempoGpu { h2dMs: h2d, kernelMs: kern, d2hMs: d2h, totalMs: h2d + kern + d2h })
+    }
+}
+
+fn matmulF32(ctx: ContextoGpu, a: [f32], b: [f32], c: mut [f32], m: int, k: int, n: int) -> Result<TiempoGpu, str> {
+    if ptrIsNull(ctx.ptr) {
+        return Err("ContextoGpu cerrado o nulo")
+    }
+    if m <= 0 || k <= 0 || n <= 0 {
+        return Err("Dimensiones no positivas en matmulF32")
+    }
+    if len(a) != m * k || len(b) != k * n || len(c) != m * n {
+        return Err("Dimensiones incompatibles con los arreglos en matmulF32")
+    }
+    trusted {
+        var h2d = 0.0
+        var kern = 0.0
+        var d2h = 0.0
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_gpu_matmul_f32(
+            ctx.ptr, slicePtr(a), slicePtr(b), mutSlicePtr(mut c),
+            i64(m), i64(k), i64(n),
+            mutPtrOf(mut h2d), mutPtrOf(mut kern), mutPtrOf(mut d2h),
+            mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(TiempoGpu { h2dMs: h2d, kernelMs: kern, d2hMs: d2h, totalMs: h2d + kern + d2h })
+    }
+}
+
+fn crearBufferF32(ctx: ContextoGpu, longitud: int) -> Result<BufferF32, str> {
+    if ptrIsNull(ctx.ptr) || longitud <= 0 {
+        return Err("Parámetros inválidos en crearBufferF32")
+    }
+    trusted {
+        let p = tz_gpu_buf_alloc(ctx.ptr, i64(longitud))
+        if ptrIsNull(p) {
+            return Err("No se pudo reservar buffer GPU")
+        }
+        return Ok(BufferF32 { ptr: p, longitud: longitud })
+    }
+}
+
+fn liberarBuffer(buf: BufferF32) {
+    trusted {
+        if !ptrIsNull(buf.ptr) {
+            tz_gpu_buf_free(buf.ptr)
+        }
+    }
+}
+
+fn subirF32(ctx: ContextoGpu, buf: BufferF32, datos: [f32]) -> Result<float, str> {
+    if ptrIsNull(ctx.ptr) || ptrIsNull(buf.ptr) || len(datos) != buf.longitud {
+        return Err("Longitud incompatible en subirF32")
+    }
+    trusted {
+        var ms = 0.0
+        if tz_gpu_buf_upload(ctx.ptr, buf.ptr, slicePtr(datos), i64(buf.longitud), mutPtrOf(mut ms)) == i32(0) {
+            return Err("Error subiendo buffer a GPU")
+        }
+        return Ok(ms)
+    }
+}
+
+fn bajarF32(ctx: ContextoGpu, buf: BufferF32, salida: mut [f32]) -> Result<float, str> {
+    if ptrIsNull(ctx.ptr) || ptrIsNull(buf.ptr) || len(salida) != buf.longitud {
+        return Err("Longitud incompatible en bajarF32")
+    }
+    trusted {
+        var ms = 0.0
+        if tz_gpu_buf_download(ctx.ptr, buf.ptr, mutSlicePtr(mut salida), i64(buf.longitud), mutPtrOf(mut ms)) == i32(0) {
+            return Err("Error leyendo buffer desde GPU")
+        }
+        return Ok(ms)
+    }
+}
+
+fn saxpyResidenteF32(ctx: ContextoGpu, alpha: f32, bx: BufferF32, by: BufferF32) -> Result<float, str> {
+    if ptrIsNull(ctx.ptr) || ptrIsNull(bx.ptr) || ptrIsNull(by.ptr) || bx.longitud != by.longitud {
+        return Err("Buffers incompatibles en saxpyResidenteF32")
+    }
+    trusted {
+        var ms = 0.0
+        if tz_gpu_saxpy_resident_f32(ctx.ptr, alpha, bx.ptr, by.ptr, i64(bx.longitud), mutPtrOf(mut ms)) == i32(0) {
+            return Err("Error ejecutando saxpy residente")
+        }
+        return Ok(ms)
+    }
+}
+
+fn matmulResidenteF32(ctx: ContextoGpu, ba: BufferF32, bb: BufferF32, bc: BufferF32, m: int, k: int, n: int) -> Result<float, str> {
+    if ptrIsNull(ctx.ptr) || ptrIsNull(ba.ptr) || ptrIsNull(bb.ptr) || ptrIsNull(bc.ptr) ||
+       m <= 0 || k <= 0 || n <= 0 || ba.longitud != m * k || bb.longitud != k * n || bc.longitud != m * n {
+        return Err("Dimensiones incompatibles en matmulResidenteF32")
+    }
+    trusted {
+        var ms = 0.0
+        if tz_gpu_matmul_resident_f32(ctx.ptr, ba.ptr, bb.ptr, bc.ptr, i64(m), i64(k), i64(n), mutPtrOf(mut ms)) == i32(0) {
+            return Err("Error ejecutando matmul residente")
+        }
+        return Ok(ms)
+    }
+}
+
+fn gpuCacheHit() -> bool {
+    trusted {
+        return tz_gpu_cache_hit() != i64(0)
+    }
+}
+
+fn reluF32(ctx: ContextoGpu, x: [f32], y: mut [f32]) -> Result<TiempoGpu, str> {
+    if ptrIsNull(ctx.ptr) {
+        return Err("ContextoGpu cerrado o nulo")
+    }
+    let n = len(x)
+    if len(y) != n {
+        return Err("Longitudes distintas en reluF32")
+    }
+    trusted {
+        var h2d = 0.0
+        var kern = 0.0
+        var d2h = 0.0
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_gpu_relu_f32(
+            ctx.ptr, slicePtr(x), mutSlicePtr(mut y), i64(n),
+            mutPtrOf(mut h2d), mutPtrOf(mut kern), mutPtrOf(mut d2h),
+            mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(TiempoGpu { h2dMs: h2d, kernelMs: kern, d2hMs: d2h, totalMs: h2d + kern + d2h })
+    }
+}
+
+fn vecAddF32(ctx: ContextoGpu, a: [f32], b: [f32], out: mut [f32]) -> Result<TiempoGpu, str> {
+    if ptrIsNull(ctx.ptr) {
+        return Err("ContextoGpu cerrado o nulo")
+    }
+    let n = len(a)
+    if len(b) != n || len(out) != n {
+        return Err("Longitudes distintas en vecAddF32")
+    }
+    trusted {
+        var h2d = 0.0
+        var kern = 0.0
+        var d2h = 0.0
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_gpu_vec_add_f32(
+            ctx.ptr, slicePtr(a), slicePtr(b), mutSlicePtr(mut out), i64(n),
+            mutPtrOf(mut h2d), mutPtrOf(mut kern), mutPtrOf(mut d2h),
+            mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(TiempoGpu { h2dMs: h2d, kernelMs: kern, d2hMs: d2h, totalMs: h2d + kern + d2h })
+    }
+}
+
+fn vecMulF32(ctx: ContextoGpu, a: [f32], b: [f32], out: mut [f32]) -> Result<TiempoGpu, str> {
+    if ptrIsNull(ctx.ptr) {
+        return Err("ContextoGpu cerrado o nulo")
+    }
+    let n = len(a)
+    if len(b) != n || len(out) != n {
+        return Err("Longitudes distintas en vecMulF32")
+    }
+    trusted {
+        var h2d = 0.0
+        var kern = 0.0
+        var d2h = 0.0
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_gpu_vec_mul_f32(
+            ctx.ptr, slicePtr(a), slicePtr(b), mutSlicePtr(mut out), i64(n),
+            mutPtrOf(mut h2d), mutPtrOf(mut kern), mutPtrOf(mut d2h),
+            mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(TiempoGpu { h2dMs: h2d, kernelMs: kern, d2hMs: d2h, totalMs: h2d + kern + d2h })
+    }
+}
+
+// Calibrated RX 9070 XT vs Ryzen 7 7700X crossover dispatch (with safe CPU fallback)
+fn saxpyAutoF32(alpha: f32, x: [f32], y: mut [f32]) -> Result<TiempoGpu, str> {
+    let n = len(x)
+    if len(y) != n {
+        return Err("Longitudes distintas en saxpyAutoF32")
+    }
+    if n >= 33554432 && disponible() {
+        match iniciar() {
+            Ok(ctx) => {
+                let res = saxpyF32(ctx, alpha, x, mut y)
+                cerrar(ctx)
+                if res.isOk() {
+                    return res
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    for i in 0..n {
+        y[i] = alpha * x[i] + y[i]
+    }
+    return Ok(TiempoGpu { h2dMs: 0.0, kernelMs: 0.0, d2hMs: 0.0, totalMs: 0.0 })
+}
+
+fn matmulAutoF32(a: [f32], b: [f32], c: mut [f32], m: int, k: int, n: int) -> Result<TiempoGpu, str> {
+    if m <= 0 || k <= 0 || n <= 0 {
+        return Err("Dimensiones no positivas en matmulAutoF32")
+    }
+    if len(a) != m * k || len(b) != k * n || len(c) != m * n {
+        return Err("Dimensiones incompatibles con los arreglos en matmulAutoF32")
+    }
+    // GPU cold crossover calibrated at ~406^3 ops (N>=416) where RX 9070 XT beats Ryzen 7 7700X AVX-512
+    if m * k * n >= 67108864 && disponible() {
+        match iniciar() {
+            Ok(ctx) => {
+                let res = matmulF32(ctx, a, b, mut c, m, k, n)
+                cerrar(ctx)
+                if res.isOk() {
+                    return res
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    for ix in 0..(m * n) { c[ix] = f32(0.0) }
+    for i in 0..m {
+        for p in 0..k {
+            let aip = a[i * k + p]
+            for j in 0..n {
+                c[i * n + j] = c[i * n + j] + aip * b[p * n + j]
+            }
+        }
+    }
+    return Ok(TiempoGpu { h2dMs: 0.0, kernelMs: 0.0, d2hMs: 0.0, totalMs: 0.0 })
+}
+
+// English API aliases
+fn isAvailable() -> bool { return disponible() }
+fn deviceName() -> str { return nombreDispositivo() }
+fn init() -> Result<ContextoGpu, str> { return iniciar() }
+fn close(ctx: ContextoGpu) { cerrar(ctx) }
+fn allocBufferF32(ctx: ContextoGpu, count: int) -> Result<BufferF32, str> { return crearBufferF32(ctx, count) }
+fn freeBuffer(buf: BufferF32) { liberarBuffer(buf) }
+fn uploadF32(ctx: ContextoGpu, buf: BufferF32, data: [f32]) -> Result<float, str> { return subirF32(ctx, buf, data) }
+fn downloadF32(ctx: ContextoGpu, buf: BufferF32, out: mut [f32]) -> Result<float, str> { return bajarF32(ctx, buf, mut out) }
+fn saxpyResidentF32(ctx: ContextoGpu, alpha: f32, bx: BufferF32, by: BufferF32) -> Result<float, str> {
+    return saxpyResidenteF32(ctx, alpha, bx, by)
+}
+fn matmulResidentF32(ctx: ContextoGpu, ba: BufferF32, bb: BufferF32, bc: BufferF32, m: int, k: int, n: int) -> Result<float, str> {
+    return matmulResidenteF32(ctx, ba, bb, bc, m, k, n)
+}

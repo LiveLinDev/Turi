@@ -1,0 +1,184 @@
+// Controlador dinamico SQLite3 con WAL automatico y consultas parametrizadas.
+
+extern "C" {
+    fn tz_web_sql_available() -> i32
+    fn tz_web_sql_open(path: Ptr<void>, readonly: i32, errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> MutPtr<void>
+    fn tz_web_sql_close(db: MutPtr<void>)
+    fn tz_web_sql_exec(db: MutPtr<void>, sql: Ptr<void>, errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> i32
+    fn tz_web_sql_prepare(db: MutPtr<void>, sql: Ptr<void>, errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> MutPtr<void>
+    fn tz_web_sql_bind_i64(stmt: MutPtr<void>, idx: i32, val: i64) -> i32
+    fn tz_web_sql_bind_f64(stmt: MutPtr<void>, idx: i32, val: f64) -> i32
+    fn tz_web_sql_bind_str(stmt: MutPtr<void>, idx: i32, val: Ptr<void>) -> i32
+    fn tz_web_sql_bind_null(stmt: MutPtr<void>, idx: i32) -> i32
+    fn tz_web_sql_step(stmt: MutPtr<void>) -> i32
+    fn tz_web_sql_reset(stmt: MutPtr<void>)
+    fn tz_web_sql_finalize(stmt: MutPtr<void>)
+    fn tz_web_sql_col_count(stmt: MutPtr<void>) -> i32
+    fn tz_web_sql_col_is_null(stmt: MutPtr<void>, col: i32) -> i32
+    fn tz_web_sql_col_i64(stmt: MutPtr<void>, col: i32) -> i64
+    fn tz_web_sql_col_f64(stmt: MutPtr<void>, col: i32) -> f64
+    fn tz_web_sql_col_str(stmt: MutPtr<void>, col: i32, outLen: MutPtr<i64>) -> Ptr<u8>
+    fn tz_web_sql_errmsg(db: MutPtr<void>, outLen: MutPtr<i64>) -> Ptr<u8>
+}
+
+struct BaseDatos {
+    ptr: MutPtr<void>
+}
+
+struct Consulta {
+    ptr: MutPtr<void>
+}
+
+fn desdePtr(p: MutPtr<void>) -> BaseDatos {
+    return BaseDatos { ptr: p }
+}
+
+fn disponible() -> bool {
+    trusted {
+        return tz_web_sql_available() != i32(0)
+    }
+}
+
+fn abrir(ruta: str) -> Result<BaseDatos, str> {
+    trusted {
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let p = tz_web_sql_open(ptrCast<void>(ptrOf(ruta)), i32(0), mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ptrIsNull(p) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(BaseDatos { ptr: p })
+    }
+}
+
+fn abrirSoloLectura(ruta: str) -> Result<BaseDatos, str> {
+    trusted {
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let p = tz_web_sql_open(ptrCast<void>(ptrOf(ruta)), i32(1), mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ptrIsNull(p) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(BaseDatos { ptr: p })
+    }
+}
+
+fn cerrar(bd: BaseDatos) {
+    trusted {
+        tz_web_sql_close(bd.ptr)
+    }
+}
+
+fn ejecutar(bd: BaseDatos, sql: str) -> Result<bool, str> {
+    trusted {
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_web_sql_exec(bd.ptr, ptrCast<void>(ptrOf(sql)), mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(true)
+    }
+}
+
+fn preparar(bd: BaseDatos, sql: str) -> Result<Consulta, str> {
+    trusted {
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let p = tz_web_sql_prepare(bd.ptr, ptrCast<void>(ptrOf(sql)), mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ptrIsNull(p) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(Consulta { ptr: p })
+    }
+}
+
+fn ligarInt(q: Consulta, idx: int, val: int) -> bool {
+    trusted {
+        return tz_web_sql_bind_i64(q.ptr, i32(idx), i64(val)) != i32(0)
+    }
+}
+
+fn ligarNum(q: Consulta, idx: int, val: float) -> bool {
+    trusted {
+        return tz_web_sql_bind_f64(q.ptr, i32(idx), val) != i32(0)
+    }
+}
+
+fn ligarTexto(q: Consulta, idx: int, val: str) -> bool {
+    trusted {
+        return tz_web_sql_bind_str(q.ptr, i32(idx), ptrCast<void>(ptrOf(val))) != i32(0)
+    }
+}
+
+fn ligarNulo(q: Consulta, idx: int) -> bool {
+    trusted {
+        return tz_web_sql_bind_null(q.ptr, i32(idx)) != i32(0)
+    }
+}
+
+fn siguienteFila(q: Consulta) -> Result<bool, str> {
+    trusted {
+        let rc = tz_web_sql_step(q.ptr)
+        if rc == i32(1) { return Ok(true) }
+        if rc == i32(0) { return Ok(false) }
+        return Err("Error al ejecutar paso SQLite")
+    }
+}
+
+fn ejecutarConsulta(q: Consulta) -> Result<bool, str> {
+    let r = siguienteFila(q)?
+    return Ok(r || true)
+}
+
+fn reiniciar(q: Consulta) {
+    trusted {
+        tz_web_sql_reset(q.ptr)
+    }
+}
+
+fn finalizar(q: Consulta) {
+    trusted {
+        tz_web_sql_finalize(q.ptr)
+    }
+}
+
+fn colCantidad(q: Consulta) -> int {
+    trusted {
+        return int(tz_web_sql_col_count(q.ptr))
+    }
+}
+
+fn colEsNula(q: Consulta, col: int) -> bool {
+    trusted {
+        return tz_web_sql_col_is_null(q.ptr, i32(col)) != i32(0)
+    }
+}
+
+fn colInt(q: Consulta, col: int) -> int {
+    trusted {
+        return int(tz_web_sql_col_i64(q.ptr, i32(col)))
+    }
+}
+
+fn colNum(q: Consulta, col: int) -> float {
+    trusted {
+        return tz_web_sql_col_f64(q.ptr, i32(col))
+    }
+}
+
+fn colTexto(q: Consulta, col: int) -> str {
+    trusted {
+        var n = i64(0)
+        let p = tz_web_sql_col_str(q.ptr, i32(col), mutPtrOf(mut n))
+        return strFromPtr(p, n)
+    }
+}
+
+fn ultimoError(bd: BaseDatos) -> str {
+    trusted {
+        var n = i64(0)
+        let p = tz_web_sql_errmsg(bd.ptr, mutPtrOf(mut n))
+        return strFromPtr(p, n)
+    }
+}

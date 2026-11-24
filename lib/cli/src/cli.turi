@@ -1,0 +1,261 @@
+// Analizador declarativo de argumentos CLI para programas Turi.
+
+enum FlagKind {
+    Bool
+    Str
+    Int
+}
+
+struct FlagSpec {
+    longName: str
+    shortName: str
+    kind: FlagKind
+    defaultStr: str
+    defaultInt: int
+    help: str
+}
+
+struct CliSpec {
+    name: str
+    description: str
+    flags: [FlagSpec]
+}
+
+struct StrOpt {
+    name: str
+    value: str
+}
+
+struct IntOpt {
+    name: str
+    value: int
+}
+
+struct CliParsed {
+    showHelp: bool
+    bools: [str]
+    strs: [StrOpt]
+    ints: [IntOpt]
+    positionals: [str]
+}
+
+fn newSpec(name: str, description: str) -> CliSpec {
+    return CliSpec { name: name, description: description, flags: [] }
+}
+
+fn addBool(spec: mut CliSpec, longName: str, shortName: str, help: str) {
+    spec.flags.push(FlagSpec {
+        longName: longName, shortName: shortName,
+        kind: FlagKind.Bool, defaultStr: "", defaultInt: 0, help: help,
+    })
+}
+
+fn addStr(spec: mut CliSpec, longName: str, shortName: str, defaultVal: str, help: str) {
+    spec.flags.push(FlagSpec {
+        longName: longName, shortName: shortName,
+        kind: FlagKind.Str, defaultStr: defaultVal, defaultInt: 0, help: help,
+    })
+}
+
+fn addInt(spec: mut CliSpec, longName: str, shortName: str, defaultVal: int, help: str) {
+    spec.flags.push(FlagSpec {
+        longName: longName, shortName: shortName,
+        kind: FlagKind.Int, defaultStr: "", defaultInt: defaultVal, help: help,
+    })
+}
+
+fn formatHelp(spec: CliSpec) -> str {
+    var sb = sbWithCap(128)
+    sb.push(spec.name)
+    if !spec.description.isEmpty() {
+        sb.push(" - ")
+        sb.push(spec.description)
+    }
+    sb.push("\nOptions:\n  -h, --help  Show this help message\n")
+    for f in spec.flags {
+        sb.push("  ")
+        if !f.shortName.isEmpty() {
+            sb.push("-")
+            sb.push(f.shortName)
+            sb.push(", ")
+        }
+        sb.push("--")
+        sb.push(f.longName)
+        if !f.help.isEmpty() {
+            sb.push("  ")
+            sb.push(f.help)
+        }
+        sb.push("\n")
+    }
+    return sb.take()
+}
+
+fn setBoolOpt(out: mut CliParsed, name: str) {
+    for b in out.bools {
+        if b == name { return }
+    }
+    out.bools.push(name)
+}
+
+fn setStrOpt(out: mut CliParsed, name: str, val: str) {
+    for i in 0..out.strs.len() {
+        if out.strs[i].name == name {
+            out.strs[i].value = val
+            return
+        }
+    }
+    out.strs.push(StrOpt { name: name, value: val })
+}
+
+fn setIntOpt(out: mut CliParsed, name: str, val: int) {
+    for i in 0..out.ints.len() {
+        if out.ints[i].name == name {
+            out.ints[i].value = val
+            return
+        }
+    }
+    out.ints.push(IntOpt { name: name, value: val })
+}
+
+fn findFlagByLong(spec: CliSpec, name: str) -> FlagSpec? {
+    for f in spec.flags {
+        if f.longName == name { return Some(f) }
+    }
+    return None
+}
+
+fn findFlagByShort(spec: CliSpec, name: str) -> FlagSpec? {
+    for f in spec.flags {
+        if !f.shortName.isEmpty() && f.shortName == name { return Some(f) }
+    }
+    return None
+}
+
+fn parseArgs(spec: CliSpec, args: [str]) -> Result<CliParsed, str> {
+    var res = CliParsed {
+        showHelp: false,
+        bools: [],
+        strs: [],
+        ints: [],
+        positionals: [],
+    }
+    for f in spec.flags {
+        match f.kind {
+            FlagKind.Bool => {}
+            FlagKind.Str => setStrOpt(mut res, f.longName, f.defaultStr)
+            FlagKind.Int => setIntOpt(mut res, f.longName, f.defaultInt)
+        }
+    }
+    var onlyPos = false
+    var i = 0
+    while i < args.len() {
+        let a = args[i]
+        if onlyPos {
+            res.positionals.push(a)
+            i += 1
+            continue
+        }
+        if a == "--" {
+            onlyPos = true
+            i += 1
+            continue
+        }
+        if a == "--help" || a == "-h" {
+            res.showHelp = true
+            i += 1
+            continue
+        }
+        if a.startsWith("--") {
+            let eq = a.indexOf("=")
+            let flagName = if eq >= 0 { a[2..eq] } else { a[2..a.len()] }
+            let found = findFlagByLong(spec, flagName)
+            match found {
+                None => return Err("E_CLI_FLAG: unknown option --" + flagName)
+                Some(fs) => match fs.kind {
+                    FlagKind.Bool => {
+                        if eq >= 0 { return Err("E_CLI_VAL: bool flag takes no value: --" + flagName) }
+                        setBoolOpt(mut res, fs.longName)
+                    }
+                    FlagKind.Str => {
+                        if eq >= 0 {
+                            setStrOpt(mut res, fs.longName, a[eq + 1..a.len()])
+                        } else {
+                            if i + 1 >= args.len() { return Err("E_CLI_MISSING: missing value for --" + flagName) }
+                            i += 1
+                            setStrOpt(mut res, fs.longName, args[i])
+                        }
+                    }
+                    FlagKind.Int => {
+                        let raw = if eq >= 0 {
+                            a[eq + 1..a.len()]
+                        } else {
+                            if i + 1 >= args.len() { return Err("E_CLI_MISSING: missing value for --" + flagName) }
+                            i += 1
+                            args[i]
+                        }
+                        let sentinel = -9223372036854775807
+                        let pv = tryParseInt(raw, sentinel)
+                        if pv == sentinel && raw != "-9223372036854775807" {
+                            return Err("E_CLI_INT: invalid integer '" + raw + "' for --" + flagName)
+                        }
+                        setIntOpt(mut res, fs.longName, pv)
+                    }
+                }
+            }
+            i += 1
+            continue
+        }
+        if a.startsWith("-") && a.len() > 1 {
+            let shortName = a[1..a.len()]
+            let found = findFlagByShort(spec, shortName)
+            match found {
+                None => return Err("E_CLI_FLAG: unknown option -" + shortName)
+                Some(fs) => match fs.kind {
+                    FlagKind.Bool => setBoolOpt(mut res, fs.longName)
+                    FlagKind.Str => {
+                        if i + 1 >= args.len() { return Err("E_CLI_MISSING: missing value for -" + shortName) }
+                        i += 1
+                        setStrOpt(mut res, fs.longName, args[i])
+                    }
+                    FlagKind.Int => {
+                        if i + 1 >= args.len() { return Err("E_CLI_MISSING: missing value for -" + shortName) }
+                        i += 1
+                        let raw = args[i]
+                        let sentinel = -9223372036854775807
+                        let pv = tryParseInt(raw, sentinel)
+                        if pv == sentinel && raw != "-9223372036854775807" {
+                            return Err("E_CLI_INT: invalid integer '" + raw + "' for -" + shortName)
+                        }
+                        setIntOpt(mut res, fs.longName, pv)
+                    }
+                }
+            }
+            i += 1
+            continue
+        }
+        res.positionals.push(a)
+        i += 1
+    }
+    return Ok(res)
+}
+
+fn hasFlag(p: CliParsed, name: str) -> bool {
+    for b in p.bools {
+        if b == name { return true }
+    }
+    return false
+}
+
+fn getStr(p: CliParsed, name: str) -> str? {
+    for s in p.strs {
+        if s.name == name { return Some(s.value) }
+    }
+    return None
+}
+
+fn getInt(p: CliParsed, name: str) -> int? {
+    for it in p.ints {
+        if it.name == name { return Some(it.value) }
+    }
+    return None
+}

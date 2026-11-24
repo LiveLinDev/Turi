@@ -1,0 +1,89 @@
+// Paquete oficial `lienzo`: metricas escalables, disposicion adaptable, iconos SVG y dibujo GDI+ seguro.
+
+import metrica
+import disposicion
+import iconos
+import trazo
+import tipografia
+
+test "metricas escalan monotonicamente y conservan redondeo" {
+    let m100 = metrica.construirMetrica(100, 17, 15, 19, 8)
+    let m200 = metrica.construirMetrica(200, 34, 30, 38, 16)
+    assert m100.pad == 8
+    assert m200.pad == 16
+    assert m100.iconPx % 2 == 0
+    assert m200.iconPx > m100.iconPx
+    assert m200.controlH > m100.controlH
+    assert m200.menuH > m100.menuH
+    assert m200.actW > m100.actW
+}
+
+test "planificarFila degrada completo -> solo icono -> desborde sin pasarse" {
+    let comp = [100, 90, 80, 90]
+    let ic = [30, 30, 30, 30]
+    // Todo completo: 100+6+90+6+80+6+90 = 378
+    let pTodo = disposicion.planificarFila(comp, ic, 400, 6, 30)
+    assert !pTodo.usaDesborde
+    assert pTodo.modos[0] == 0 && pTodo.modos[3] == 0
+
+    // No caben todos completos, deben colapsar los ultimos a solo-icono sin desborde
+    let pMid = disposicion.planificarFila(comp, ic, 270, 6, 30)
+    assert !pMid.usaDesborde
+    assert pMid.modos[0] == 0 && pMid.modos[3] == 1
+
+    // Caben todos en solo-icono (30*4 + 6*3 = 138 <= 140)
+    let pSoloIcon = disposicion.planificarFila(comp, ic, 140, 6, 30)
+    assert !pSoloIcon.usaDesborde
+    assert pSoloIcon.modos[0] == 1 && pSoloIcon.modos[3] == 1
+
+    // Muy estrecho: envia cola a desborde reservando boton '...' (<= 110)
+    let pOverflow = disposicion.planificarFila(comp, ic, 110, 6, 30)
+    assert pOverflow.usaDesborde
+    assert disposicion.medirAnchoFila(comp, ic, pOverflow.modos, 6, true, 30) <= 110
+
+    // Rejilla y cajas
+    assert disposicion.columnasRejilla(25, 36, 6, 300) >= 6
+    let a = disposicion.Caja { x: 0, y: 0, w: 40, h: 20 }
+    let b = disposicion.Caja { x: 40, y: 0, w: 40, h: 20 }
+    let c = disposicion.Caja { x: 20, y: 10, w: 30, h: 20 }
+    assert !disposicion.solapan(a, b)
+    assert disposicion.solapan(a, c)
+    assert disposicion.dentroDe(disposicion.recortar(c, a), a)
+}
+
+test "catalogo de 26 iconos SVG parsea sin errores dentro de 0..2400" {
+    let nombres = iconos.nombresIconos()
+    assert len(nombres) == 26
+    let cat = iconos.catalogo()
+    assert len(cat) == 26
+    for nom in nombres {
+        let ic = iconos.buscarEnCatalogo(cat, nom)
+        assert len(ic.trazos) >= 1
+        for tr in ic.trazos {
+            assert len(tr) >= 4 && len(tr) % 2 == 0
+            for v in tr {
+                assert v >= -100 && v <= 2500
+            }
+        }
+    }
+    let rel = iconos.parsearRutaEn("prueba", "M 2 2 l 10 0 v 10 h -10 z", false)
+    assert len(rel.trazos) == 1 && rel.cerrado[0]
+}
+
+test "tipografia expone 6 archivos ttf incluidos y comparacion de caras" {
+    let arch = tipografia.archivosIncluidos()
+    assert len(arch) == 6
+    for f in arch {
+        assert len(f) > 4 && f[len(f) - 4..len(f)] == ".ttf"
+    }
+    assert tipografia.buscarDirFuentes([]) == ""
+    assert tipografia.mismaCara("inter", "Inter")
+    assert !tipografia.mismaCara("Inter", "Arial")
+}
+
+test "tipografia usa Inter y JetBrains Mono como familias principales" {
+    assert tipografia.familiaUi() == "Inter"
+    assert tipografia.familiaUiSemi() == "Inter SemiBold"
+    assert tipografia.familiaMono() == "JetBrains Mono"
+    assert tipografia.respaldoUi() == "Segoe UI"
+}

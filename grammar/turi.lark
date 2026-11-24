@@ -2,53 +2,108 @@
 
 // Turi, núcleo de Turi. Las producciones de expresión generan la sintaxis.
 // El compilador aplica las precedencias de SPEC.md al construir el árbol.
-start: BOM? h NL* (declaration (NL+ declaration)* NL*)? COMMENT?
+start: BOM? h NL* (IMPORT (NL+ IMPORT)* NL*)? (declaration (NL+ declaration)* NL*)? COMMENT?
 
 BOM: "\uFEFF"
 h: /[ \t]/*
 GAP: /[ \t]/+
 COMMENT: "//" /[^\r\n]/*
 NL: COMMENT? "\r"? "\n" (/[ \t]/*)
+IMPORT: "import" GAP NAME
 
-declaration: function
+declaration: attr* (struct | enum)
+     | extern_block
+     | FN_ATTR* function
      | test
-     | STRUCT
-     | ENUM
+     | interface
+     | impl
+     | const_decl
 
-STRUCT: "struct" GAP PASCAL "{" (/[ \t]/*) NL* (PARAM (DECL_SEPARATOR PARAM)* DECL_SEPARATOR?)? "}" (/[ \t]/*)
-ENUM: "enum" GAP PASCAL "{" (/[ \t]/*) NL* (VARIANT (DECL_SEPARATOR VARIANT)* DECL_SEPARATOR?)? "}" (/[ \t]/*)
+attr: ("@repr" "(" h "C" h ")" | "@packed" | "@align" "(" h digits h ")") h NL+
+FN_ATTR: ("@noCopy" | "@arena" | "@compact") (/[ \t]/*) NL+
+LINK_ATTR: "@link" "(" (/[ \t]/*) STRING (/[ \t]/*) ")" (/[ \t]/*) NL+
+extern_block: LINK_ATTR* "extern" GAP "\"C\"" h NL* "{" h NL* (extern_fn (NL+ extern_fn)* NL*)? "}" h
+extern_fn: "fn" GAP c_ident "(" h NL* (param ("," h NL* param)* ("," h NL*)?)? ")" h ("->" h NL* type)?
+const_decl: "const" GAP NAME ":" h type "=" h NL* expr
+struct: "struct" GAP pascal type_params? "{" h NL* (param (DECL_SEPARATOR param)* DECL_SEPARATOR?)? "}" h
+enum: "enum" GAP pascal type_params? "{" h NL* (variant (DECL_SEPARATOR variant)* DECL_SEPARATOR?)? "}" h
+interface: "interface" GAP pascal "{" h NL* (interface_method (NL+ interface_method)* NL*)? "}" h
+EFFECT_MOD: ("pure" | "noalloc" | "checkfree" | "io") GAP
+SAFETY_MOD: ("verified" | "trusted" | "raw") GAP
+
+FN_MOD: EFFECT_MOD
+     | SAFETY_MOD
+
+contract_clause: ("requires" | "ensures") after_word
+interface_method: FN_ATTR* FN_MOD* "fn" GAP NAME "(" h NL* (fn_param ("," h NL* fn_param)* ("," h NL*)?)? ")" h ("->" h NL* type)? (NL* contract_clause)* (NL* block)?
+impl: "impl" (generics h | GAP) type ("for" GAP type)? "{" h NL* (FN_ATTR* function (NL+ FN_ATTR* function)* NL*)? "}" h
 
 DECL_SEPARATOR: "," (/[ \t]/*) NL*
      | NL+
 
-VARIANT: PASCAL ("(" (/[ \t]/*) NL* (PARAM ("," (/[ \t]/*) NL* PARAM)*)? ")" (/[ \t]/*))?
-PASCAL: /[A-Z]/ /[A-Za-z0-9]/* (/[ \t]/*)
-GENERICS: "<" (/[ \t]/*) NL* PASCAL ("," (/[ \t]/*) NL* PASCAL)* ">" (/[ \t]/*)
-function: "fn" GAP NAME GENERICS? "(" h NL* (FN_PARAM ("," h NL* FN_PARAM)*)? ")" h ("->" h NL* TYPE)? block
-FN_PARAM: ("var" GAP)? PARAM
+variant: pascal (("(" h NL* (param ("," h NL* param)* ("," h NL*)?)? ")" h | "=" h NL* expr))?
+pascal_tail: /[A-Za-z0-9]/ pascal_tail?
+pascal: /[A-Z]/ pascal_tail? h
+C_TAIL: "_" /[A-Za-z0-9_]/* (/[ \t]/*)
+
+c_ident: NAME_TEXT C_TAIL
+     | /[A-Z]/ pascal_tail? C_TAIL
+     | "_" /[A-Za-z0-9_]/+ h
+     | pascal
+     | NAME
+
+type_params: "<" h NL* pascal ("," h NL* pascal)* ("," h NL*)? ">" h
+type_args: "<" h NL* type ("," h NL* type)* ("," h NL*)? ">" h
+generics: "<" h NL* generic ("," h NL* generic)* ("," h NL*)? ">" h
+generic: pascal (":" h type)?
+function: FN_MOD* ("extern" GAP "\"C\"" GAP "fn" GAP c_ident | "fn" GAP NAME generics?) "(" h NL* (fn_param ("," h NL* fn_param)* ("," h NL*)?)? ")" h ("->" h NL* type)? (NL* contract_clause)* NL* block
+
+fn_param: ("mut" GAP)? "self" h
+     | ("var" GAP)? NAME ":" h ("mut" GAP)? type
+
 test: "test" h STRING block
-PARAM: NAME ":" (/[ \t]/*) TYPE
+param: NAME ":" h type
+type: base_type ("?" h)*
 
-TYPE: ("int" | "bool" | "str" | "void") (/[ \t]/*)
-     | PASCAL
-     | "[" (/[ \t]/*) "int" (/[ \t]/*) "]" (/[ \t]/*)
+base_type: ("int" | "float" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool" | "str" | "StringBuilder" | "void") h
+     | fn_type
+     | "dyn" GAP (pascal | NAME "." h pascal)
+     | "Simd<" h NL* type "," h NL* digits h NL* ">" h
+     | (pascal | NAME "." h pascal) type_args?
+     | "[" h type h "]" h
 
+fn_type: "fn" h "(" h NL* (type ("," h NL* type)* ("," h NL*)?)? ")" h ("->" h NL* type)?
 block: "{" h NL* (statement (NL+ statement)* NL*)? "}" h
+expr_block: "{" h NL* ((statement (NL+ statement)* NL* | (statement NL+)* expr NL*))? "}" h
 
 statement: binding
      | assignment_or_call
      | conditional
      | loop
      | range
+     | BREAK_STMT
+     | CONTINUE_STMT
      | result
      | assertion
      | print
-     | match
+     | safety_block
 
-match: "match" after_word "{" h NL* (arm (NL+ arm)* NL*)? "}" h
-arm: PASCAL "." h PASCAL ("(" h NL* (NAME ("," h NL* NAME)*)? ")" h)? "=>" h NL* (block | statement)
-binding: ("let" | "var") GAP NAME (":" h TYPE)? "=" h NL* expr
-assignment_or_call: NAME (call | ASSIGNMENT_OP h NL* expr | index "=" h NL* expr)
+SAFETY_OPEN: ("trusted" | "raw") (/[ \t]/*) "{"
+safety_block: SAFETY_OPEN h NL* (statement (NL+ statement)* NL*)? "}" h
+match: "match" after_word "{" h NL* (arm (ARM_SEP arm)* ARM_SEP?)? "}" h
+
+ARM_SEP: "," (/[ \t]/*) NL*
+     | NL+
+
+PAT_NAME: NAME
+     | "_" (/[ \t]/*)
+
+arm: ("None" h | ("Some" | "Ok" | "Err") "(" h NL* PAT_NAME ")" h) "=>" h NL* (expr_block | statement)
+     | (pascal | NAME "." h pascal) type_args? "." h pascal ("(" h NL* (PAT_NAME ("," h NL* PAT_NAME)* ("," h NL*)?)? ")" h)? "=>" h NL* (expr_block | statement)
+     | "_" h "=>" h NL* (expr_block | statement)
+
+binding: ("let" GAP (NAME | "_" h) | "var" GAP NAME) (":" h type)? "=" h NL* expr
+assignment_or_call: expr (ASSIGNMENT_OP h NL* expr)?
 
 ASSIGNMENT_OP: "="
      | "+="
@@ -56,13 +111,22 @@ ASSIGNMENT_OP: "="
      | "*="
      | "/="
      | "%="
+     | "&="
+     | "|="
+     | "^="
+     | "<<="
+     | ">>="
+     | ">>>="
 
-conditional: "if" after_word block ("else" (h block | GAP conditional))?
-loop: "while" after_word block
-range: "for" GAP NAME_TEXT GAP "in" after_word ".." h NL* expr block
+conditional: "if" after_word block (NL* "else" (h block | GAP conditional))?
+LABEL: "'" NAME
+loop: (LABEL ":" h NL*)? "while" after_word block
+range: (LABEL ":" h NL*)? "for" GAP (NAME_TEXT | "_") GAP "in" after_word (".." h NL* expr)? block
+BREAK_STMT: "break" (GAP LABEL | (/[ \t]/*))
+CONTINUE_STMT: "continue" (GAP LABEL | (/[ \t]/*))
 result: "return" (after_word | h)
 assertion: "assert" after_word
-print: "print" h "(" h NL* expr ")" h
+print: "print" h "(" h NL* expr NL* ("," h NL*)? ")" h
 
 after_word: GAP expr
      | h punct_expr tail
@@ -71,19 +135,34 @@ expr: unary tail
 tail: (BINARY h NL* unary)*
 
 unary: punct_expr
-     | (NUMBER | BOOL | NAME call? | construct) access*
+     | (match | if_expr | number | BOOL | ("int" | "float" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "str") call | c_ext_call | "fnPtr" h "(" h NL* (c_ident | NAME "." h c_ident) ")" h | NAME (type_args? call)? | qualified_call | construct) access*
 
-access: "." h NAME
+if_expr: "if" after_word expr_block NL* "else" (GAP NL* if_expr | h NL+ if_expr | h NL* expr_block)
+c_ext_call: ((NAME_TEXT C_TAIL | /[A-Z]/ pascal_tail? C_TAIL | "_" /[A-Za-z0-9_]/+ h) | NAME "." h (NAME_TEXT C_TAIL | /[A-Z]/ pascal_tail? C_TAIL | "_" /[A-Za-z0-9_]/+ h)) call
+qualified_call: NAME "." h NAME type_args? call
+
+access: "." h ("str" h call | c_ident (type_args? call)? | NAME (type_args? call)?)
      | index
+     | call
+     | "?" h
 
-index: "[" h expr "]" h
-construct: PASCAL ("." h PASCAL call? | "{" h NL* (named_field ("," h NL* named_field)* NL*)? "}" h)
-named_field: NAME ":" h expr
+subscript: "[" h NL* expr NL* "]" h
+index: "[" h NL* expr (".." h NL* expr)? NL* "]" h
+array_lit: "[" h NL* (expr ("," h NL* expr)* ("," h NL*)?)? "]" h
 
-punct_expr: ("-" | "!") h NL* unary
-     | ("(" h NL* expr ")" h | STRING) access*
+construct: "None" h
+     | ("Some" | "Ok" | "Err") call
+     | (pascal | NAME "." h pascal) (call | type_args? ("." h (pascal call? | c_ident call) | "{" h NL* (named_field ("," h NL* named_field)* ("," h NL*)?)? "}" h))
 
-call: "(" h NL* (expr ("," h NL* expr)*)? ")" h
+named_field: NAME ":" h NL* expr
+closure_param: NAME (":" h type)?
+closure: ("||" h | "|" h NL* (closure_param ("," h NL* closure_param)* ("," h NL*)?)? "|" h) ("->" h NL* type)? (block | expr)
+
+punct_expr: ("-" | "!" | "~") h NL* unary
+     | (closure | "(" h NL* expr NL* ")" h | array_lit | interp_string) access*
+
+call: "(" h NL* (call_arg ("," h NL* call_arg)* ("," h NL*)?)? ")" h
+call_arg: ("mut" GAP)? expr
 
 BINARY: "||"
      | "&&"
@@ -93,6 +172,12 @@ BINARY: "||"
      | "<="
      | ">"
      | ">="
+     | "|"
+     | "^"
+     | "&"
+     | "<<"
+     | ">>"
+     | ">>>"
      | "+"
      | "-"
      | "*"
@@ -101,21 +186,26 @@ BINARY: "||"
 
 NAME: NAME_TEXT (/[ \t]/*)
 
-NAME_TEXT: /[cdghjknoqux-z]/ /[A-Za-z0-9]/*
+NAME_TEXT: /[ghjknoqx-z]/ /[A-Za-z0-9]/*
      | "a" ((/[0-9A-Za-rt-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-rt-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))?))?))?
-     | "b" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Za-km-z]/ /[A-Za-z0-9]/* | "l" /[A-Za-z0-9]/+))?))?))?
+     | "b" ((/[0-9A-Za-npqs-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Za-km-z]/ /[A-Za-z0-9]/* | "l" /[A-Za-z0-9]/+))?))? | "r" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Zb-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-jl-z]/ /[A-Za-z0-9]/* | "k" /[A-Za-z0-9]/+))?))?))?))?
+     | "c" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Za-mo-z]/ /[A-Za-z0-9]/* | "n" ((/[0-9A-Za-ru-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))? | "t" ((/[0-9A-Za-hj-z]/ /[A-Za-z0-9]/* | "i" ((/[0-9A-Za-mo-z]/ /[A-Za-z0-9]/* | "n" ((/[0-9A-Za-tv-z]/ /[A-Za-z0-9]/* | "u" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))?))?))?))?))?))?
+     | "d" ((/[0-9A-Za-xz]/ /[A-Za-z0-9]/* | "y" ((/[0-9A-Za-mo-z]/ /[A-Za-z0-9]/* | "n" /[A-Za-z0-9]/+))?))?
      | "e" ((/[0-9A-Za-kmo-z]/ /[A-Za-z0-9]/* | "l" ((/[0-9A-Za-hj-rt-z]/ /[A-Za-z0-9]/* | "i" ((/[0-9A-Za-eg-z]/ /[A-Za-z0-9]/* | "f" /[A-Za-z0-9]/+))? | "s" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))? | "n" ((/[0-9A-Za-tv-z]/ /[A-Za-z0-9]/* | "u" ((/[0-9A-Za-ln-z]/ /[A-Za-z0-9]/* | "m" /[A-Za-z0-9]/+))?))?))?
-     | "f" ((/[0-9A-Zb-kmp-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-km-z]/ /[A-Za-z0-9]/* | "l" ((/[0-9A-Za-rt-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))?))? | "l" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Zb-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))? | "n" /[A-Za-z0-9]/+ | "o" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" /[A-Za-z0-9]/+))?))?
-     | "i" ((/[0-9A-Za-eg-lo-z]/ /[A-Za-z0-9]/* | "f" /[A-Za-z0-9]/+ | "m" ((/[0-9A-Za-oq-z]/ /[A-Za-z0-9]/* | "p" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))?))? | "n" (/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+)))?
+     | "f" ((/[0-2457-9A-Zb-kmp-z]/ /[A-Za-z0-9]/* | "3" ((/[013-9A-Za-z]/ /[A-Za-z0-9]/* | "2" /[A-Za-z0-9]/+))? | "6" ((/[0-35-9A-Za-z]/ /[A-Za-z0-9]/* | "4" /[A-Za-z0-9]/+))? | "a" ((/[0-9A-Za-km-z]/ /[A-Za-z0-9]/* | "l" ((/[0-9A-Za-rt-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))?))? | "l" ((/[0-9A-Za-np-z]/ /[A-Za-z0-9]/* | "o" ((/[0-9A-Zb-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))? | "n" /[A-Za-z0-9]/+ | "o" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" /[A-Za-z0-9]/+))?))?
+     | "i" ((/[024579A-Za-eg-lo-z]/ /[A-Za-z0-9]/* | "1" ((/[0-57-9A-Za-z]/ /[A-Za-z0-9]/* | "6" /[A-Za-z0-9]/+))? | "3" ((/[013-9A-Za-z]/ /[A-Za-z0-9]/* | "2" /[A-Za-z0-9]/+))? | "6" ((/[0-35-9A-Za-z]/ /[A-Za-z0-9]/* | "4" /[A-Za-z0-9]/+))? | "8" /[A-Za-z0-9]/+ | "f" /[A-Za-z0-9]/+ | "m" ((/[0-9A-Za-oq-z]/ /[A-Za-z0-9]/* | "p" ((/[0-9A-Za-kmnp-z]/ /[A-Za-z0-9]/* | "l" /[A-Za-z0-9]/+ | "o" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))?))? | "n" (/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" (/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-eg-z]/ /[A-Za-z0-9]/* | "f" ((/[0-9A-Zb-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Zabd-z]/ /[A-Za-z0-9]/* | "c" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))?))?))?))?))))?
      | "l" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?
      | "m" ((/[0-9A-Zb-tv-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" ((/[0-9A-Zabd-z]/ /[A-Za-z0-9]/* | "c" ((/[0-9A-Za-gi-z]/ /[A-Za-z0-9]/* | "h" /[A-Za-z0-9]/+))?))?))? | "u" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?
      | "p" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-hj-z]/ /[A-Za-z0-9]/* | "i" ((/[0-9A-Za-mo-z]/ /[A-Za-z0-9]/* | "n" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?))?))?
      | "r" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" ((/[0-9A-Za-tv-z]/ /[A-Za-z0-9]/* | "u" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" ((/[0-9A-Za-mo-z]/ /[A-Za-z0-9]/* | "n" /[A-Za-z0-9]/+))?))?))?))?))?
      | "s" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" (/[0-9A-Za-tv-z]/ /[A-Za-z0-9]/* | "u" ((/[0-9A-Zabd-z]/ /[A-Za-z0-9]/* | "c" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))?)))?))?
      | "t" ((/[0-9A-Za-df-qs-z]/ /[A-Za-z0-9]/* | "e" ((/[0-9A-Za-rt-z]/ /[A-Za-z0-9]/* | "s" ((/[0-9A-Za-su-z]/ /[A-Za-z0-9]/* | "t" /[A-Za-z0-9]/+))?))? | "r" ((/[0-9A-Za-tv-z]/ /[A-Za-z0-9]/* | "u" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))?))?
+     | "u" ((/[024579A-Za-z]/ /[A-Za-z0-9]/* | "1" ((/[0-57-9A-Za-z]/ /[A-Za-z0-9]/* | "6" /[A-Za-z0-9]/+))? | "3" ((/[013-9A-Za-z]/ /[A-Za-z0-9]/* | "2" /[A-Za-z0-9]/+))? | "6" ((/[0-35-9A-Za-z]/ /[A-Za-z0-9]/* | "4" /[A-Za-z0-9]/+))? | "8" /[A-Za-z0-9]/+))?
      | "v" ((/[0-9A-Zb-np-z]/ /[A-Za-z0-9]/* | "a" ((/[0-9A-Za-qs-z]/ /[A-Za-z0-9]/* | "r" /[A-Za-z0-9]/+))? | "o" ((/[0-9A-Za-hj-z]/ /[A-Za-z0-9]/* | "i" ((/[0-9A-Za-ce-z]/ /[A-Za-z0-9]/* | "d" /[A-Za-z0-9]/+))?))?))?
      | "w" ((/[0-9A-Za-gi-z]/ /[A-Za-z0-9]/* | "h" ((/[0-9A-Za-hj-z]/ /[A-Za-z0-9]/* | "i" ((/[0-9A-Za-km-z]/ /[A-Za-z0-9]/* | "l" ((/[0-9A-Za-df-z]/ /[A-Za-z0-9]/* | "e" /[A-Za-z0-9]/+))?))?))?))?
 
-NUMBER: /[0-9]/+ (/[ \t]/*)
+digits: /[0-9]/ digits?
+number: ("0" ("x" | "X") /[0-9A-Fa-f]/+ | "0" ("b" | "B") /[01]/+ | digits ("." digits)? (("e" | "E") (("+" | "-"))? digits)?) h
 BOOL: ("true" | "false") (/[ \t]/*)
-STRING: "\"" ((/[^"\\\x00-\x1F]/ | "\\" /["\\nrt]/))* "\"" (/[ \t]/*)
+interp_string: "\"" ((/[^"\\\x00-\x1F{}]/ | "\\" /["\\nrt{}]/ | "{{" | "}}" | "{" h expr "}"))* "\"" h
+STRING: "\"" ((/[^"\\\x00-\x1F{}]/ | "\\" /["\\nrt{}]/ | "{{" | "}}"))* "\"" (/[ \t]/*)

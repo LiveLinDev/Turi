@@ -1,0 +1,3 @@
+package stats
+version 2.0.0
+require contracts 1.1.0 "../contracts"

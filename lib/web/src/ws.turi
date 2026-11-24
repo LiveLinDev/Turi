@@ -1,0 +1,243 @@
+// WebSockets RFC 6455: utilidades criptograficas/marcos en Turi puro y enlace al motor nativo.
+
+import servidor
+
+const kOpCont: int = 0
+const kOpTexto: int = 1
+const kOpBinario: int = 2
+const kOpCerrar: int = 8
+const kOpPing: int = 9
+const kOpPong: int = 10
+
+extern "C" {
+    fn tz_web_ws_route(srv: MutPtr<void>, pat: Ptr<void>, onOpen: Ptr<void>, onMsg: Ptr<void>, onClose: Ptr<void>)
+    fn tz_web_ws_send(ws: MutPtr<void>, opcode: i32, data: Ptr<u8>, len: i64) -> i32
+    fn tz_web_ws_send_str(ws: MutPtr<void>, texto: Ptr<void>) -> i32
+    fn tz_web_ws_broadcast_str(srv: MutPtr<void>, texto: Ptr<void>) -> i64
+    fn tz_web_ws_close(ws: MutPtr<void>)
+    fn tz_web_ws_id(ws: MutPtr<void>) -> i64
+}
+
+fn rotl32(x: int, n: int) -> int {
+    let v = x & 0xFFFFFFFF
+    return ((v << n) | (v >>> (32 - n))) & 0xFFFFFFFF
+}
+
+fn sha1Bytes(entrada: str) -> [int] {
+    let n = len(entrada)
+    var msg: [int] = []
+    reserve(mut msg, n + 72)
+    for i in 0..n {
+        msg.push(int(entrada[i]))
+    }
+    msg.push(0x80)
+    while len(msg) % 64 != 56 {
+        msg.push(0)
+    }
+    let bits = n * 8
+    for sh in 0..8 {
+        let s = (7 - sh) * 8
+        msg.push((bits >>> s) & 0xFF)
+    }
+
+    var h0 = 0x67452301
+    var h1 = 0xEFCDAB89
+    var h2 = 0x98BADCFE
+    var h3 = 0x10325476
+    var h4 = 0xC3D2E1F0
+
+    var w = repeat(0, 80)
+    var off = 0
+    while off < len(msg) {
+        for i in 0..16 {
+            let p = off + i * 4
+            w[i] = (msg[p] << 24) | (msg[p + 1] << 16) | (msg[p + 2] << 8) | msg[p + 3]
+        }
+        for i in 16..80 {
+            w[i] = rotl32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
+        }
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+        for i in 0..80 {
+            var f = 0
+            var k = 0
+            if i < 20 {
+                f = (b & c) | ((b ^ 0xFFFFFFFF) & d)
+                k = 0x5A827999
+            } else if i < 40 {
+                f = b ^ c ^ d
+                k = 0x6ED9EBA1
+            } else if i < 60 {
+                f = (b & c) | (b & d) | (c & d)
+                k = 0x8F1BBCDC
+            } else {
+                f = b ^ c ^ d
+                k = 0xCA62C1D6
+            }
+            let tmp = (rotl32(a, 5) + f + e + k + w[i]) & 0xFFFFFFFF
+            e = d
+            d = c
+            c = rotl32(b, 30)
+            b = a
+            a = tmp
+        }
+        h0 = (h0 + a) & 0xFFFFFFFF
+        h1 = (h1 + b) & 0xFFFFFFFF
+        h2 = (h2 + c) & 0xFFFFFFFF
+        h3 = (h3 + d) & 0xFFFFFFFF
+        h4 = (h4 + e) & 0xFFFFFFFF
+        off += 64
+    }
+
+    var res: [int] = []
+    let hs = [h0, h1, h2, h3, h4]
+    for h in hs {
+        res.push((h >>> 24) & 0xFF)
+        res.push((h >>> 16) & 0xFF)
+        res.push((h >>> 8) & 0xFF)
+        res.push(h & 0xFF)
+    }
+    return res
+}
+
+fn base64Bytes(datos: [int]) -> str {
+    let alfa = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    let n = len(datos)
+    var sb = sbWithCap((n + 2) / 3 * 4)
+    var i = 0
+    while i < n {
+        let b0 = datos[i]
+        let b1 = if i + 1 < n { datos[i + 1] } else { 0 }
+        let b2 = if i + 2 < n { datos[i + 2] } else { 0 }
+        let v = (b0 << 16) | (b1 << 8) | b2
+        sb.pushByte(int(alfa[(v >>> 18) & 63]))
+        sb.pushByte(int(alfa[(v >>> 12) & 63]))
+        if i + 1 < n { sb.pushByte(int(alfa[(v >>> 6) & 63])) } else { sb.pushByte(61) }
+        if i + 2 < n { sb.pushByte(int(alfa[v & 63])) } else { sb.pushByte(61) }
+        i += 3
+    }
+    return sb.take()
+}
+
+fn claveAceptacionWs(claveCliente: str) -> str {
+    let sha = sha1Bytes(claveCliente + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+    return base64Bytes(sha)
+}
+
+struct MarcoWs {
+    fin: bool
+    opcode: int
+    datos: str
+}
+
+fn codificarMarcoWs(opcode: int, datos: str) -> [int] {
+    let n = len(datos)
+    var out: [int] = []
+    reserve(mut out, n + 10)
+    out.push(0x80 | (opcode & 0x0F))
+    if n < 126 {
+        out.push(n)
+    } else if n <= 65535 {
+        out.push(126)
+        out.push((n >>> 8) & 0xFF)
+        out.push(n & 0xFF)
+    } else {
+        out.push(127)
+        for s in 0..8 {
+            out.push((n >>> ((7 - s) * 8)) & 0xFF)
+        }
+    }
+    for i in 0..n {
+        out.push(int(datos[i]))
+    }
+    return out
+}
+
+fn decodificarMarcoWs(bytes: [int]) -> Result<MarcoWs, str> {
+    let n = len(bytes)
+    if n < 2 { return Err("Marco WS incompleto") }
+    let b0 = bytes[0]
+    let b1 = bytes[1]
+    let fin = (b0 & 0x80) != 0
+    let opcode = b0 & 0x0F
+    let masked = (b1 & 0x80) != 0
+    var plen = b1 & 0x7F
+    var pos = 2
+    if plen == 126 {
+        if n < 4 { return Err("Longitud extendida 16b incompleta") }
+        plen = (bytes[2] << 8) | bytes[3]
+        pos = 4
+    } else if plen == 127 {
+        if n < 10 { return Err("Longitud extendida 64b incompleta") }
+        plen = 0
+        for i in 0..8 {
+            plen = (plen << 8) | bytes[2 + i]
+        }
+        pos = 10
+    }
+    var mask = [0, 0, 0, 0]
+    if masked {
+        if pos + 4 > n { return Err("Máscara WS incompleta") }
+        for k in 0..4 { mask[k] = bytes[pos + k] }
+        pos += 4
+    }
+    if pos + plen > n { return Err("Carga útil WS incompleta") }
+    var sb = sbWithCap(plen)
+    for i in 0..plen {
+        var b = bytes[pos + i]
+        if masked { b = b ^ mask[i & 3] }
+        sb.pushByte(b)
+    }
+    return Ok(MarcoWs { fin: fin, opcode: opcode, datos: sb.take() })
+}
+
+fn rutaWs(srv: servidor.Servidor, patron: str, alAbrir: Ptr<void>, alMensaje: Ptr<void>, alCerrar: Ptr<void>) {
+    trusted {
+        tz_web_ws_route(srv.ptr, ptrCast<void>(ptrOf(patron)), alAbrir, alMensaje, alCerrar)
+    }
+}
+
+fn sinCallback() -> Ptr<void> {
+    trusted {
+        return ptrNull<void>()
+    }
+}
+
+fn enviarTexto(ws: MutPtr<void>, texto: str) -> bool {
+    trusted {
+        return tz_web_ws_send_str(ws, ptrCast<void>(ptrOf(texto))) != i32(0)
+    }
+}
+
+fn enviarMarco(ws: MutPtr<void>, opcode: int, data: Ptr<u8>, n: int) -> bool {
+    trusted {
+        return tz_web_ws_send(ws, i32(opcode), data, i64(n)) != i32(0)
+    }
+}
+
+fn difundirTexto(srv: servidor.Servidor, texto: str) -> int {
+    trusted {
+        return int(tz_web_ws_broadcast_str(srv.ptr, ptrCast<void>(ptrOf(texto))))
+    }
+}
+
+fn cerrar(ws: MutPtr<void>) {
+    trusted {
+        tz_web_ws_close(ws)
+    }
+}
+
+fn id(ws: MutPtr<void>) -> int {
+    trusted {
+        return int(tz_web_ws_id(ws))
+    }
+}
+
+fn leerDatosMensaje(data: Ptr<u8>, n: int) -> str {
+    trusted {
+        return strFromPtr(data, i64(n))
+    }
+}

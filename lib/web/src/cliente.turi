@@ -1,0 +1,76 @@
+// Cliente HTTP/1.1 saliente con pool keep-alive y soporte chunked.
+
+extern "C" {
+    fn tz_web_cli_free_buf(p: MutPtr<void>)
+    fn tz_web_cli_request(
+        method: Ptr<void>,
+        url: Ptr<void>,
+        hdrs: Ptr<void>,
+        body: Ptr<void>,
+        timeoutMs: i32,
+        outStatus: MutPtr<i32>,
+        outBodyPtr: MutPtr<Ptr<u8>>,
+        outBodyLen: MutPtr<i64>,
+        outHdrPtr: MutPtr<Ptr<u8>>,
+        outHdrLen: MutPtr<i64>,
+        outErrPtr: MutPtr<Ptr<u8>>,
+        outErrLen: MutPtr<i64>
+    ) -> i32
+}
+
+struct RespuestaHttp {
+    estado: int
+    cabeceras: str
+    cuerpo: str
+}
+
+fn solicitar(metodo: str, url: str, cabecerasExtra: str, cuerpo: str, timeoutMs: int) -> Result<RespuestaHttp, str> {
+    trusted {
+        var st = i32(0)
+        var bp = ptrNull<u8>()
+        var bl = i64(0)
+        var hp = ptrNull<u8>()
+        var hl = i64(0)
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_web_cli_request(
+            ptrCast<void>(ptrOf(metodo)),
+            ptrCast<void>(ptrOf(url)),
+            ptrCast<void>(ptrOf(cabecerasExtra)),
+            ptrCast<void>(ptrOf(cuerpo)),
+            i32(timeoutMs),
+            mutPtrOf(mut st),
+            mutPtrOf(mut bp),
+            mutPtrOf(mut bl),
+            mutPtrOf(mut hp),
+            mutPtrOf(mut hl),
+            mutPtrOf(mut ep),
+            mutPtrOf(mut el)
+        )
+        if ok == i32(0) {
+            let msg = strFromPtr(ep, el)
+            return Err(msg)
+        }
+        let bodyStr = strFromPtr(bp, bl)
+        let hdrStr = strFromPtr(hp, hl)
+        if !ptrIsNull(bp) { tz_web_cli_free_buf(mutPtrCast<void>(ptrMut(bp))) }
+        if !ptrIsNull(hp) { tz_web_cli_free_buf(mutPtrCast<void>(ptrMut(hp))) }
+        return Ok(RespuestaHttp {
+            estado: int(st),
+            cabeceras: hdrStr,
+            cuerpo: bodyStr,
+        })
+    }
+}
+
+fn get(url: str) -> Result<RespuestaHttp, str> {
+    return solicitar("GET", url, "", "", 5000)
+}
+
+fn postJson(url: str, jsonCuerpo: str) -> Result<RespuestaHttp, str> {
+    return solicitar("POST", url, "Content-Type: application/json; charset=utf-8\r\n", jsonCuerpo, 5000)
+}
+
+fn request(method: str, url: str, extraHeaders: str, body: str, timeoutMs: int) -> Result<RespuestaHttp, str> {
+    return solicitar(method, url, extraHeaders, body, timeoutMs)
+}

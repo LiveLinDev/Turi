@@ -1,0 +1,163 @@
+// Criptografia nativa en Turi: SHA-256, HMAC-SHA256, comparacion constante, CSPRNG y ChaCha20-Poly1305.
+
+extern "C" {
+    fn tz_crypto_sha256(data: Ptr<u8>, len: i64, out32: MutPtr<u8>)
+    fn tz_crypto_sha256_str(s: Ptr<void>, out32: MutPtr<u8>)
+    fn tz_crypto_hmac_sha256(key: Ptr<u8>, klen: i64, msg: Ptr<u8>, mlen: i64, out32: MutPtr<u8>)
+    fn tz_crypto_hmac_sha256_str(key: Ptr<void>, msg: Ptr<void>, out32: MutPtr<u8>)
+    fn tz_crypto_ct_eq(a: Ptr<u8>, b: Ptr<u8>, len: i64) -> i32
+    fn tz_crypto_ct_eq_str(a: Ptr<void>, b: Ptr<void>) -> i32
+    fn tz_crypto_random_bytes(out: MutPtr<u8>, len: i64) -> i32
+    fn tz_crypto_chacha20_poly1305_seal(
+        key32: Ptr<u8>, nonce12: Ptr<u8>, aad: Ptr<u8>, aadLen: i64,
+        pt: Ptr<u8>, ptLen: i64, ctOut: MutPtr<u8>, tagOut: MutPtr<u8>
+    ) -> i32
+    fn tz_crypto_chacha20_poly1305_open(
+        key32: Ptr<u8>, nonce12: Ptr<u8>, aad: Ptr<u8>, aadLen: i64,
+        ct: Ptr<u8>, ctLen: i64, tag16: Ptr<u8>, ptOut: MutPtr<u8>
+    ) -> i32
+}
+
+struct AeadBox {
+    ciphertext: [u8]
+    tag: [u8]
+}
+
+fn hexChar(n: int) -> int {
+    return if n < 10 { 48 + n } else { 87 + n }
+}
+
+fn bytesToHex(bytes: [u8]) -> str {
+    var sb = sbWithCap(bytes.len() * 2)
+    for b in bytes {
+        let v = int(b)
+        sb.pushByte(hexChar((v >> 4) & 15))
+        sb.pushByte(hexChar(v & 15))
+    }
+    return sb.take()
+}
+
+fn sha256Bytes(data: [u8]) -> [u8] {
+    var out = repeat(u8(0), 32)
+    trusted {
+        tz_crypto_sha256(slicePtr(data), i64(data.len()), mutSlicePtr(mut out))
+    }
+    return out
+}
+
+fn sha256(text: str) -> [u8] {
+    var out = repeat(u8(0), 32)
+    trusted {
+        tz_crypto_sha256_str(ptrCast<void>(ptrOf(text)), mutSlicePtr(mut out))
+    }
+    return out
+}
+
+fn sha256Hex(text: str) -> str {
+    return bytesToHex(sha256(text))
+}
+
+fn hmacSha256Bytes(key: [u8], msg: [u8]) -> [u8] {
+    var out = repeat(u8(0), 32)
+    trusted {
+        tz_crypto_hmac_sha256(slicePtr(key), i64(key.len()), slicePtr(msg), i64(msg.len()), mutSlicePtr(mut out))
+    }
+    return out
+}
+
+fn hmacSha256(key: str, msg: str) -> [u8] {
+    var out = repeat(u8(0), 32)
+    trusted {
+        tz_crypto_hmac_sha256_str(ptrCast<void>(ptrOf(key)), ptrCast<void>(ptrOf(msg)), mutSlicePtr(mut out))
+    }
+    return out
+}
+
+fn hmacSha256Hex(key: str, msg: str) -> str {
+    return bytesToHex(hmacSha256(key, msg))
+}
+
+fn constantTimeEq(a: [u8], b: [u8]) -> bool {
+    if a.len() != b.len() {
+        return false
+    }
+    trusted {
+        return tz_crypto_ct_eq(slicePtr(a), slicePtr(b), i64(a.len())) != i32(0)
+    }
+}
+
+fn constantTimeEqStr(a: str, b: str) -> bool {
+    trusted {
+        return tz_crypto_ct_eq_str(ptrCast<void>(ptrOf(a)), ptrCast<void>(ptrOf(b))) != i32(0)
+    }
+}
+
+fn randomBytes(count: int) -> Result<[u8], str> {
+    if count < 0 {
+        return Err("E_CRYPTO_ARG: randomBytes count must be >= 0")
+    }
+    var out = repeat(u8(0), count)
+    if count == 0 {
+        return Ok(out)
+    }
+    trusted {
+        let ok = tz_crypto_random_bytes(mutSlicePtr(mut out), i64(count))
+        if ok == i32(0) {
+            return Err("E_CRYPTO_RNG: OS random generator failed")
+        }
+    }
+    return Ok(out)
+}
+
+fn randomHex(byteCount: int) -> Result<str, str> {
+    let b = randomBytes(byteCount)?
+    return Ok(bytesToHex(b))
+}
+
+fn aeadSeal(key32: [u8], nonce12: [u8], aad: [u8], plaintext: [u8]) -> Result<AeadBox, str> {
+    if key32.len() != 32 {
+        return Err("E_CRYPTO_KEY: ChaCha20-Poly1305 requires 32-byte key")
+    }
+    if nonce12.len() != 12 {
+        return Err("E_CRYPTO_NONCE: ChaCha20-Poly1305 requires 12-byte nonce")
+    }
+    var ct = repeat(u8(0), plaintext.len())
+    var tag = repeat(u8(0), 16)
+    trusted {
+        let ok = tz_crypto_chacha20_poly1305_seal(
+            slicePtr(key32), slicePtr(nonce12),
+            slicePtr(aad), i64(aad.len()),
+            slicePtr(plaintext), i64(plaintext.len()),
+            mutSlicePtr(mut ct), mutSlicePtr(mut tag)
+        )
+        if ok == i32(0) {
+            return Err("E_CRYPTO_AEAD: seal failed")
+        }
+    }
+    return Ok(AeadBox { ciphertext: ct, tag: tag })
+}
+
+fn aeadOpen(key32: [u8], nonce12: [u8], aad: [u8], ciphertext: [u8], tag16: [u8]) -> Result<[u8], str> {
+    if key32.len() != 32 {
+        return Err("E_CRYPTO_KEY: ChaCha20-Poly1305 requires 32-byte key")
+    }
+    if nonce12.len() != 12 {
+        return Err("E_CRYPTO_NONCE: ChaCha20-Poly1305 requires 12-byte nonce")
+    }
+    if tag16.len() != 16 {
+        return Err("E_CRYPTO_TAG: ChaCha20-Poly1305 requires 16-byte tag")
+    }
+    var pt = repeat(u8(0), ciphertext.len())
+    trusted {
+        let ok = tz_crypto_chacha20_poly1305_open(
+            slicePtr(key32), slicePtr(nonce12),
+            slicePtr(aad), i64(aad.len()),
+            slicePtr(ciphertext), i64(ciphertext.len()),
+            slicePtr(tag16), mutSlicePtr(mut pt)
+        )
+        if ok == i32(0) {
+            return Err("E_CRYPTO_AUTH: authentication tag mismatch")
+        }
+    }
+    return Ok(pt)
+}

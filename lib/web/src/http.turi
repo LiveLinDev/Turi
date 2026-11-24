@@ -1,0 +1,276 @@
+// Utilidades HTTP/1.1: codigos de estado, metodos, query strings, URL encode/decode, cookies y multipart.
+
+import mime
+
+const kGet: int = 1
+const kPost: int = 2
+const kPut: int = 3
+const kDelete: int = 4
+const kPatch: int = 5
+const kHead: int = 6
+const kOptions: int = 7
+
+const kOk: int = 200
+const kCreated: int = 201
+const kNoContent: int = 204
+const kMovedPermanently: int = 301
+const kFound: int = 302
+const kNotModified: int = 304
+const kBadRequest: int = 400
+const kUnauthorized: int = 401
+const kForbidden: int = 403
+const kNotFound: int = 404
+const kMethodNotAllowed: int = 405
+const kConflict: int = 409
+const kPayloadTooLarge: int = 413
+const kTooManyRequests: int = 429
+const kInternalError: int = 500
+const kServiceUnavailable: int = 503
+
+struct ParteMultipart {
+    nombre: str
+    archivo: str
+    tipoContenido: str
+    datos: str
+}
+
+fn nombreMetodo(m: int) -> str {
+    if m == kGet { return "GET" }
+    if m == kPost { return "POST" }
+    if m == kPut { return "PUT" }
+    if m == kDelete { return "DELETE" }
+    if m == kPatch { return "PATCH" }
+    if m == kHead { return "HEAD" }
+    if m == kOptions { return "OPTIONS" }
+    return "GET"
+}
+
+fn textoEstado(codigo: int) -> str {
+    if codigo == 101 { return "Switching Protocols" }
+    if codigo == 200 { return "OK" }
+    if codigo == 201 { return "Created" }
+    if codigo == 202 { return "Accepted" }
+    if codigo == 204 { return "No Content" }
+    if codigo == 301 { return "Moved Permanently" }
+    if codigo == 302 { return "Found" }
+    if codigo == 304 { return "Not Modified" }
+    if codigo == 400 { return "Bad Request" }
+    if codigo == 401 { return "Unauthorized" }
+    if codigo == 403 { return "Forbidden" }
+    if codigo == 404 { return "Not Found" }
+    if codigo == 405 { return "Method Not Allowed" }
+    if codigo == 409 { return "Conflict" }
+    if codigo == 413 { return "Payload Too Large" }
+    if codigo == 429 { return "Too Many Requests" }
+    if codigo == 500 { return "Internal Server Error" }
+    if codigo == 503 { return "Service Unavailable" }
+    return "OK"
+}
+
+fn decodificarUrl(s: str) -> str {
+    let n = len(s)
+    var sb = sbWithCap(n)
+    var i = 0
+    while i < n {
+        let b = int(s[i])
+        if b == 43 {
+            sb.pushByte(32)
+            i += 1
+        } else if b == 37 && i + 2 < n {
+            let h1 = mime.hexValor(int(s[i + 1]))
+            let h2 = mime.hexValor(int(s[i + 2]))
+            if h1 >= 0 && h2 >= 0 {
+                sb.pushByte((h1 << 4) | h2)
+                i += 3
+            } else {
+                sb.pushByte(b)
+                i += 1
+            }
+        } else {
+            sb.pushByte(b)
+            i += 1
+        }
+    }
+    return sb.take()
+}
+
+fn esSeguroUrl(c: int) -> bool {
+    if c >= 65 && c <= 90 { return true }
+    if c >= 97 && c <= 122 { return true }
+    if c >= 48 && c <= 57 { return true }
+    return c == 45 || c == 95 || c == 46 || c == 126
+}
+
+fn codificarUrl(s: str) -> str {
+    let hex = "0123456789ABCDEF"
+    let n = len(s)
+    var sb = sbWithCap(n * 2)
+    for i in 0..n {
+        let c = int(s[i])
+        if esSeguroUrl(c) {
+            sb.pushByte(c)
+        } else {
+            sb.pushByte(37)
+            sb.pushByte(int(hex[(c >> 4) & 15]))
+            sb.pushByte(int(hex[c & 15]))
+        }
+    }
+    return sb.take()
+}
+
+fn recortarEspacios(s: str) -> str {
+    let n = len(s)
+    var lo = 0
+    while lo < n && (int(s[lo]) == 32 || int(s[lo]) == 9 || int(s[lo]) == 13 || int(s[lo]) == 10) {
+        lo += 1
+    }
+    var hi = n
+    while hi > lo && (int(s[hi - 1]) == 32 || int(s[hi - 1]) == 9 || int(s[hi - 1]) == 13 || int(s[hi - 1]) == 10) {
+        hi -= 1
+    }
+    return s[lo..hi]
+}
+
+fn parsearQuery(query: str) -> Map<str, str> {
+    var m: Map<str, str> = mapNew()
+    let n = len(query)
+    if n == 0 { return m }
+    var ini = 0
+    for i in 0..(n + 1) {
+        if i == n || int(query[i]) == 38 {
+            if i > ini {
+                let par = query[ini..i]
+                let pos = par.indexOf("=")
+                if pos >= 0 {
+                    let k = decodificarUrl(par[0..pos])
+                    let v = decodificarUrl(par[pos + 1..len(par)])
+                    m.set(k, v)
+                } else {
+                    m.set(decodificarUrl(par), "")
+                }
+            }
+            ini = i + 1
+        }
+    }
+    return m
+}
+
+fn parsearCookies(cabecera: str) -> Map<str, str> {
+    var m: Map<str, str> = mapNew()
+    let n = len(cabecera)
+    if n == 0 { return m }
+    var ini = 0
+    for i in 0..(n + 1) {
+        if i == n || int(cabecera[i]) == 59 {
+            if i > ini {
+                let trozo = recortarEspacios(cabecera[ini..i])
+                let pos = trozo.indexOf("=")
+                if pos >= 0 {
+                    let k = recortarEspacios(trozo[0..pos])
+                    let v = recortarEspacios(trozo[pos + 1..len(trozo)])
+                    if len(k) > 0 { m.set(k, v) }
+                }
+            }
+            ini = i + 1
+        }
+    }
+    return m
+}
+
+fn formatearSetCookie(nombre: str, valor: str, ruta: str, maxAgeSeg: int, httpOnly: bool, sameSite: str) -> str {
+    var sb = sbWithCap(96)
+    sb.push(nombre)
+    sb.push("=")
+    sb.push(valor)
+    sb.push("; Path=")
+    sb.push(if len(ruta) > 0 { ruta } else { "/" })
+    if maxAgeSeg >= 0 {
+        sb.push("; Max-Age=")
+        sb.pushInt(maxAgeSeg)
+    }
+    if httpOnly {
+        sb.push("; HttpOnly")
+    }
+    if len(sameSite) > 0 {
+        sb.push("; SameSite=")
+        sb.push(sameSite)
+    }
+    return sb.take()
+}
+
+fn extraerBoundary(contentType: str) -> str? {
+    let clave = "boundary="
+    let pos = mime.minusculasAscii(contentType).indexOf(clave)
+    if pos < 0 { return None }
+    var rest = recortarEspacios(contentType[pos + len(clave)..len(contentType)])
+    let sp = rest.indexOf(";")
+    if sp >= 0 {
+        rest = recortarEspacios(rest[0..sp])
+    }
+    if len(rest) >= 2 && int(rest[0]) == 34 && int(rest[len(rest) - 1]) == 34 {
+        rest = rest[1..len(rest) - 1]
+    }
+    if len(rest) == 0 { return None }
+    return Some(rest)
+}
+
+fn extraerAtributo(disp: str, clave: str) -> str {
+    let patron = clave + "=\""
+    let pos = disp.indexOf(patron)
+    if pos < 0 { return "" }
+    let start = pos + len(patron)
+    let tail = disp[start..len(disp)]
+    let ep = tail.indexOf("\"")
+    if ep >= 0 { return tail[0..ep] }
+    return ""
+}
+
+fn buscarIndiceDesde(haystack: str, needle: str, desde: int) -> int {
+    if desde < 0 || desde >= len(haystack) { return -1 }
+    let sub = haystack[desde..len(haystack)]
+    let pos = sub.indexOf(needle)
+    if pos < 0 { return -1 }
+    return desde + pos
+}
+
+fn parsearMultipart(cuerpo: str, boundary: str) -> [ParteMultipart] {
+    var partes: [ParteMultipart] = []
+    let delim = "--" + boundary
+    var cur = buscarIndiceDesde(cuerpo, delim, 0)
+    while cur >= 0 {
+        var pIni = cur + len(delim)
+        if pIni + 2 <= len(cuerpo) && cuerpo[pIni..pIni + 2] == "--" {
+            break
+        }
+        if pIni + 2 <= len(cuerpo) && cuerpo[pIni..pIni + 2] == "\r\n" {
+            pIni += 2
+        } else if pIni < len(cuerpo) && int(cuerpo[pIni]) == 10 {
+            pIni += 1
+        }
+        let fin = buscarIndiceDesde(cuerpo, "\r\n" + delim, pIni)
+        if fin < 0 { break }
+        let bloque = cuerpo[pIni..fin]
+        let sep = bloque.indexOf("\r\n\r\n")
+        if sep >= 0 {
+            let hdrs = bloque[0..sep]
+            let datos = bloque[sep + 4..len(bloque)]
+            let nombre = extraerAtributo(hdrs, "name")
+            let archivo = extraerAtributo(hdrs, "filename")
+            var ct = "text/plain"
+            let cp = mime.minusculasAscii(hdrs).indexOf("content-type:")
+            if cp >= 0 {
+                let tail = hdrs[cp + 13..len(hdrs)]
+                let eol = tail.indexOf("\r\n")
+                ct = if eol >= 0 { recortarEspacios(tail[0..eol]) } else { recortarEspacios(tail) }
+            }
+            partes.push(ParteMultipart {
+                nombre: nombre,
+                archivo: archivo,
+                tipoContenido: ct,
+                datos: datos,
+            })
+        }
+        cur = fin + 2
+    }
+    return partes
+}

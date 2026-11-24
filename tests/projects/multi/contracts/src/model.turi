@@ -1,0 +1,8 @@
+struct Item {
+    score: int
+}
+
+enum State {
+    Ready
+    Blocked
+}

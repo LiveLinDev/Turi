@@ -1,0 +1,108 @@
+// Paquete oficial `web`: servidor HTTP/1.1 IOCP/epoll, JSON RFC 8259, router, WebSockets, cliente HTTP, SQLite WAL y TLS opcional.
+
+import mime
+import http
+import json
+import router
+import servidor
+import ws
+import cliente
+import sqlite
+import tls
+
+test "mime detecta extensiones y bloquea traversal" {
+    assert mime.tipoMime("estilos/app.css") == "text/css; charset=utf-8"
+    assert mime.tipoMime("datos.JSON") == "application/json; charset=utf-8"
+    assert mime.tipoMime("icono.svg") == "image/svg+xml"
+    assert mime.esTextoCompresible(mime.tipoMime("index.html"))
+    assert !mime.esTextoCompresible(mime.tipoMime("foto.png"))
+
+    let ok1 = mime.sanitizarRutaRelativa("/assets//app.js")
+    assert ok1.isOk() && ok1.unwrapOr("") == "assets/app.js"
+    let ok2 = mime.sanitizarRutaRelativa("")
+    assert ok2.isOk() && ok2.unwrapOr("") == "index.html"
+    let bad1 = mime.sanitizarRutaRelativa("../etc/passwd")
+    assert bad1.isErr()
+    let bad2 = mime.sanitizarRutaRelativa("%2e%2e/secreto.txt")
+    assert bad2.isErr()
+    let bad3 = mime.sanitizarRutaRelativa("a\\b.txt")
+    assert bad3.isErr()
+}
+
+test "http decodifica url query cookies y multipart" {
+    assert http.decodificarUrl("hola+mundo%21%2F") == "hola mundo!/"
+    assert http.codificarUrl("a b/1") == "a%20b%2F1"
+
+    let q = http.parsearQuery("id=42&nombre=Ana+P%C3%A9rez&vacio")
+    assert q.get("id").unwrapOr("") == "42"
+    assert q.get("vacio").unwrapOr("x") == ""
+
+    let ck = http.parsearCookies("sid=abc123; tema=oscuro")
+    assert ck.get("sid").unwrapOr("") == "abc123"
+    assert ck.get("tema").unwrapOr("") == "oscuro"
+
+    let sc = http.formatearSetCookie("sid", "abc", "/", 3600, true, "Lax")
+    assert sc == "sid=abc; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax"
+
+    let ct = "multipart/form-data; boundary=\"----B123\""
+    let bOpt = http.extraerBoundary(ct)
+    assert bOpt.isSome() && bOpt.unwrapOr("") == "----B123"
+
+    let body = "------B123\r\nContent-Disposition: form-data; name=\"titulo\"\r\n\r\nhola\r\n------B123\r\nContent-Disposition: form-data; name=\"fich\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\ncontenido\r\n------B123--\r\n"
+    let partes = http.parsearMultipart(body, "----B123")
+    assert len(partes) == 2
+    assert partes[0].nombre == "titulo" && partes[0].datos == "hola"
+    assert partes[1].nombre == "fich" && partes[1].archivo == "a.txt" && partes[1].datos == "contenido"
+}
+
+test "json analiza y serializa valores RFC 8259" {
+    let bruto = "\{\"ok\":true,\"n\":-12,\"pi\":3.5,\"txt\":\"hola\\n\\\"turi\\\"\",\"arr\":[1,null,false],\"sub\":\{\"k\":\"v\"\}\}"
+    let res = json.parsearJson(bruto)
+    assert res.isOk()
+    let obj = res.unwrapOr(json.JsonVal.Nulo)
+    assert json.obtenerBool(obj, "ok").unwrapOr(false)
+    assert json.obtenerInt(obj, "n").unwrapOr(0) == -12
+    assert json.obtenerTexto(obj, "txt").unwrapOr("") == "hola\n\"turi\""
+    let out = json.serializarJson(obj)
+    let re = json.parsearJson(out)
+    assert re.isOk()
+    assert json.obtenerInt(re.unwrapOr(json.JsonVal.Nulo), "n").unwrapOr(0) == -12
+    assert json.parsearJson("\{mal").isErr()
+}
+
+test "router valida patrones y extrae parametros y comodines" {
+    assert router.validarPatron("/api/items/:id").isOk()
+    assert router.validarPatron("/archivos/*ruta").isOk()
+    assert router.validarPatron("sin-barra").isErr()
+    assert router.validarPatron("/a/*x/b").isErr()
+
+    let c1 = router.coincidirRuta("/api/items/:id/detalle/:sub", "/api/items/99/detalle/info")
+    assert c1.coincide
+    assert c1.params.get("id").unwrapOr("") == "99"
+    assert c1.params.get("sub").unwrapOr("") == "info"
+
+    let c2 = router.coincidirRuta("/static/*archivo", "/static/js/app/main.js")
+    assert c2.coincide
+    assert c2.params.get("archivo").unwrapOr("") == "js/app/main.js"
+
+    let c3 = router.coincidirRuta("/api/items/:id", "/api/otro/99")
+    assert !c3.coincide
+}
+
+test "ws calcula clave de aceptacion RFC 6455 y codifica/decodifica marcos" {
+    // Vector oficial RFC 6455 seccion 1.3
+    let accept = ws.claveAceptacionWs("dGhlIHNhbXBsZSBub25jZQ==")
+    assert accept == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+
+    let raw = ws.codificarMarcoWs(ws.kOpTexto, "hola turi")
+    let dec = ws.decodificarMarcoWs(raw)
+    assert dec.isOk()
+    let m = dec.unwrapOr(ws.MarcoWs { fin: false, opcode: 0, datos: "" })
+    assert m.fin && m.opcode == ws.kOpTexto && m.datos == "hola turi"
+
+    // Marco enmascarado de cliente: FIN+TEXT (0x81), MASK+LEN=4 (0x84), key=[1,2,3,4], "turi"^[1,2,3,4]
+    let masked = [0x81, 0x84, 1, 2, 3, 4, 116 ^ 1, 117 ^ 2, 114 ^ 3, 105 ^ 4]
+    let decM = ws.decodificarMarcoWs(masked)
+    assert decM.isOk()
+    assert decM.unwrapOr(ws.MarcoWs { fin: false, opcode: 0, datos: "" }).datos == "turi"
+}

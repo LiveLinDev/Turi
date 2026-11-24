@@ -1,0 +1,53 @@
+// Carga dinamica opcional de TLS (OpenSSL libssl) sin penalizar binarios sin TLS.
+
+import servidor
+
+extern "C" {
+    fn tz_web_tls_available() -> i32
+    fn tz_web_tls_configure(srv: MutPtr<void>, cert: Ptr<void>, key: Ptr<void>, errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> i32
+}
+
+fn disponible() -> bool {
+    trusted {
+        return tz_web_tls_available() != i32(0)
+    }
+}
+
+fn available() -> bool {
+    return disponible()
+}
+
+fn habilitarEnServidor(srv: servidor.Servidor, rutaCertPem: str, rutaClavePem: str) -> Result<bool, str> {
+    trusted {
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_web_tls_configure(srv.ptr, ptrCast<void>(ptrOf(rutaCertPem)), ptrCast<void>(ptrOf(rutaClavePem)),
+                                      mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(true)
+    }
+}
+
+fn enableOnServer(srv: servidor.Servidor, certPemPath: str, keyPemPath: str) -> Result<bool, str> {
+    return habilitarEnServidor(srv, certPemPath, keyPemPath)
+}
+
+fn iniciarFondoTls(srv: servidor.Servidor, rutaCertPem: str, rutaClavePem: str) -> Result<int, str> {
+    let _ = habilitarEnServidor(srv, rutaCertPem, rutaClavePem)?
+    return servidor.iniciarFondo(srv)
+}
+
+fn startBgTls(srv: servidor.Servidor, certPemPath: str, keyPemPath: str) -> Result<int, str> {
+    return iniciarFondoTls(srv, certPemPath, keyPemPath)
+}
+
+fn escucharTls(srv: servidor.Servidor, rutaCertPem: str, rutaClavePem: str) -> Result<bool, str> {
+    let _ = habilitarEnServidor(srv, rutaCertPem, rutaClavePem)?
+    return servidor.ejecutar(srv)
+}
+
+fn listenTls(srv: servidor.Servidor, certPemPath: str, keyPemPath: str) -> Result<bool, str> {
+    return escucharTls(srv, certPemPath, keyPemPath)
+}

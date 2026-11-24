@@ -1,0 +1,110 @@
+// Deteccion de tipos MIME y sanitizacion segura de rutas contra traversal.
+
+fn extensionDe(ruta: str) -> str {
+    let n = len(ruta)
+    var i = n - 1
+    while i >= 0 {
+        let ch = int(ruta[i])
+        if ch == 46 {
+            return ruta[i + 1..n]
+        }
+        if ch == 47 || ch == 92 {
+            return ""
+        }
+        i -= 1
+    }
+    return ""
+}
+
+fn minusculasAscii(s: str) -> str {
+    var sb = sbWithCap(len(s))
+    for i in 0..len(s) {
+        let c = int(s[i])
+        if c >= 65 && c <= 90 {
+            sb.pushByte(c + 32)
+        } else {
+            sb.pushByte(c)
+        }
+    }
+    return sb.take()
+}
+
+fn tipoMime(ruta: str) -> str {
+    let ext = minusculasAscii(extensionDe(ruta))
+    if ext == "html" || ext == "htm" { return "text/html; charset=utf-8" }
+    if ext == "css" { return "text/css; charset=utf-8" }
+    if ext == "js" || ext == "mjs" { return "application/javascript; charset=utf-8" }
+    if ext == "json" { return "application/json; charset=utf-8" }
+    if ext == "txt" { return "text/plain; charset=utf-8" }
+    if ext == "svg" { return "image/svg+xml" }
+    if ext == "png" { return "image/png" }
+    if ext == "jpg" || ext == "jpeg" { return "image/jpeg" }
+    if ext == "webp" { return "image/webp" }
+    if ext == "ico" { return "image/x-icon" }
+    if ext == "woff2" { return "font/woff2" }
+    if ext == "wasm" { return "application/wasm" }
+    if ext == "xml" { return "application/xml; charset=utf-8" }
+    return "application/octet-stream"
+}
+
+fn esTextoCompresible(ct: str) -> bool {
+    if ct.startsWith("text/") { return true }
+    if ct.contains("json") || ct.contains("javascript") || ct.contains("svg") || ct.contains("xml") || ct.contains("wasm") {
+        return true
+    }
+    return false
+}
+
+fn hexValor(b: int) -> int {
+    if b >= 48 && b <= 57 { return b - 48 }
+    if b >= 97 && b <= 102 { return b - 87 }
+    if b >= 65 && b <= 70 { return b - 55 }
+    return -1
+}
+
+fn sanitizarRutaRelativa(cruda: str) -> Result<str, str> {
+    var sb = sbWithCap(len(cruda) + 12)
+    let n = len(cruda)
+    var i = 0
+    var prevSlash = false
+    while i < n {
+        var c = int(cruda[i])
+        if c == 37 {
+            if i + 2 >= n { return Err("Escape porcentual incompleto") }
+            let h1 = hexValor(int(cruda[i + 1]))
+            let h2 = hexValor(int(cruda[i + 2]))
+            if h1 < 0 || h2 < 0 { return Err("Escape porcentual inválido") }
+            c = (h1 << 4) | h2
+            i += 3
+        } else {
+            i += 1
+        }
+        if c < 32 || c == 92 || c == 58 {
+            return Err("Carácter prohibido en ruta")
+        }
+        if c == 47 {
+            if sb.len() == 0 || prevSlash { continue }
+            prevSlash = true
+        } else {
+            prevSlash = false
+        }
+        sb.pushByte(c)
+    }
+    let limpia = sb.take()
+    let ln = len(limpia)
+    var ini = 0
+    for idx in 0..(ln + 1) {
+        let fin = idx == ln || int(limpia[idx]) == 47
+        if fin {
+            let seg = limpia[ini..idx]
+            if seg == "." || seg == ".." {
+                return Err("Traversal no permitido")
+            }
+            ini = idx + 1
+        }
+    }
+    if ln == 0 {
+        return Ok("index.html")
+    }
+    return Ok(limpia)
+}

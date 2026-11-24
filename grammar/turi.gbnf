@@ -1,49 +1,89 @@
 # Turi, núcleo de Turi. Las producciones de expresión generan la sintaxis.
 # El compilador aplica las precedencias de SPEC.md al construir el árbol.
-root ::= bom? h nl* (declaration (nl+ declaration)* nl*)? comment?
+root ::= bom? h nl* (import (nl+ import)* nl*)? (declaration (nl+ declaration)* nl*)? comment?
 bom ::= "\uFEFF"
 h ::= [ \t]*
 gap ::= [ \t]+
 comment ::= "//" [^\r\n]*
 nl ::= comment? "\r"? "\n" h
-declaration ::= function | test | struct | enum
-struct ::= "struct" gap pascal "{" h nl* (param (decl-separator param)* decl-separator?)? "}" h
-enum ::= "enum" gap pascal "{" h nl* (variant (decl-separator variant)* decl-separator?)? "}" h
+import ::= "import" gap name
+declaration ::= attr* (struct | enum) | extern-block | fn-attr* function | test | interface | impl | const-decl
+attr ::= ("@repr" "(" h "C" h ")" | "@packed" | "@align" "(" h digits h ")") h nl+
+fn-attr ::= ("@noCopy" | "@arena" | "@compact") h nl+
+link-attr ::= "@link" "(" h string h ")" h nl+
+extern-block ::= link-attr* "extern" gap "\"C\"" h nl* "{" h nl* (extern-fn (nl+ extern-fn)* nl*)? "}" h
+extern-fn ::= "fn" gap c-ident "(" h nl* (param ("," h nl* param)* ("," h nl*)?)? ")" h ("->" h nl* type)?
+const-decl ::= "const" gap name ":" h type "=" h nl* expr
+struct ::= "struct" gap pascal type-params? "{" h nl* (param (decl-separator param)* decl-separator?)? "}" h
+enum ::= "enum" gap pascal type-params? "{" h nl* (variant (decl-separator variant)* decl-separator?)? "}" h
+interface ::= "interface" gap pascal "{" h nl* (interface-method (nl+ interface-method)* nl*)? "}" h
+effect-mod ::= ("pure" | "noalloc" | "checkfree" | "io") gap
+safety-mod ::= ("verified" | "trusted" | "raw") gap
+fn-mod ::= effect-mod | safety-mod
+contract-clause ::= ("requires" | "ensures") after-word
+interface-method ::= fn-attr* fn-mod* "fn" gap name "(" h nl* (fn-param ("," h nl* fn-param)* ("," h nl*)?)? ")" h ("->" h nl* type)? (nl* contract-clause)* (nl* block)?
+impl ::= "impl" (generics h | gap) type ("for" gap type)? "{" h nl* (fn-attr* function (nl+ fn-attr* function)* nl*)? "}" h
 decl-separator ::= "," h nl* | nl+
-variant ::= pascal ("(" h nl* (param ("," h nl* param)*)? ")" h)?
-pascal ::= [A-Z] [A-Za-z0-9]* h
-generics ::= "<" h nl* pascal ("," h nl* pascal)* ">" h
-function ::= "fn" gap name generics? "(" h nl* (fn-param ("," h nl* fn-param)*)? ")" h ("->" h nl* type)? block
-fn-param ::= ("var" gap)? param
+variant ::= pascal ("(" h nl* (param ("," h nl* param)* ("," h nl*)?)? ")" h | "=" h nl* expr)?
+pascal-tail ::= [A-Za-z0-9] pascal-tail?
+pascal ::= [A-Z] pascal-tail? h
+c-tail ::= "_" [A-Za-z0-9_]* h
+c-ident ::= name-text c-tail | [A-Z] pascal-tail? c-tail | "_" [A-Za-z0-9_]+ h | pascal | name
+type-params ::= "<" h nl* pascal ("," h nl* pascal)* ("," h nl*)? ">" h
+type-args ::= "<" h nl* type ("," h nl* type)* ("," h nl*)? ">" h
+generics ::= "<" h nl* generic ("," h nl* generic)* ("," h nl*)? ">" h
+generic ::= pascal (":" h type)?
+function ::= fn-mod* ("extern" gap "\"C\"" gap "fn" gap c-ident | "fn" gap name generics?) "(" h nl* (fn-param ("," h nl* fn-param)* ("," h nl*)?)? ")" h ("->" h nl* type)? (nl* contract-clause)* nl* block
+fn-param ::= ("mut" gap)? "self" h | ("var" gap)? name ":" h ("mut" gap)? type
 test ::= "test" h string block
 param ::= name ":" h type
-type ::= ("int" | "bool" | "str" | "void") h | pascal | "[" h "int" h "]" h
+type ::= base-type ("?" h)*
+base-type ::= ("int" | "float" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool" | "str" | "StringBuilder" | "void") h | fn-type | "dyn" gap (pascal | name "." h pascal) | "Simd<" h nl* type "," h nl* digits h nl* ">" h | (pascal | name "." h pascal) type-args? | "[" h type h "]" h
+fn-type ::= "fn" h "(" h nl* (type ("," h nl* type)* ("," h nl*)?)? ")" h ("->" h nl* type)?
 block ::= "{" h nl* (statement (nl+ statement)* nl*)? "}" h
-statement ::= binding | assignment-or-call | conditional | loop | range | result | assertion | print | match
-match ::= "match" after-word "{" h nl* (arm (nl+ arm)* nl*)? "}" h
-arm ::= pascal "." h pascal ("(" h nl* (name ("," h nl* name)*)? ")" h)? "=>" h nl* (block | statement)
-binding ::= ("let" | "var") gap name (":" h type)? "=" h nl* expr
-assignment-or-call ::= name (call | assignment-op h nl* expr | index "=" h nl* expr)
-assignment-op ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="
-conditional ::= "if" after-word block ("else" (h block | gap conditional))?
-loop ::= "while" after-word block
-range ::= "for" gap name-text gap "in" after-word ".." h nl* expr block
+expr-block ::= "{" h nl* (statement (nl+ statement)* nl* | (statement nl+)* expr nl*)? "}" h
+statement ::= binding | assignment-or-call | conditional | loop | range | break-stmt | continue-stmt | result | assertion | print | safety-block
+safety-open ::= ("trusted" | "raw") h "{"
+safety-block ::= safety-open h nl* (statement (nl+ statement)* nl*)? "}" h
+match ::= "match" after-word "{" h nl* (arm (arm-sep arm)* arm-sep?)? "}" h
+arm-sep ::= "," h nl* | nl+
+pat-name ::= name | "_" h
+arm ::= ("None" h | ("Some" | "Ok" | "Err") "(" h nl* pat-name ")" h) "=>" h nl* (expr-block | statement) | (pascal | name "." h pascal) type-args? "." h pascal ("(" h nl* (pat-name ("," h nl* pat-name)* ("," h nl*)?)? ")" h)? "=>" h nl* (expr-block | statement) | "_" h "=>" h nl* (expr-block | statement)
+binding ::= ("let" gap (name | "_" h) | "var" gap name) (":" h type)? "=" h nl* expr
+assignment-or-call ::= expr (assignment-op h nl* expr)?
+assignment-op ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>="
+conditional ::= "if" after-word block (nl* "else" (h block | gap conditional))?
+label ::= "'" name
+loop ::= (label ":" h nl*)? "while" after-word block
+range ::= (label ":" h nl*)? "for" gap (name-text | "_") gap "in" after-word (".." h nl* expr)? block
+break-stmt ::= "break" (gap label | h)
+continue-stmt ::= "continue" (gap label | h)
 result ::= "return" (after-word | h)
 assertion ::= "assert" after-word
-print ::= "print" h "(" h nl* expr ")" h
+print ::= "print" h "(" h nl* expr nl* ("," h nl*)? ")" h
 after-word ::= gap expr | h punct-expr tail
 expr ::= unary tail
 tail ::= (binary h nl* unary)*
-unary ::= (punct-expr | (number | bool | name call? | construct) access*)
-access ::= "." h name | index
-index ::= "[" h expr "]" h
-construct ::= pascal ("." h pascal call? | "{" h nl* (named-field ("," h nl* named-field)* nl*)? "}" h)
-named-field ::= name ":" h expr
-punct-expr ::= ("-" | "!") h nl* unary | ("(" h nl* expr ")" h | string) access*
-call ::= "(" h nl* (expr ("," h nl* expr)*)? ")" h
-binary ::= "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">=" | "+" | "-" | "*" | "/" | "%"
+unary ::= (punct-expr | (match | if-expr | number | bool | ("int" | "float" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "str") call | c-ext-call | "fnPtr" h "(" h nl* (c-ident | name "." h c-ident) ")" h | name (type-args? call)? | qualified-call | construct) access*)
+if-expr ::= "if" after-word expr-block nl* "else" (gap nl* if-expr | h nl+ if-expr | h nl* expr-block)
+c-ext-call ::= ((name-text c-tail | [A-Z] pascal-tail? c-tail | "_" [A-Za-z0-9_]+ h) | name "." h (name-text c-tail | [A-Z] pascal-tail? c-tail | "_" [A-Za-z0-9_]+ h)) call
+qualified-call ::= name "." h name type-args? call
+access ::= "." h ("str" h call | c-ident (type-args? call)? | name (type-args? call)?) | index | call | "?" h
+subscript ::= "[" h nl* expr nl* "]" h
+index ::= "[" h nl* expr (".." h nl* expr)? nl* "]" h
+array-lit ::= "[" h nl* (expr ("," h nl* expr)* ("," h nl*)?)? "]" h
+construct ::= "None" h | ("Some" | "Ok" | "Err") call | (pascal | name "." h pascal) (call | type-args? ("." h (pascal call? | c-ident call) | "{" h nl* (named-field ("," h nl* named-field)* ("," h nl*)?)? "}" h))
+named-field ::= name ":" h nl* expr
+closure-param ::= name (":" h type)?
+closure ::= ("||" h | "|" h nl* (closure-param ("," h nl* closure-param)* ("," h nl*)?)? "|" h) ("->" h nl* type)? (block | expr)
+punct-expr ::= ("-" | "!" | "~") h nl* unary | (closure | "(" h nl* expr nl* ")" h | array-lit | interp-string) access*
+call ::= "(" h nl* (call-arg ("," h nl* call-arg)* ("," h nl*)?)? ")" h
+call-arg ::= ("mut" gap)? expr
+binary ::= "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">=" | "|" | "^" | "&" | "<<" | ">>" | ">>>" | "+" | "-" | "*" | "/" | "%"
 name ::= name-text h
-name-text ::= ([cdghjknoqux-z] [A-Za-z0-9]* | "a" ([0-9A-Za-rt-z] [A-Za-z0-9]* | "s" ([0-9A-Za-rt-z] [A-Za-z0-9]* | "s" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?)?)?)? | "b" ([0-9A-Za-np-z] [A-Za-z0-9]* | "o" ([0-9A-Za-np-z] [A-Za-z0-9]* | "o" ([0-9A-Za-km-z] [A-Za-z0-9]* | "l" [A-Za-z0-9]+)?)?)? | "e" ([0-9A-Za-kmo-z] [A-Za-z0-9]* | "l" ([0-9A-Za-hj-rt-z] [A-Za-z0-9]* | "i" ([0-9A-Za-eg-z] [A-Za-z0-9]* | "f" [A-Za-z0-9]+)? | "s" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)? | "n" ([0-9A-Za-tv-z] [A-Za-z0-9]* | "u" ([0-9A-Za-ln-z] [A-Za-z0-9]* | "m" [A-Za-z0-9]+)?)?)? | "f" ([0-9A-Zb-kmp-z] [A-Za-z0-9]* | "a" ([0-9A-Za-km-z] [A-Za-z0-9]* | "l" ([0-9A-Za-rt-z] [A-Za-z0-9]* | "s" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)?)? | "l" ([0-9A-Za-np-z] [A-Za-z0-9]* | "o" ([0-9A-Zb-z] [A-Za-z0-9]* | "a" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?)? | "n" [A-Za-z0-9]+ | "o" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" [A-Za-z0-9]+)?)? | "i" ([0-9A-Za-eg-lo-z] [A-Za-z0-9]* | "f" [A-Za-z0-9]+ | "m" ([0-9A-Za-oq-z] [A-Za-z0-9]* | "p" ([0-9A-Za-np-z] [A-Za-z0-9]* | "o" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?)?)? | "n" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+))? | "l" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)? | "m" ([0-9A-Zb-tv-z] [A-Za-z0-9]* | "a" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" ([0-9A-Zabd-z] [A-Za-z0-9]* | "c" ([0-9A-Za-gi-z] [A-Za-z0-9]* | "h" [A-Za-z0-9]+)?)?)? | "u" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)? | "p" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-hj-z] [A-Za-z0-9]* | "i" ([0-9A-Za-mo-z] [A-Za-z0-9]* | "n" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?)?)? | "r" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" ([0-9A-Za-tv-z] [A-Za-z0-9]* | "u" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-mo-z] [A-Za-z0-9]* | "n" [A-Za-z0-9]+)?)?)?)?)? | "s" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-tv-z] [A-Za-z0-9]* | "u" ([0-9A-Zabd-z] [A-Za-z0-9]* | "c" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?))?)? | "t" ([0-9A-Za-df-qs-z] [A-Za-z0-9]* | "e" ([0-9A-Za-rt-z] [A-Za-z0-9]* | "s" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)? | "r" ([0-9A-Za-tv-z] [A-Za-z0-9]* | "u" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)?)? | "v" ([0-9A-Zb-np-z] [A-Za-z0-9]* | "a" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" [A-Za-z0-9]+)? | "o" ([0-9A-Za-hj-z] [A-Za-z0-9]* | "i" ([0-9A-Za-ce-z] [A-Za-z0-9]* | "d" [A-Za-z0-9]+)?)?)? | "w" ([0-9A-Za-gi-z] [A-Za-z0-9]* | "h" ([0-9A-Za-hj-z] [A-Za-z0-9]* | "i" ([0-9A-Za-km-z] [A-Za-z0-9]* | "l" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)?)?)?)
-number ::= [0-9]+ h
+name-text ::= ([ghjknoqx-z] [A-Za-z0-9]* | "a" ([0-9A-Za-rt-z] [A-Za-z0-9]* | "s" ([0-9A-Za-rt-z] [A-Za-z0-9]* | "s" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?)?)?)? | "b" ([0-9A-Za-npqs-z] [A-Za-z0-9]* | "o" ([0-9A-Za-np-z] [A-Za-z0-9]* | "o" ([0-9A-Za-km-z] [A-Za-z0-9]* | "l" [A-Za-z0-9]+)?)? | "r" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" ([0-9A-Zb-z] [A-Za-z0-9]* | "a" ([0-9A-Za-jl-z] [A-Za-z0-9]* | "k" [A-Za-z0-9]+)?)?)?)? | "c" ([0-9A-Za-np-z] [A-Za-z0-9]* | "o" ([0-9A-Za-mo-z] [A-Za-z0-9]* | "n" ([0-9A-Za-ru-z] [A-Za-z0-9]* | "s" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)? | "t" ([0-9A-Za-hj-z] [A-Za-z0-9]* | "i" ([0-9A-Za-mo-z] [A-Za-z0-9]* | "n" ([0-9A-Za-tv-z] [A-Za-z0-9]* | "u" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)?)?)?)?)?)? | "d" ([0-9A-Za-xz] [A-Za-z0-9]* | "y" ([0-9A-Za-mo-z] [A-Za-z0-9]* | "n" [A-Za-z0-9]+)?)? | "e" ([0-9A-Za-kmo-z] [A-Za-z0-9]* | "l" ([0-9A-Za-hj-rt-z] [A-Za-z0-9]* | "i" ([0-9A-Za-eg-z] [A-Za-z0-9]* | "f" [A-Za-z0-9]+)? | "s" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)? | "n" ([0-9A-Za-tv-z] [A-Za-z0-9]* | "u" ([0-9A-Za-ln-z] [A-Za-z0-9]* | "m" [A-Za-z0-9]+)?)?)? | "f" ([0-2457-9A-Zb-kmp-z] [A-Za-z0-9]* | "3" ([013-9A-Za-z] [A-Za-z0-9]* | "2" [A-Za-z0-9]+)? | "6" ([0-35-9A-Za-z] [A-Za-z0-9]* | "4" [A-Za-z0-9]+)? | "a" ([0-9A-Za-km-z] [A-Za-z0-9]* | "l" ([0-9A-Za-rt-z] [A-Za-z0-9]* | "s" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)?)? | "l" ([0-9A-Za-np-z] [A-Za-z0-9]* | "o" ([0-9A-Zb-z] [A-Za-z0-9]* | "a" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?)? | "n" [A-Za-z0-9]+ | "o" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" [A-Za-z0-9]+)?)? | "i" ([024579A-Za-eg-lo-z] [A-Za-z0-9]* | "1" ([0-57-9A-Za-z] [A-Za-z0-9]* | "6" [A-Za-z0-9]+)? | "3" ([013-9A-Za-z] [A-Za-z0-9]* | "2" [A-Za-z0-9]+)? | "6" ([0-35-9A-Za-z] [A-Za-z0-9]* | "4" [A-Za-z0-9]+)? | "8" [A-Za-z0-9]+ | "f" [A-Za-z0-9]+ | "m" ([0-9A-Za-oq-z] [A-Za-z0-9]* | "p" ([0-9A-Za-kmnp-z] [A-Za-z0-9]* | "l" [A-Za-z0-9]+ | "o" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?)?)? | "n" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-eg-z] [A-Za-z0-9]* | "f" ([0-9A-Zb-z] [A-Za-z0-9]* | "a" ([0-9A-Zabd-z] [A-Za-z0-9]* | "c" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)?)?)?)?)))? | "l" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)? | "m" ([0-9A-Zb-tv-z] [A-Za-z0-9]* | "a" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" ([0-9A-Zabd-z] [A-Za-z0-9]* | "c" ([0-9A-Za-gi-z] [A-Za-z0-9]* | "h" [A-Za-z0-9]+)?)?)? | "u" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)? | "p" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-hj-z] [A-Za-z0-9]* | "i" ([0-9A-Za-mo-z] [A-Za-z0-9]* | "n" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?)?)? | "r" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" ([0-9A-Za-tv-z] [A-Za-z0-9]* | "u" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-mo-z] [A-Za-z0-9]* | "n" [A-Za-z0-9]+)?)?)?)?)? | "s" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" ([0-9A-Za-tv-z] [A-Za-z0-9]* | "u" ([0-9A-Zabd-z] [A-Za-z0-9]* | "c" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)?))?)? | "t" ([0-9A-Za-df-qs-z] [A-Za-z0-9]* | "e" ([0-9A-Za-rt-z] [A-Za-z0-9]* | "s" ([0-9A-Za-su-z] [A-Za-z0-9]* | "t" [A-Za-z0-9]+)?)? | "r" ([0-9A-Za-tv-z] [A-Za-z0-9]* | "u" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)?)? | "u" ([024579A-Za-z] [A-Za-z0-9]* | "1" ([0-57-9A-Za-z] [A-Za-z0-9]* | "6" [A-Za-z0-9]+)? | "3" ([013-9A-Za-z] [A-Za-z0-9]* | "2" [A-Za-z0-9]+)? | "6" ([0-35-9A-Za-z] [A-Za-z0-9]* | "4" [A-Za-z0-9]+)? | "8" [A-Za-z0-9]+)? | "v" ([0-9A-Zb-np-z] [A-Za-z0-9]* | "a" ([0-9A-Za-qs-z] [A-Za-z0-9]* | "r" [A-Za-z0-9]+)? | "o" ([0-9A-Za-hj-z] [A-Za-z0-9]* | "i" ([0-9A-Za-ce-z] [A-Za-z0-9]* | "d" [A-Za-z0-9]+)?)?)? | "w" ([0-9A-Za-gi-z] [A-Za-z0-9]* | "h" ([0-9A-Za-hj-z] [A-Za-z0-9]* | "i" ([0-9A-Za-km-z] [A-Za-z0-9]* | "l" ([0-9A-Za-df-z] [A-Za-z0-9]* | "e" [A-Za-z0-9]+)?)?)?)?)
+digits ::= [0-9] digits?
+number ::= ("0" ("x" | "X") [0-9A-Fa-f]+ | "0" ("b" | "B") [01]+ | digits ("." digits)? (("e" | "E") ("+" | "-")? digits)?) h
 bool ::= ("true" | "false") h
-string ::= "\"" ([^"\\\x00-\x1F] | "\\" ["\\nrt])* "\"" h
+interp-string ::= "\"" ([^"\\\x00-\x1F{}] | "\\" ["\\nrt{}] | "{{" | "}}" | "{" h expr "}")* "\"" h
+string ::= "\"" ([^"\\\x00-\x1F{}] | "\\" ["\\nrt{}] | "{{" | "}}")* "\"" h

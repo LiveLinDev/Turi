@@ -1,0 +1,338 @@
+// Servidor HTTP/1.1 asincrono nativo (IOCP en Windows, epoll+SO_REUSEPORT en Linux).
+
+import http
+
+extern "C" {
+    fn tz_web_srv_new(host: Ptr<void>, port: i32, workers: i32) -> MutPtr<void>
+    fn tz_web_srv_port(srv: MutPtr<void>) -> i32
+    fn tz_web_srv_route(srv: MutPtr<void>, method: i32, pat: Ptr<void>, fnPtrCb: Ptr<void>)
+    fn tz_web_srv_route_static(srv: MutPtr<void>, method: i32, pat: Ptr<void>, status: i32, ct: Ptr<void>, body: Ptr<void>)
+    fn tz_web_srv_mount_static(srv: MutPtr<void>, prefix: Ptr<void>, dir: Ptr<void>)
+    fn tz_web_srv_middleware(srv: MutPtr<void>, beforeFn: Ptr<void>, afterFn: Ptr<void>)
+    fn tz_web_srv_start_bg(srv: MutPtr<void>, errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> i32
+    fn tz_web_srv_run(srv: MutPtr<void>, errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> i32
+    fn tz_web_srv_stop(srv: MutPtr<void>)
+    fn tz_web_srv_free(srv: MutPtr<void>)
+    fn tz_web_srv_stats(srv: MutPtr<void>, outReqs: MutPtr<i64>, outActive: MutPtr<i64>)
+    fn tz_web_srv_set_data(srv: MutPtr<void>, data: MutPtr<void>)
+    fn tz_web_srv_ctx_data(ctx: MutPtr<void>) -> MutPtr<void>
+
+    fn tz_web_srv_req_method(ctx: MutPtr<void>) -> i32
+    fn tz_web_srv_req_path(ctx: MutPtr<void>, outLen: MutPtr<i64>) -> Ptr<u8>
+    fn tz_web_srv_req_query(ctx: MutPtr<void>, outLen: MutPtr<i64>) -> Ptr<u8>
+    fn tz_web_srv_req_body(ctx: MutPtr<void>, outLen: MutPtr<i64>) -> Ptr<u8>
+    fn tz_web_srv_req_header(ctx: MutPtr<void>, name: Ptr<void>, outLen: MutPtr<i64>) -> Ptr<u8>
+    fn tz_web_srv_req_param(ctx: MutPtr<void>, name: Ptr<void>, outLen: MutPtr<i64>) -> Ptr<u8>
+    fn tz_web_srv_req_param_i64(ctx: MutPtr<void>, name: Ptr<void>, outVal: MutPtr<i64>) -> i32
+    fn tz_web_srv_req_json_i64(ctx: MutPtr<void>, key: Ptr<void>, outVal: MutPtr<i64>) -> i32
+    fn tz_web_srv_req_json_str(ctx: MutPtr<void>, key: Ptr<void>, outLen: MutPtr<i64>) -> Ptr<u8>
+
+    fn tz_web_srv_resp_status(ctx: MutPtr<void>, code: i32)
+    fn tz_web_srv_resp_header(ctx: MutPtr<void>, k: Ptr<void>, v: Ptr<void>)
+    fn tz_web_srv_resp_send(ctx: MutPtr<void>, status: i32, ct: Ptr<void>, body: Ptr<void>)
+    fn tz_web_srv_resp_send_raw(ctx: MutPtr<void>, status: i32, ct: Ptr<void>, data: Ptr<u8>, len: i64)
+
+    fn tz_web_srv_json_begin(ctx: MutPtr<void>)
+    fn tz_web_srv_json_str(ctx: MutPtr<void>, k: Ptr<void>, v: Ptr<void>)
+    fn tz_web_srv_json_i64(ctx: MutPtr<void>, k: Ptr<void>, val: i64)
+    fn tz_web_srv_json_bool(ctx: MutPtr<void>, k: Ptr<void>, val: i32)
+    fn tz_web_srv_json_end(ctx: MutPtr<void>, status: i32)
+}
+
+struct Servidor {
+    ptr: MutPtr<void>
+}
+
+struct EstadisticasWeb {
+    solicitudes: int
+    conexionesActivas: int
+}
+
+fn nuevo(host: str, puerto: int, trabajadores: int) -> Servidor {
+    trusted {
+        let p = tz_web_srv_new(ptrCast<void>(ptrOf(host)), i32(puerto), i32(trabajadores))
+        return Servidor { ptr: p }
+    }
+}
+
+fn puerto(srv: Servidor) -> int {
+    trusted {
+        return int(tz_web_srv_port(srv.ptr))
+    }
+}
+
+fn ruta(srv: Servidor, metodoId: int, patron: str, manejador: Ptr<void>) {
+    trusted {
+        tz_web_srv_route(srv.ptr, i32(metodoId), ptrCast<void>(ptrOf(patron)), manejador)
+    }
+}
+
+fn get(srv: Servidor, patron: str, manejador: Ptr<void>) {
+    ruta(srv, http.kGet, patron, manejador)
+}
+
+fn post(srv: Servidor, patron: str, manejador: Ptr<void>) {
+    ruta(srv, http.kPost, patron, manejador)
+}
+
+fn put(srv: Servidor, patron: str, manejador: Ptr<void>) {
+    ruta(srv, http.kPut, patron, manejador)
+}
+
+fn eliminar(srv: Servidor, patron: str, manejador: Ptr<void>) {
+    ruta(srv, http.kDelete, patron, manejador)
+}
+
+fn parchear(srv: Servidor, patron: str, manejador: Ptr<void>) {
+    ruta(srv, http.kPatch, patron, manejador)
+}
+
+fn estatica(srv: Servidor, patron: str, estadoHttp: int, tipoContenido: str, cuerpoResp: str) {
+    trusted {
+        tz_web_srv_route_static(srv.ptr, i32(http.kGet), ptrCast<void>(ptrOf(patron)), i32(estadoHttp),
+                                ptrCast<void>(ptrOf(tipoContenido)), ptrCast<void>(ptrOf(cuerpoResp)))
+    }
+}
+
+fn montarEstaticos(srv: Servidor, prefijo: str, carpeta: str) {
+    trusted {
+        tz_web_srv_mount_static(srv.ptr, ptrCast<void>(ptrOf(prefijo)), ptrCast<void>(ptrOf(carpeta)))
+    }
+}
+
+fn middleware(srv: Servidor, antes: Ptr<void>, despues: Ptr<void>) {
+    trusted {
+        tz_web_srv_middleware(srv.ptr, antes, despues)
+    }
+}
+
+fn iniciarFondo(srv: Servidor) -> Result<int, str> {
+    trusted {
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_web_srv_start_bg(srv.ptr, mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(int(tz_web_srv_port(srv.ptr)))
+    }
+}
+
+fn ejecutar(srv: Servidor) -> Result<bool, str> {
+    trusted {
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_web_srv_run(srv.ptr, mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(true)
+    }
+}
+
+fn detener(srv: Servidor) {
+    trusted {
+        tz_web_srv_stop(srv.ptr)
+    }
+}
+
+fn liberar(srv: Servidor) {
+    trusted {
+        tz_web_srv_free(srv.ptr)
+    }
+}
+
+fn estadisticas(srv: Servidor) -> EstadisticasWeb {
+    trusted {
+        var reqs = i64(0)
+        var act = i64(0)
+        tz_web_srv_stats(srv.ptr, mutPtrOf(mut reqs), mutPtrOf(mut act))
+        return EstadisticasWeb { solicitudes: int(reqs), conexionesActivas: int(act) }
+    }
+}
+
+fn fijarDatos(srv: Servidor, datos: MutPtr<void>) {
+    trusted {
+        tz_web_srv_set_data(srv.ptr, datos)
+    }
+}
+
+fn datosCtx(ctx: MutPtr<void>) -> MutPtr<void> {
+    trusted {
+        return tz_web_srv_ctx_data(ctx)
+    }
+}
+
+fn metodo(ctx: MutPtr<void>) -> int {
+    trusted {
+        return int(tz_web_srv_req_method(ctx))
+    }
+}
+
+fn rutaReq(ctx: MutPtr<void>) -> str {
+    trusted {
+        var n = i64(0)
+        let p = tz_web_srv_req_path(ctx, mutPtrOf(mut n))
+        return strFromPtr(p, n)
+    }
+}
+
+fn consulta(ctx: MutPtr<void>) -> str {
+    trusted {
+        var n = i64(0)
+        let p = tz_web_srv_req_query(ctx, mutPtrOf(mut n))
+        return strFromPtr(p, n)
+    }
+}
+
+fn cuerpo(ctx: MutPtr<void>) -> str {
+    trusted {
+        var n = i64(0)
+        let p = tz_web_srv_req_body(ctx, mutPtrOf(mut n))
+        return strFromPtr(p, n)
+    }
+}
+
+fn cabecera(ctx: MutPtr<void>, nombre: str) -> str {
+    trusted {
+        var n = i64(0)
+        let p = tz_web_srv_req_header(ctx, ptrCast<void>(ptrOf(nombre)), mutPtrOf(mut n))
+        return strFromPtr(p, n)
+    }
+}
+
+fn param(ctx: MutPtr<void>, nombre: str) -> str {
+    trusted {
+        var n = i64(0)
+        let p = tz_web_srv_req_param(ctx, ptrCast<void>(ptrOf(nombre)), mutPtrOf(mut n))
+        return strFromPtr(p, n)
+    }
+}
+
+fn paramInt(ctx: MutPtr<void>, nombre: str) -> int? {
+    trusted {
+        var v = i64(0)
+        let ok = tz_web_srv_req_param_i64(ctx, ptrCast<void>(ptrOf(nombre)), mutPtrOf(mut v))
+        if ok != i32(0) {
+            return Some(int(v))
+        }
+        return None
+    }
+}
+
+fn jsonInt(ctx: MutPtr<void>, clave: str) -> int? {
+    trusted {
+        var v = i64(0)
+        let ok = tz_web_srv_req_json_i64(ctx, ptrCast<void>(ptrOf(clave)), mutPtrOf(mut v))
+        if ok != i32(0) {
+            return Some(int(v))
+        }
+        return None
+    }
+}
+
+fn jsonTexto(ctx: MutPtr<void>, clave: str) -> str {
+    trusted {
+        var n = i64(0)
+        let p = tz_web_srv_req_json_str(ctx, ptrCast<void>(ptrOf(clave)), mutPtrOf(mut n))
+        return strFromPtr(p, n)
+    }
+}
+
+fn estado(ctx: MutPtr<void>, codigo: int) {
+    trusted {
+        tz_web_srv_resp_status(ctx, i32(codigo))
+    }
+}
+
+fn newServer(host: str, portNum: int, workers: int) -> Servidor { return nuevo(host, portNum, workers) }
+fn port(srv: Servidor) -> int { return puerto(srv) }
+fn getRoute(srv: Servidor, pattern: str, handler: Ptr<void>) { get(srv, pattern, handler) }
+fn postRoute(srv: Servidor, pattern: str, handler: Ptr<void>) { post(srv, pattern, handler) }
+fn staticRoute(srv: Servidor, pattern: str, statusHttp: int, contentType: str, bodyText: str) {
+    estatica(srv, pattern, statusHttp, contentType, bodyText)
+}
+fn mountStatic(srv: Servidor, prefix: str, folder: str) { montarEstaticos(srv, prefix, folder) }
+fn startBg(srv: Servidor) -> Result<int, str> { return iniciarFondo(srv) }
+fn run(srv: Servidor) -> Result<bool, str> { return ejecutar(srv) }
+fn stop(srv: Servidor) { detener(srv) }
+fn free(srv: Servidor) { liberar(srv) }
+fn stats(srv: Servidor) -> EstadisticasWeb { return estadisticas(srv) }
+fn text(ctx: MutPtr<void>, statusHttp: int, bodyText: str) { texto(ctx, statusHttp, bodyText) }
+fn send(ctx: MutPtr<void>, statusHttp: int, contentType: str, bodyText: str) { enviar(ctx, statusHttp, contentType, bodyText) }
+fn jsonRaw(ctx: MutPtr<void>, statusHttp: int, bodyJson: str) { jsonCrudo(ctx, statusHttp, bodyJson) }
+fn jsonStart(ctx: MutPtr<void>) { jsonInicio(ctx) }
+fn jsonStr(ctx: MutPtr<void>, key: str, value: str) { jsonCampoTexto(ctx, key, value) }
+fn jsonFieldInt(ctx: MutPtr<void>, key: str, value: int) { jsonCampoInt(ctx, key, value) }
+fn jsonBool(ctx: MutPtr<void>, key: str, value: bool) { jsonCampoBool(ctx, key, value) }
+fn jsonEnd(ctx: MutPtr<void>, statusHttp: int) { jsonFin(ctx, statusHttp) }
+fn reqPath(ctx: MutPtr<void>) -> str { return rutaReq(ctx) }
+fn reqQuery(ctx: MutPtr<void>) -> str { return consulta(ctx) }
+fn reqBody(ctx: MutPtr<void>) -> str { return cuerpo(ctx) }
+fn reqHeader(ctx: MutPtr<void>, name: str) -> str { return cabecera(ctx, name) }
+fn respHeader(ctx: MutPtr<void>, key: str, value: str) { cabeceraResp(ctx, key, value) }
+fn paramStr(ctx: MutPtr<void>, name: str) -> str { return param(ctx, name) }
+fn status(ctx: MutPtr<void>, code: int) { estado(ctx, code) }
+
+fn cabeceraResp(ctx: MutPtr<void>, clave: str, valor: str) {
+    trusted {
+        tz_web_srv_resp_header(ctx, ptrCast<void>(ptrOf(clave)), ptrCast<void>(ptrOf(valor)))
+    }
+}
+
+fn enviar(ctx: MutPtr<void>, codigo: int, tipoContenido: str, textoResp: str) {
+    trusted {
+        tz_web_srv_resp_send(ctx, i32(codigo), ptrCast<void>(ptrOf(tipoContenido)), ptrCast<void>(ptrOf(textoResp)))
+    }
+}
+
+fn texto(ctx: MutPtr<void>, codigo: int, textoResp: str) {
+    let ct = "text/plain; charset=utf-8"
+    trusted {
+        tz_web_srv_resp_send(ctx, i32(codigo), ptrCast<void>(ptrOf(ct)), ptrCast<void>(ptrOf(textoResp)))
+    }
+}
+
+fn html(ctx: MutPtr<void>, codigo: int, cuerpoHtml: str) {
+    let ct = "text/html; charset=utf-8"
+    trusted {
+        tz_web_srv_resp_send(ctx, i32(codigo), ptrCast<void>(ptrOf(ct)), ptrCast<void>(ptrOf(cuerpoHtml)))
+    }
+}
+
+fn jsonCrudo(ctx: MutPtr<void>, codigo: int, cuerpoJson: str) {
+    let ct = "application/json; charset=utf-8"
+    trusted {
+        tz_web_srv_resp_send(ctx, i32(codigo), ptrCast<void>(ptrOf(ct)), ptrCast<void>(ptrOf(cuerpoJson)))
+    }
+}
+
+fn jsonInicio(ctx: MutPtr<void>) {
+    trusted {
+        tz_web_srv_json_begin(ctx)
+    }
+}
+
+fn jsonCampoTexto(ctx: MutPtr<void>, clave: str, valor: str) {
+    trusted {
+        tz_web_srv_json_str(ctx, ptrCast<void>(ptrOf(clave)), ptrCast<void>(ptrOf(valor)))
+    }
+}
+
+fn jsonCampoInt(ctx: MutPtr<void>, clave: str, valor: int) {
+    trusted {
+        tz_web_srv_json_i64(ctx, ptrCast<void>(ptrOf(clave)), i64(valor))
+    }
+}
+
+fn jsonCampoBool(ctx: MutPtr<void>, clave: str, valor: bool) {
+    trusted {
+        tz_web_srv_json_bool(ctx, ptrCast<void>(ptrOf(clave)), if valor { i32(1) } else { i32(0) })
+    }
+}
+
+fn jsonFin(ctx: MutPtr<void>, codigo: int) {
+    trusted {
+        tz_web_srv_json_end(ctx, i32(codigo))
+    }
+}

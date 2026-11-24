@@ -79,14 +79,14 @@ TRAPS = [
 ILL_TYPED = [
     "fn main() { let a = repeat(1, 2)\na[0] = 4 }",
     "fn f(a: [int]) { a[0] = 0 }",
-    "fn main() { let a = repeat(true, 4) }",
+    "fn main() { let a = [] }",
     "fn main() { let a = repeat(3, true) }",
     "fn main() { let a = repeat(2, 2)\nprint(a[true]) }",
     "fn main() { var a = repeat(1, 1)\na[0] = false }",
     "fn main() { print(repeat(2, 3)) }",
     "fn main() { let a = repeat(1, 1)\nprint(a == a) }",
-    "struct Bad { a: [int] }",
-    "enum Bad { Yes(a: [int]) }",
+    "fn main() { let a = [1, true] }",
+    "fn main() { let a = [1]\npush(mut a, 2) }",
 ]
 
 def generated(seed):
@@ -178,9 +178,18 @@ def main():
             assert result.returncode == 0 and result.stdout == generated_output, result.stderr
         for body, code in TRAPS:
             source = "fn noisy() -> int { print(42)\nreturn 8 }\nfn main() { " + body + " }"
-            for result in execute(source):
+            outputs = execute(source)
+            for result in outputs:
                 assert result.returncode and json.loads(result.stderr)["id"] == code, (source, result.stderr)
                 assert result.stdout == (b"42\n" if "noisy()" in body else b""), result.stdout
+            if not args.interpreter_only:
+                reference = json.loads(outputs[0].stderr)
+                span = reference["span"]
+                expected = json.dumps({
+                    "id": code, "file": reference["file"],
+                    "start": span["start"], "end": span["end"],
+                }, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+                assert outputs[1].stderr == expected, (source, outputs[1].stderr, expected)
         for source in ILL_TYPED:
             src.write_text(source, encoding="utf-8")
             result = invoke([cli, "check", src])

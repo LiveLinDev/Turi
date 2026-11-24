@@ -1,0 +1,82 @@
+// Metricas escalables para interfaces Turi adaptativas (sin pixeles fijos).
+
+struct Metrica {
+    escala: int
+    uiPx: int
+    uiLineH: int
+    smallLineH: int
+    monoLineH: int
+    charW: int
+    pad: int
+    gap: int
+    radio: int
+    controlH: int
+    menuH: int
+    toolH: int
+    tabH: int
+    statusH: int
+    rowH: int
+    iconPx: int
+    actW: int
+}
+
+pure noalloc fn maxI(a: int, b: int) -> int {
+    if a > b { return a }
+    return b
+}
+
+pure noalloc fn minI(a: int, b: int) -> int {
+    if a < b { return a }
+    return b
+}
+
+pure noalloc fn clampI(x: int, lo: int, hi: int) -> int {
+    if x < lo { return lo }
+    if x > hi { return hi }
+    return x
+}
+
+pure noalloc fn px(escala: int, v: int) -> int {
+    return (v * escala + 50) / 100
+}
+
+pure noalloc fn construirMetrica(escala: int, uiLineH: int, smallLineH: int, monoLineH: int, charW: int) -> Metrica {
+    let esc = maxI(escala, 50)
+    let uLine = maxI(uiLineH, 12)
+    let sLine = maxI(smallLineH, 10)
+    let mLine = maxI(monoLineH, 12)
+    let cW = maxI(charW, 6)
+    let pad = maxI(px(esc, 8), 4)
+    let gap = maxI(px(esc, 6), 3)
+    let radio = maxI(px(esc, 6), 3)
+    let controlH = maxI(uLine + px(esc, 10), px(esc, 28))
+    let menuH = uLine + px(esc, 10)
+    let toolH = controlH + px(esc, 10)
+    let tabH = uLine + px(esc, 14)
+    let statusH = sLine + px(esc, 8)
+    let rowH = uLine + px(esc, 6)
+    var iconPx = maxI(px(esc, 18), (uLine * 5) / 4)
+    if iconPx % 2 != 0 {
+        iconPx += 1
+    }
+    let actW = iconPx + 2 * px(esc, 14)
+    return Metrica {
+        escala: esc,
+        uiPx: maxI(px(esc, 13), 8),
+        uiLineH: uLine,
+        smallLineH: sLine,
+        monoLineH: mLine,
+        charW: cW,
+        pad: pad,
+        gap: gap,
+        radio: radio,
+        controlH: controlH,
+        menuH: menuH,
+        toolH: toolH,
+        tabH: tabH,
+        statusH: statusH,
+        rowH: rowH,
+        iconPx: iconPx,
+        actW: actW,
+    }
+}

@@ -8,8 +8,8 @@ from string import ascii_letters, ascii_lowercase, digits
 from llguidance.gbnf_to_lark import gbnf_to_lark
 
 HERE = Path(__file__).resolve().parent
-RESERVED = """assert bool elif else enum false float fn for if import in int let match
-mut print return str struct test true var void while""".split()
+RESERVED = """assert bool break const continue dyn elif else enum f32 f64 false float fn for i16 i32 i64 i8 if import
+impl in int interface let match mut print return str struct test true u16 u32 u64 u8 var void while""".split()
 
 
 def char_class(chars):

@@ -1,19 +1,16 @@
 # Turi
 
-Lee `ESTADO.md`, `SPEC.md` y `DECISIONES.md` al empezar. El contrato publicado está en `SPEC.md`. `EXPEDIENTE.md` fija la hoja de ruta y el protocolo de medición. `AGENT_CARD.md` contiene el contexto breve para escribir programas Turi.
+Lee `ESTADO.md`, `SPEC.md` y `DECISIONES.md` al empezar. El contrato publicado está en `SPEC.md`. `AGENT_CARD.md` contiene el contexto breve para escribir programas Turi.
 
 | Tarea | Entrada |
 |---|---|
 | Compilar y verificar Windows | `powershell -File tools/build.ps1` |
 | Sintaxis, generación restringida y formato | `src/parser.cpp`, `src/lexer.hpp`, `src/format.cpp`, `grammar/` |
 | Tipos, instanciación y ejecución de referencia | `src/semantics.cpp`, `src/generics.cpp` |
+| Paquetes locales y grafo de módulos | `src/project.hpp`, `src/project.cpp`, `tests/project.py` |
 | IR, LLVM y código de apoyo | `src/native_ir.hpp`, `src/native.cpp`, `src/native_runtime.hpp` |
 | CLI, archivos y ediciones por símbolo | `src/main.cpp`, `src/agent.cpp`, `src/driver.cpp` |
 | Pruebas ejecutables y diferencial | `examples/`, `tests/` |
-| Evaluación con modelos locales | `tools/eval/` |
-| Tarjeta mínima medida para funciones escalares | `tools/eval/paired/cards/turi.txt` (279 tokens de Qwen 2.5) |
-| Rendimiento local | `bench/local/PROTOCOLO.md`, `bench/local/resultados/` |
-| 100 cargas, Windows x64 y Linux ARM64 | `bench/amplia/PROTOCOLO.md`, `bench/amplia/RESULTADOS.md` |
-| Caché real y corrección con pruebas privadas | `tools/eval/contexto/`, `bench/amplia/resultados/final/tokens.csv` |
-
-Conserva en los informes los fallos, timeouts y entradas de reproducción. Mantén separados los resultados funcionales y las comparaciones de velocidad del expediente.
+| Librería estándar modular (`"std"`) | `lib/` (`web`, `gpu`, `tensor`, `crypto`, `data`, `cli`, `postgres`, `lienzo`) |
+| MCP, LSP y comandos CLI (`new`/`bench`/`costs`) | `src/tooling.hpp`, `src/tooling.cpp`, `tests/mcp_lsp.py`, `tests/cli_tools.py` |
+| Superoptimizador opcional (`--extreme`) | `tools/superopt/superopt.py`, `tests/extreme.py` |

@@ -1,0 +1,4 @@
+package app
+version 1.0.0
+require stats 2.0.0 "../stats"
+require contracts 1.1.0 "../contracts"

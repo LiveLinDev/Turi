@@ -1,0 +1,489 @@
+// Analizador/serializador CSV (RFC 4180) y JSON (RFC 8259) en Turi puro.
+
+struct CsvTable {
+    headers: [str]
+    rows: [[str]]
+}
+
+fn parseCsv(text: str, delim: str) -> Result<[[str]], str> {
+    let sepByte = if delim.len() > 0 { int(delim[0]) } else { 44 }
+    var rows: [[str]] = []
+    var row: [str] = []
+    var field = sbWithCap(32)
+    var inQuotes = false
+    var fieldStarted = false
+    let n = text.len()
+    var i = 0
+    while i < n {
+        let c = int(text[i])
+        if inQuotes {
+            if c == 34 {
+                if i + 1 < n && int(text[i + 1]) == 34 {
+                    field.pushByte(34)
+                    i += 2
+                    continue
+                }
+                inQuotes = false
+                i += 1
+                continue
+            }
+            field.pushByte(c)
+            i += 1
+            continue
+        }
+        if c == 34 && !fieldStarted {
+            inQuotes = true
+            fieldStarted = true
+            i += 1
+            continue
+        }
+        if c == sepByte {
+            row.push(field.take())
+            fieldStarted = false
+            i += 1
+            continue
+        }
+        if c == 13 {
+            if i + 1 < n && int(text[i + 1]) == 10 {
+                i += 1
+            }
+            row.push(field.take())
+            rows.push(row)
+            row = []
+            fieldStarted = false
+            i += 1
+            continue
+        }
+        if c == 10 {
+            row.push(field.take())
+            rows.push(row)
+            row = []
+            fieldStarted = false
+            i += 1
+            continue
+        }
+        fieldStarted = true
+        field.pushByte(c)
+        i += 1
+    }
+    if inQuotes {
+        return Err("E_CSV_QUOTE: unclosed quoted field")
+    }
+    if fieldStarted || row.len() > 0 {
+        row.push(field.take())
+        rows.push(row)
+    }
+    return Ok(rows)
+}
+
+fn parseCsvWithHeaders(text: str, delim: str) -> Result<CsvTable, str> {
+    let all = parseCsv(text, delim)?
+    if all.len() == 0 {
+        return Ok(CsvTable { headers: [], rows: [] })
+    }
+    var body: [[str]] = []
+    for idx in 1..all.len() {
+        body.push(all[idx])
+    }
+    return Ok(CsvTable { headers: all[0], rows: body })
+}
+
+fn appendCsvField(sb: mut StringBuilder, val: str, sepByte: int) {
+    var needsQuote = false
+    for i in 0..val.len() {
+        let c = int(val[i])
+        if c == sepByte || c == 34 || c == 10 || c == 13 {
+            needsQuote = true
+        }
+    }
+    if !needsQuote {
+        sb.push(val)
+        return
+    }
+    sb.pushByte(34)
+    for i in 0..val.len() {
+        let c = int(val[i])
+        if c == 34 {
+            sb.push("\"\"")
+        } else {
+            sb.pushByte(c)
+        }
+    }
+    sb.pushByte(34)
+}
+
+fn toCsv(rows: [[str]], delim: str) -> str {
+    let sep = if delim.len() > 0 { delim } else { "," }
+    let sepByte = int(sep[0])
+    var sb = sbWithCap(128)
+    for r in 0..rows.len() {
+        if r > 0 { sb.push("\n") }
+        let row = rows[r]
+        for c in 0..row.len() {
+            if c > 0 { sb.push(sep) }
+            appendCsvField(mut sb, row[c], sepByte)
+        }
+    }
+    return sb.take()
+}
+
+struct JsonField {
+    key: str
+    value: JsonVal
+}
+
+enum JsonVal {
+    Null
+    Bool(v: bool)
+    Int(v: int)
+    Float(v: float)
+    Str(v: str)
+    Arr(items: [JsonVal])
+    Obj(fields: [JsonField])
+}
+
+struct JsonCursor {
+    src: str
+    pos: int
+}
+
+fn jIsWs(b: int) -> bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn jSkipWs(cur: mut JsonCursor) {
+    let n = cur.src.len()
+    while cur.pos < n && jIsWs(int(cur.src[cur.pos])) {
+        cur.pos += 1
+    }
+}
+
+fn jHex(b: int) -> int {
+    if b >= 48 && b <= 57 { return b - 48 }
+    if b >= 97 && b <= 102 { return 10 + (b - 97) }
+    if b >= 65 && b <= 70 { return 10 + (b - 65) }
+    return -1
+}
+
+fn jPushUtf8(sb: mut StringBuilder, cp: int) {
+    if cp < 0x80 {
+        sb.pushByte(cp)
+    } else if cp < 0x800 {
+        sb.pushByte(0xC0 | (cp >> 6))
+        sb.pushByte(0x80 | (cp & 0x3F))
+    } else if cp < 0x10000 {
+        sb.pushByte(0xE0 | (cp >> 12))
+        sb.pushByte(0x80 | ((cp >> 6) & 0x3F))
+        sb.pushByte(0x80 | (cp & 0x3F))
+    } else {
+        sb.pushByte(0xF0 | (cp >> 18))
+        sb.pushByte(0x80 | ((cp >> 12) & 0x3F))
+        sb.pushByte(0x80 | ((cp >> 6) & 0x3F))
+        sb.pushByte(0x80 | (cp & 0x3F))
+    }
+}
+
+fn jReadStr(cur: mut JsonCursor) -> Result<str, str> {
+    let n = cur.src.len()
+    if cur.pos >= n || int(cur.src[cur.pos]) != 34 {
+        return Err("E_JSON: expected opening quote")
+    }
+    cur.pos += 1
+    var sb = sbWithCap(32)
+    while cur.pos < n {
+        let c = int(cur.src[cur.pos])
+        if c == 34 {
+            cur.pos += 1
+            return Ok(sb.take())
+        }
+        if c < 0x20 {
+            return Err("E_JSON: unescaped control character in string")
+        }
+        if c == 92 {
+            cur.pos += 1
+            if cur.pos >= n { return Err("E_JSON: truncated escape") }
+            let e = int(cur.src[cur.pos])
+            cur.pos += 1
+            if e == 34 || e == 92 || e == 47 { sb.pushByte(e) } else if e == 98 {
+                sb.pushByte(8)
+            } else if e == 102 {
+                sb.pushByte(12)
+            } else if e == 110 {
+                sb.pushByte(10)
+            } else if e == 114 {
+                sb.pushByte(13)
+            } else if e == 116 {
+                sb.pushByte(9)
+            } else if e == 117 {
+                if cur.pos + 4 > n { return Err("E_JSON: truncated unicode escape") }
+                var cp = 0
+                for k in 0..4 {
+                    let h = jHex(int(cur.src[cur.pos + k]))
+                    if h < 0 { return Err("E_JSON: invalid unicode hex") }
+                    cp = (cp << 4) | h
+                }
+                cur.pos += 4
+                jPushUtf8(mut sb, cp)
+            } else {
+                return Err("E_JSON: invalid escape")
+            }
+        } else {
+            sb.pushByte(c)
+            cur.pos += 1
+        }
+    }
+    return Err("E_JSON: unclosed string")
+}
+
+fn jReadNum(cur: mut JsonCursor) -> Result<JsonVal, str> {
+    let start = cur.pos
+    let n = cur.src.len()
+    var isFloat = false
+    if cur.pos < n && int(cur.src[cur.pos]) == 45 { cur.pos += 1 }
+    let ds = cur.pos
+    while cur.pos < n && int(cur.src[cur.pos]) >= 48 && int(cur.src[cur.pos]) <= 57 {
+        cur.pos += 1
+    }
+    if cur.pos == ds { return Err("E_JSON: invalid number") }
+    if cur.pos < n && int(cur.src[cur.pos]) == 46 {
+        isFloat = true
+        cur.pos += 1
+        let fs = cur.pos
+        while cur.pos < n && int(cur.src[cur.pos]) >= 48 && int(cur.src[cur.pos]) <= 57 {
+            cur.pos += 1
+        }
+        if cur.pos == fs { return Err("E_JSON: invalid fraction") }
+    }
+    if cur.pos < n && (int(cur.src[cur.pos]) == 101 || int(cur.src[cur.pos]) == 69) {
+        isFloat = true
+        cur.pos += 1
+        if cur.pos < n && (int(cur.src[cur.pos]) == 43 || int(cur.src[cur.pos]) == 45) {
+            cur.pos += 1
+        }
+        let es = cur.pos
+        while cur.pos < n && int(cur.src[cur.pos]) >= 48 && int(cur.src[cur.pos]) <= 57 {
+            cur.pos += 1
+        }
+        if cur.pos == es { return Err("E_JSON: invalid exponent") }
+    }
+    let slice = cur.src[start..cur.pos]
+    if isFloat {
+        return Ok(JsonVal.Float(parseFloat(slice)))
+    }
+    return Ok(JsonVal.Int(parseInt(slice)))
+}
+
+fn jReadValue(cur: mut JsonCursor, depth: int) -> Result<JsonVal, str> {
+    if depth > 64 { return Err("E_JSON: nesting depth exceeded") }
+    jSkipWs(mut cur)
+    let n = cur.src.len()
+    if cur.pos >= n { return Err("E_JSON: unexpected EOF") }
+    let c = int(cur.src[cur.pos])
+    if c == 34 {
+        let s = jReadStr(mut cur)?
+        return Ok(JsonVal.Str(s))
+    }
+    if c == 123 {
+        cur.pos += 1
+        jSkipWs(mut cur)
+        var fields: [JsonField] = []
+        if cur.pos < n && int(cur.src[cur.pos]) == 125 {
+            cur.pos += 1
+            return Ok(JsonVal.Obj(fields))
+        }
+        while cur.pos < n {
+            jSkipWs(mut cur)
+            let k = jReadStr(mut cur)?
+            jSkipWs(mut cur)
+            if cur.pos >= n || int(cur.src[cur.pos]) != 58 {
+                return Err("E_JSON: expected ':'")
+            }
+            cur.pos += 1
+            let v = jReadValue(mut cur, depth + 1)?
+            fields.push(JsonField { key: k, value: v })
+            jSkipWs(mut cur)
+            if cur.pos < n && int(cur.src[cur.pos]) == 44 {
+                cur.pos += 1
+                continue
+            }
+            if cur.pos < n && int(cur.src[cur.pos]) == 125 {
+                cur.pos += 1
+                return Ok(JsonVal.Obj(fields))
+            }
+            return Err("E_JSON: expected ',' or close brace")
+        }
+        return Err("E_JSON: unclosed object")
+    }
+    if c == 91 {
+        cur.pos += 1
+        jSkipWs(mut cur)
+        var items: [JsonVal] = []
+        if cur.pos < n && int(cur.src[cur.pos]) == 93 {
+            cur.pos += 1
+            return Ok(JsonVal.Arr(items))
+        }
+        while cur.pos < n {
+            let v = jReadValue(mut cur, depth + 1)?
+            items.push(v)
+            jSkipWs(mut cur)
+            if cur.pos < n && int(cur.src[cur.pos]) == 44 {
+                cur.pos += 1
+                continue
+            }
+            if cur.pos < n && int(cur.src[cur.pos]) == 93 {
+                cur.pos += 1
+                return Ok(JsonVal.Arr(items))
+            }
+            return Err("E_JSON: expected ',' or ']'")
+        }
+        return Err("E_JSON: unclosed array")
+    }
+    if cur.pos + 4 <= n && cur.src[cur.pos..cur.pos + 4] == "true" {
+        cur.pos += 4
+        return Ok(JsonVal.Bool(true))
+    }
+    if cur.pos + 5 <= n && cur.src[cur.pos..cur.pos + 5] == "false" {
+        cur.pos += 5
+        return Ok(JsonVal.Bool(false))
+    }
+    if cur.pos + 4 <= n && cur.src[cur.pos..cur.pos + 4] == "null" {
+        cur.pos += 4
+        return Ok(JsonVal.Null)
+    }
+    if c == 45 || (c >= 48 && c <= 57) {
+        return jReadNum(mut cur)
+    }
+    return Err("E_JSON: unexpected token")
+}
+
+fn parseJson(text: str) -> Result<JsonVal, str> {
+    var cur = JsonCursor { src: text, pos: 0 }
+    let v = jReadValue(mut cur, 0)?
+    jSkipWs(mut cur)
+    if cur.pos != cur.src.len() {
+        return Err("E_JSON: trailing characters")
+    }
+    return Ok(v)
+}
+
+fn writeEscapedStr(sb: mut StringBuilder, s: str) {
+    sb.pushByte(34)
+    for i in 0..s.len() {
+        let c = int(s[i])
+        if c == 34 {
+            sb.push("\\\"")
+        } else if c == 92 {
+            sb.push("\\\\")
+        } else if c == 10 {
+            sb.push("\\n")
+        } else if c == 13 {
+            sb.push("\\r")
+        } else if c == 9 {
+            sb.push("\\t")
+        } else if c == 8 {
+            sb.push("\\b")
+        } else if c == 12 {
+            sb.push("\\f")
+        } else {
+            sb.pushByte(c)
+        }
+    }
+    sb.pushByte(34)
+}
+
+fn writeJsonInto(sb: mut StringBuilder, v: JsonVal) {
+    match v {
+        JsonVal.Null => sb.push("null")
+        JsonVal.Bool(b) => sb.push(if b { "true" } else { "false" })
+        JsonVal.Int(i) => sb.pushInt(i)
+        JsonVal.Float(f) => sb.pushFloat(f)
+        JsonVal.Str(s) => writeEscapedStr(mut sb, s)
+        JsonVal.Arr(items) => {
+            sb.pushByte(91)
+            for idx in 0..items.len() {
+                if idx > 0 { sb.pushByte(44) }
+                writeJsonInto(mut sb, items[idx])
+            }
+            sb.pushByte(93)
+        }
+        JsonVal.Obj(fields) => {
+            sb.pushByte(123)
+            for idx in 0..fields.len() {
+                if idx > 0 { sb.pushByte(44) }
+                writeEscapedStr(mut sb, fields[idx].key)
+                sb.pushByte(58)
+                writeJsonInto(mut sb, fields[idx].value)
+            }
+            sb.pushByte(125)
+        }
+    }
+}
+
+fn toJson(v: JsonVal) -> str {
+    var sb = sbWithCap(64)
+    writeJsonInto(mut sb, v)
+    return sb.take()
+}
+
+fn getField(obj: JsonVal, key: str) -> JsonVal? {
+    return match obj {
+        JsonVal.Obj(fields) => {
+            var found: JsonVal? = None
+            for f in fields {
+                if f.key == key { found = Some(f.value) }
+            }
+            found
+        }
+        JsonVal.Null => None
+        JsonVal.Bool(u) => None
+        JsonVal.Int(u) => None
+        JsonVal.Float(u) => None
+        JsonVal.Str(u) => None
+        JsonVal.Arr(u) => None
+    }
+}
+
+fn getStr(obj: JsonVal, key: str) -> str? {
+    return match getField(obj, key) {
+        None => None
+        Some(v) => match v {
+            JsonVal.Str(s) => Some(s)
+            JsonVal.Null => None
+            JsonVal.Bool(u) => None
+            JsonVal.Int(u) => None
+            JsonVal.Float(u) => None
+            JsonVal.Arr(u) => None
+            JsonVal.Obj(u) => None
+        }
+    }
+}
+
+fn getInt(obj: JsonVal, key: str) -> int? {
+    return match getField(obj, key) {
+        None => None
+        Some(v) => match v {
+            JsonVal.Int(i) => Some(i)
+            JsonVal.Null => None
+            JsonVal.Bool(u) => None
+            JsonVal.Float(u) => None
+            JsonVal.Str(u) => None
+            JsonVal.Arr(u) => None
+            JsonVal.Obj(u) => None
+        }
+    }
+}
+
+fn getBool(obj: JsonVal, key: str) -> bool? {
+    return match getField(obj, key) {
+        None => None
+        Some(v) => match v {
+            JsonVal.Bool(b) => Some(b)
+            JsonVal.Null => None
+            JsonVal.Int(u) => None
+            JsonVal.Float(u) => None
+            JsonVal.Str(u) => None
+            JsonVal.Arr(u) => None
+            JsonVal.Obj(u) => None
+        }
+    }
+}

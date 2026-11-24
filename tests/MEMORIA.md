@@ -58,3 +58,21 @@ El comando `allocation_audit.py` de arriba reproduce la primera fila. Para conta
 ```powershell
 python -c "import sys; sys.path.insert(0, 'tests'); import arrays, allocation_audit as a; a.PROGRAM, a.EXPECTED = arrays.RETURNS, arrays.RETURN_OUTPUT; a.main()" build/veloz.exe "C:/Program Files/LLVM/bin/clang.exe"
 ```
+
+## Copias, bytes movidos y tiempo instrumentado
+
+`veloz emit-ir ARCHIVO --audit-copies` añade llamadas de auditoría a `tz.clone` y `tz.repeat`. Cada clonación informa los bytes y el intervalo de bytes de su expresión de origen. La variante de benchmark `turi-audit` combina esos datos con reservas, bytes solicitados, pico de bytes vivos, tiempo y RSS. El IR ordinario no contiene estas llamadas; los tiempos competitivos se toman siempre de ejecutables sin instrumentación.
+
+La campaña del 20/11/2026 ejecutó las 100 cargas reservadas en Ryzen con las mismas entradas. Solo `copyIsolation` ejecutó una clonación: 65.536 bytes en el sitio `[13624,13626)` de `kernel.turi`. El intervalo instrumentado de contabilidad, reserva y copia tardó 18.700 ns; no es una medición pura de `memcpy`. El programa mantuvo un pico de 131.072 bytes vivos, incluidos original y copia, y terminó con cero. El total de la matriz fue 42 inicializaciones, 1.430.496 bytes inicializados, 97 reservas, 3.670.768 bytes solicitados y cero bytes vivos al salir. El detalle por carga está en `bench/amplia/resultados/copias.json` y `copias.csv`.
+
+Esta matriz no respalda lifetimes anotados ni ownership explícito: la única copia es necesaria para conservar independencia de valor. Se mantiene la transferencia inferida y la comprobación de estos contadores antes de reconsiderar esa decisión.
+
+```powershell
+python tests/copy_audit.py build/veloz.exe "C:/Program Files/LLVM/bin/clang.exe"
+python bench/amplia/build.py --arch ryzen --build-dir build-amplia2/copia-audit
+python bench/amplia/plan.py build-amplia2/copia-audit --reserve
+python bench/amplia/run.py --root build-amplia2/copia-audit/ryzen --out build-amplia2/copia-resultados-tiempo
+python bench/amplia/copies.py build-amplia2/copia-resultados-tiempo --out bench/amplia/resultados/copias.json
+```
+
+La prueba de regresión comprueba con ASan dos clonaciones y 48 bytes copiados; una autoasignación incluida no genera copia. También cubre transferencia de dueño y arreglo vacío. Los mismos totales deben obtenerse en `-O0` y `-O2`. El arnés guarda un manifiesto con hashes del plan, los binarios y el runner; escribe un archivo `.error.json` si un caso falla o agota su tiempo y no permite reanudar una carpeta con otra identidad.

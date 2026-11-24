@@ -1,0 +1,176 @@
+// Carga privada de fuentes modernas (Inter y JetBrains Mono) y verificacion de cara GDI en Turi puro.
+
+@link("gdi32")
+extern "C" {
+    fn AddFontResourceExW(name: Ptr<u16>, fl: u32, res: MutPtr<void>) -> i32
+    fn RemoveFontResourceExW(name: Ptr<u16>, fl: u32, res: MutPtr<void>) -> i32
+    fn GetTextFaceW(hdc: MutPtr<void>, c: i32, name: MutPtr<u16>) -> i32
+    fn SelectObject(hdc: MutPtr<void>, h: MutPtr<void>) -> MutPtr<void>
+}
+
+const flagPrivada: u32 = u32(0x10) // FR_PRIVATE: uso exclusivo del proceso actual
+
+struct FuentesPrivadas {
+    rutas: [str]
+    cargadas: int
+}
+
+pure fn familiaUi() -> str {
+    return "Inter"
+}
+
+pure fn familiaUiSemi() -> str {
+    return "Inter SemiBold"
+}
+
+pure fn familiaMono() -> str {
+    return "JetBrains Mono"
+}
+
+pure fn respaldoUi() -> str {
+    return "Segoe UI"
+}
+
+fn respaldosMono() -> [str] {
+    return ["Cascadia Mono", "Consolas"]
+}
+
+fn archivosIncluidos() -> [str] {
+    return [
+        "Inter-Regular.ttf",
+        "Inter-SemiBold.ttf",
+        "Inter-Bold.ttf",
+        "JetBrainsMono-Regular.ttf",
+        "JetBrainsMono-Bold.ttf",
+        "JetBrainsMono-Italic.ttf",
+    ]
+}
+
+fn unirRuta(dir: str, archivo: str) -> str {
+    if len(dir) == 0 { return archivo }
+    let ult = int(dir[len(dir) - 1])
+    if ult == 92 || ult == 47 {
+        return dir + archivo
+    }
+    return dir + "\\" + archivo
+}
+
+fn buscarDirFuentes(candidatos: [str]) -> str {
+    for dir in candidatos {
+        if len(dir) == 0 { continue }
+        if fileExists(unirRuta(dir, "Inter-Regular.ttf")) {
+            return dir
+        }
+    }
+    return ""
+}
+
+fn aUtf16Nulo(texto: str) -> [u16] {
+    var out: [u16] = []
+    let n = len(texto)
+    reserve(mut out, n + 2)
+    var i = 0
+    while i < n {
+        let b0 = int(texto[i])
+        var cp = b0
+        var step = 1
+        if b0 < 0x80 {
+            cp = b0
+        } else if (b0 & 0xE0) == 0xC0 && i + 1 < n {
+            cp = ((b0 & 0x1F) << 6) | (int(texto[i + 1]) & 0x3F)
+            step = 2
+        } else if (b0 & 0xF0) == 0xE0 && i + 2 < n {
+            cp = ((b0 & 0x0F) << 12) | ((int(texto[i + 1]) & 0x3F) << 6) | (int(texto[i + 2]) & 0x3F)
+            step = 3
+        } else if (b0 & 0xF8) == 0xF0 && i + 3 < n {
+            cp = ((b0 & 0x07) << 18) | ((int(texto[i + 1]) & 0x3F) << 12) | ((int(texto[i + 2]) & 0x3F) << 6) | (int(texto[i + 3]) & 0x3F)
+            step = 4
+        } else {
+            cp = 0xFFFD
+        }
+        i += step
+        if cp <= 0xFFFF {
+            push(mut out, u16(cp))
+        } else {
+            let v = cp - 0x10000
+            push(mut out, u16(0xD800 + (v >> 10)))
+            push(mut out, u16(0xDC00 + (v & 0x3FF)))
+        }
+    }
+    push(mut out, u16(0))
+    return out
+}
+
+fn desdeUtf16(buf: [u16], maxUnidades: int) -> str {
+    var limit = len(buf)
+    if maxUnidades >= 0 && maxUnidades < limit {
+        limit = maxUnidades
+    }
+    var sb = sbWithCap(limit)
+    for i in 0..limit {
+        let cp = int(buf[i])
+        if cp == 0 {
+            break
+        }
+        if cp < 0x80 {
+            sbPushByte(mut sb, cp)
+        } else if cp < 0x800 {
+            sbPushByte(mut sb, 0xC0 | (cp >> 6))
+            sbPushByte(mut sb, 0x80 | (cp & 0x3F))
+        } else {
+            sbPushByte(mut sb, 0xE0 | (cp >> 12))
+            sbPushByte(mut sb, 0x80 | ((cp >> 6) & 0x3F))
+            sbPushByte(mut sb, 0x80 | (cp & 0x3F))
+        }
+    }
+    return sbTake(mut sb)
+}
+
+pure noalloc fn mismaCara(a: str, b: str) -> bool {
+    let n = len(a)
+    if n != len(b) { return false }
+    for i in 0..n {
+        var ca = int(a[i])
+        var cb = int(b[i])
+        if ca >= 65 && ca <= 90 { ca += 32 }
+        if cb >= 65 && cb <= 90 { cb += 32 }
+        if ca != cb { return false }
+    }
+    return true
+}
+
+trusted fn cargarPrivadas(dir: str) -> FuentesPrivadas {
+    if len(dir) == 0 {
+        return FuentesPrivadas { rutas: [], cargadas: 0 }
+    }
+    var rutas: [str] = []
+    var ok = 0
+    for nom in archivosIncluidos() {
+        let ruta = unirRuta(dir, nom)
+        if !fileExists(ruta) { continue }
+        let rutaW = aUtf16Nulo(ruta)
+        let n = AddFontResourceExW(slicePtr(rutaW), flagPrivada, mutPtrNull<void>())
+        if n > i32(0) {
+            push(mut rutas, ruta)
+            ok += 1
+        }
+    }
+    return FuentesPrivadas { rutas: rutas, cargadas: ok }
+}
+
+trusted fn liberarPrivadas(f: FuentesPrivadas) {
+    for ruta in f.rutas {
+        let rutaW = aUtf16Nulo(ruta)
+        let _ = RemoveFontResourceExW(slicePtr(rutaW), flagPrivada, mutPtrNull<void>())
+    }
+}
+
+trusted fn caraActiva(hdc: MutPtr<void>, fuente: MutPtr<void>) -> str {
+    if ptrIsNull(hdc) || ptrIsNull(fuente) { return "" }
+    let prev = SelectObject(hdc, fuente)
+    var buf = repeat(u16(0), 64)
+    let count = GetTextFaceW(hdc, i32(64), mutSlicePtr(mut buf))
+    let _ = SelectObject(hdc, prev)
+    if count <= i32(0) { return "" }
+    return desdeUtf16(buf, int(count))
+}

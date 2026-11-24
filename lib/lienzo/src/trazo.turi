@@ -1,0 +1,555 @@
+// Primitivas vectoriales antialias GDI+ encapsuladas sin fugas de memoria ni handles expuestos.
+
+import iconos
+
+@repr(C)
+struct EntradaGdip {
+    version: u32
+    callback: MutPtr<void>
+    sinHilo: i32
+    sinCodecs: i32
+}
+
+@repr(C)
+struct PuntoI {
+    x: i32
+    y: i32
+}
+
+@link("gdiplus")
+extern "C" {
+    fn GdiplusStartup(token: MutPtr<u64>, input: Ptr<EntradaGdip>, output: MutPtr<void>) -> i32
+    fn GdiplusShutdown(token: u64)
+    fn GdipCreateFromHDC(hdc: MutPtr<void>, graphics: MutPtr<MutPtr<void>>) -> i32
+    fn GdipDeleteGraphics(graphics: MutPtr<void>) -> i32
+    fn GdipSetSmoothingMode(graphics: MutPtr<void>, mode: i32) -> i32
+    fn GdipSetPixelOffsetMode(graphics: MutPtr<void>, mode: i32) -> i32
+    fn GdipCreateSolidFill(color: u32, brush: MutPtr<MutPtr<void>>) -> i32
+    fn GdipDeleteBrush(brush: MutPtr<void>) -> i32
+    fn GdipCreateLineBrushI(point1: Ptr<PuntoI>, point2: Ptr<PuntoI>, color1: u32, color2: u32, wrapMode: i32, brush: MutPtr<MutPtr<void>>) -> i32
+    fn GdipCreatePen1(color: u32, width: f32, unit: i32, pen: MutPtr<MutPtr<void>>) -> i32
+    fn GdipDeletePen(pen: MutPtr<void>) -> i32
+    fn GdipSetPenLineCap197819(pen: MutPtr<void>, startCap: i32, endCap: i32, dashCap: i32) -> i32
+    fn GdipSetPenLineJoin(pen: MutPtr<void>, lineJoin: i32) -> i32
+    fn GdipCreatePath(brushMode: i32, path: MutPtr<MutPtr<void>>) -> i32
+    fn GdipDeletePath(path: MutPtr<void>) -> i32
+    fn GdipStartPathFigure(path: MutPtr<void>) -> i32
+    fn GdipClosePathFigure(path: MutPtr<void>) -> i32
+    fn GdipAddPathLine(path: MutPtr<void>, x1: f32, y1: f32, x2: f32, y2: f32) -> i32
+    fn GdipAddPathArc(path: MutPtr<void>, x: f32, y: f32, width: f32, height: f32, startAngle: f32, sweepAngle: f32) -> i32
+    fn GdipFillPath(graphics: MutPtr<void>, brush: MutPtr<void>, path: MutPtr<void>) -> i32
+    fn GdipDrawPath(graphics: MutPtr<void>, pen: MutPtr<void>, path: MutPtr<void>) -> i32
+    fn GdipDrawLine(graphics: MutPtr<void>, pen: MutPtr<void>, x1: f32, y1: f32, x2: f32, y2: f32) -> i32
+    fn GdipFillEllipse(graphics: MutPtr<void>, brush: MutPtr<void>, x: f32, y: f32, width: f32, height: f32) -> i32
+    fn GdipCreateBitmapFromScan0(width: i32, height: i32, stride: i32, format: i32, scan0: MutPtr<u8>, bitmap: MutPtr<MutPtr<void>>) -> i32
+    fn GdipGetImageGraphicsContext(image: MutPtr<void>, graphics: MutPtr<MutPtr<void>>) -> i32
+    fn GdipCreateHICONFromBitmap(bitmap: MutPtr<void>, hbmReturn: MutPtr<u64>) -> i32
+    fn GdipBitmapGetPixel(bitmap: MutPtr<void>, x: i32, y: i32, color: MutPtr<u32>) -> i32
+    fn GdipCreateBitmapFromHBITMAP(hbm: MutPtr<void>, hpal: MutPtr<void>, bitmap: MutPtr<MutPtr<void>>) -> i32
+    fn GdipSaveImageToFile(image: MutPtr<void>, filename: Ptr<u16>, clsidEncoder: Ptr<u8>, encoderParams: Ptr<void>) -> i32
+    fn GdipDisposeImage(image: MutPtr<void>) -> i32
+}
+
+@link("kernel32")
+extern "C" {
+    fn CreateFileW(lpFileName: Ptr<u16>, dwDesiredAccess: u32, dwShareMode: u32, lpSecurityAttributes: MutPtr<void>, dwCreationDisposition: u32, dwFlagsAndAttributes: u32, hTemplateFile: MutPtr<void>) -> MutPtr<void>
+    fn WriteFile(hFile: MutPtr<void>, lpBuffer: Ptr<u8>, nNumberOfBytesToWrite: u32, lpNumberOfBytesWritten: MutPtr<u32>, lpOverlapped: MutPtr<void>) -> i32
+    fn CloseHandle(hObject: MutPtr<void>) -> i32
+}
+
+pure noalloc fn argbDesdeRgb(rgb: int) -> u32 {
+    return u32(0xFF000000) | (u32(rgb) & u32(0x00FFFFFF))
+}
+
+pure noalloc fn minEnt(a: int, b: int) -> int {
+    if a < b { return a }
+    return b
+}
+
+pure noalloc fn minFloat(a: float, b: float) -> float {
+    if a < b { return a }
+    return b
+}
+
+fn aUtf16Nulo(texto: str) -> [u16] {
+    var out: [u16] = []
+    let n = len(texto)
+    reserve(mut out, n + 2)
+    var i = 0
+    while i < n {
+        let b0 = int(texto[i])
+        var cp = b0
+        var step = 1
+        if b0 < 0x80 {
+            cp = b0
+        } else if (b0 & 0xE0) == 0xC0 && i + 1 < n {
+            cp = ((b0 & 0x1F) << 6) | (int(texto[i + 1]) & 0x3F)
+            step = 2
+        } else if (b0 & 0xF0) == 0xE0 && i + 2 < n {
+            cp = ((b0 & 0x0F) << 12) | ((int(texto[i + 1]) & 0x3F) << 6) | (int(texto[i + 2]) & 0x3F)
+            step = 3
+        } else if (b0 & 0xF8) == 0xF0 && i + 3 < n {
+            cp = ((b0 & 0x07) << 18) | ((int(texto[i + 1]) & 0x3F) << 12) | ((int(texto[i + 2]) & 0x3F) << 6) | (int(texto[i + 3]) & 0x3F)
+            step = 4
+        } else {
+            cp = 0xFFFD
+        }
+        i += step
+        if cp <= 0xFFFF {
+            push(mut out, u16(cp))
+        } else {
+            let v = cp - 0x10000
+            push(mut out, u16(0xD800 + (v >> 10)))
+            push(mut out, u16(0xDC00 + (v & 0x3FF)))
+        }
+    }
+    push(mut out, u16(0))
+    return out
+}
+
+trusted fn crearRutaRedondeada(x: float, y: float, w: float, h: float, radio: float) -> MutPtr<void> {
+    var path = mutPtrNull<void>()
+    if w <= 0.0 || h <= 0.0 {
+        return path
+    }
+    let st = GdipCreatePath(i32(1), mutPtrOf(mut path))
+    if st != i32(0) || ptrIsNull(path) {
+        return mutPtrNull<void>()
+    }
+    let maxR = minFloat(w, h) * 0.5
+    let r = if radio > maxR { maxR } else { if radio < 0.0 { 0.0 } else { radio } }
+    let _ = GdipStartPathFigure(path)
+    if r <= 0.25 {
+        let _ = GdipAddPathLine(path, f32(x), f32(y), f32(x + w), f32(y))
+        let _ = GdipAddPathLine(path, f32(x + w), f32(y), f32(x + w), f32(y + h))
+        let _ = GdipAddPathLine(path, f32(x + w), f32(y + h), f32(x), f32(y + h))
+        let _ = GdipAddPathLine(path, f32(x), f32(y + h), f32(x), f32(y))
+    } else {
+        let d = f32(r * 2.0)
+        let _ = GdipAddPathArc(path, f32(x), f32(y), d, d, f32(180.0), f32(90.0))
+        let _ = GdipAddPathArc(path, f32(x + w - r * 2.0), f32(y), d, d, f32(270.0), f32(90.0))
+        let _ = GdipAddPathArc(path, f32(x + w - r * 2.0), f32(y + h - r * 2.0), d, d, f32(0.0), f32(90.0))
+        let _ = GdipAddPathArc(path, f32(x), f32(y + h - r * 2.0), d, d, f32(90.0), f32(90.0))
+    }
+    let _ = GdipClosePathFigure(path)
+    return path
+}
+
+trusted fn iniciar() -> int {
+    var token = u64(0)
+    let inp = EntradaGdip {
+        version: u32(1),
+        callback: mutPtrNull<void>(),
+        sinHilo: i32(0),
+        sinCodecs: i32(0),
+    }
+    let st = GdiplusStartup(mutPtrOf(mut token), ptrOf(inp), mutPtrNull<void>())
+    if st != i32(0) {
+        return 0
+    }
+    return int(token)
+}
+
+trusted fn cerrar(token: int) {
+    if token != 0 {
+        GdiplusShutdown(u64(token))
+    }
+}
+
+trusted fn activarCalidad(gp: MutPtr<void>) {
+    let _ = GdipSetSmoothingMode(gp, i32(4))
+    let _ = GdipSetPixelOffsetMode(gp, i32(4))
+}
+
+trusted fn rellenarCajaEnGp(gp: MutPtr<void>, x: int, y: int, w: int, h: int, radio: int, rgb: int) {
+    let path = crearRutaRedondeada(float(x), float(y), float(w), float(h), float(radio))
+    if !ptrIsNull(path) {
+        var br = mutPtrNull<void>()
+        if GdipCreateSolidFill(argbDesdeRgb(rgb), mutPtrOf(mut br)) == i32(0) && !ptrIsNull(br) {
+            let _ = GdipFillPath(gp, br, path)
+            let _ = GdipDeleteBrush(br)
+        }
+        let _ = GdipDeletePath(path)
+    }
+}
+
+trusted fn bordeCajaEnGp(gp: MutPtr<void>, x: int, y: int, w: int, h: int, radio: int, grosorPx: int, rgb: int) {
+    if w <= 1 || h <= 1 { return }
+    let gPx = if grosorPx > 0 { grosorPx } else { 1 }
+    let inset = float(gPx) * 0.5
+    let path = crearRutaRedondeada(float(x) + inset, float(y) + inset, float(w) - float(gPx), float(h) - float(gPx), float(radio))
+    if !ptrIsNull(path) {
+        var pen = mutPtrNull<void>()
+        if GdipCreatePen1(argbDesdeRgb(rgb), f32(float(gPx)), i32(2), mutPtrOf(mut pen)) == i32(0) && !ptrIsNull(pen) {
+            let _ = GdipDrawPath(gp, pen, path)
+            let _ = GdipDeletePen(pen)
+        }
+        let _ = GdipDeletePath(path)
+    }
+}
+
+trusted fn rellenarCaja(hdc: MutPtr<void>, x: int, y: int, w: int, h: int, radio: int, rgb: int) {
+    if ptrIsNull(hdc) || w <= 0 || h <= 0 { return }
+    var gp = mutPtrNull<void>()
+    if GdipCreateFromHDC(hdc, mutPtrOf(mut gp)) != i32(0) || ptrIsNull(gp) { return }
+    activarCalidad(gp)
+    rellenarCajaEnGp(gp, x, y, w, h, radio, rgb)
+    let _ = GdipDeleteGraphics(gp)
+}
+
+trusted fn bordeCaja(hdc: MutPtr<void>, x: int, y: int, w: int, h: int, radio: int, grosorPx: int, rgb: int) {
+    if ptrIsNull(hdc) || w <= 1 || h <= 1 { return }
+    var gp = mutPtrNull<void>()
+    if GdipCreateFromHDC(hdc, mutPtrOf(mut gp)) != i32(0) || ptrIsNull(gp) { return }
+    activarCalidad(gp)
+    bordeCajaEnGp(gp, x, y, w, h, radio, grosorPx, rgb)
+    let _ = GdipDeleteGraphics(gp)
+}
+
+trusted fn caja(hdc: MutPtr<void>, x: int, y: int, w: int, h: int, radio: int, rellenoRgb: int, bordeRgb: int, grosorPx: int) {
+    if ptrIsNull(hdc) || w <= 0 || h <= 0 { return }
+    var gp = mutPtrNull<void>()
+    if GdipCreateFromHDC(hdc, mutPtrOf(mut gp)) != i32(0) || ptrIsNull(gp) { return }
+    activarCalidad(gp)
+    rellenarCajaEnGp(gp, x, y, w, h, radio, rellenoRgb)
+    if bordeRgb != rellenoRgb {
+        bordeCajaEnGp(gp, x, y, w, h, radio, grosorPx, bordeRgb)
+    }
+    let _ = GdipDeleteGraphics(gp)
+}
+
+trusted fn degradadoCajaEnGp(gp: MutPtr<void>, x: int, y: int, w: int, h: int, radio: int, rgbA: int, rgbB: int) {
+    if ptrIsNull(gp) || w <= 0 || h <= 0 { return }
+    let path = crearRutaRedondeada(float(x), float(y), float(w), float(h), float(radio))
+    if !ptrIsNull(path) {
+        let p1 = PuntoI { x: i32(x), y: i32(y) }
+        let p2 = PuntoI { x: i32(x + w), y: i32(y + h) }
+        var br = mutPtrNull<void>()
+        if GdipCreateLineBrushI(ptrOf(p1), ptrOf(p2), argbDesdeRgb(rgbA), argbDesdeRgb(rgbB), i32(0), mutPtrOf(mut br)) == i32(0) && !ptrIsNull(br) {
+            let _ = GdipFillPath(gp, br, path)
+            let _ = GdipDeleteBrush(br)
+        }
+        let _ = GdipDeletePath(path)
+    }
+}
+
+trusted fn degradadoCaja(hdc: MutPtr<void>, x: int, y: int, w: int, h: int, radio: int, rgbA: int, rgbB: int) {
+    if ptrIsNull(hdc) || w <= 0 || h <= 0 { return }
+    var gp = mutPtrNull<void>()
+    if GdipCreateFromHDC(hdc, mutPtrOf(mut gp)) != i32(0) || ptrIsNull(gp) { return }
+    activarCalidad(gp)
+    degradadoCajaEnGp(gp, x, y, w, h, radio, rgbA, rgbB)
+    let _ = GdipDeleteGraphics(gp)
+}
+
+trusted fn circulo(hdc: MutPtr<void>, cx: int, cy: int, r: int, rgb: int) {
+    if ptrIsNull(hdc) || r <= 0 { return }
+    var gp = mutPtrNull<void>()
+    if GdipCreateFromHDC(hdc, mutPtrOf(mut gp)) != i32(0) || ptrIsNull(gp) { return }
+    activarCalidad(gp)
+    var br = mutPtrNull<void>()
+    if GdipCreateSolidFill(argbDesdeRgb(rgb), mutPtrOf(mut br)) == i32(0) && !ptrIsNull(br) {
+        let d = f32(float(r * 2))
+        let _ = GdipFillEllipse(gp, br, f32(float(cx - r)), f32(float(cy - r)), d, d)
+        let _ = GdipDeleteBrush(br)
+    }
+    let _ = GdipDeleteGraphics(gp)
+}
+
+trusted fn crearPlumaRedondeada(rgb: int, grosor: float) -> MutPtr<void> {
+    var pen = mutPtrNull<void>()
+    if GdipCreatePen1(argbDesdeRgb(rgb), f32(grosor), i32(2), mutPtrOf(mut pen)) == i32(0) && !ptrIsNull(pen) {
+        let _ = GdipSetPenLineCap197819(pen, i32(2), i32(2), i32(2))
+        let _ = GdipSetPenLineJoin(pen, i32(2))
+        return pen
+    }
+    return mutPtrNull<void>()
+}
+
+trusted fn linea(hdc: MutPtr<void>, x1: int, y1: int, x2: int, y2: int, grosor: int, rgb: int) {
+    if ptrIsNull(hdc) { return }
+    let g = if grosor > 0 { grosor } else { 1 }
+    var gp = mutPtrNull<void>()
+    if GdipCreateFromHDC(hdc, mutPtrOf(mut gp)) != i32(0) || ptrIsNull(gp) { return }
+    activarCalidad(gp)
+    let pen = crearPlumaRedondeada(rgb, float(g))
+    if !ptrIsNull(pen) {
+        let _ = GdipDrawLine(gp, pen, f32(float(x1)), f32(float(y1)), f32(float(x2)), f32(float(y2)))
+        let _ = GdipDeletePen(pen)
+    }
+    let _ = GdipDeleteGraphics(gp)
+}
+
+trusted fn ondulada(hdc: MutPtr<void>, x: int, y: int, w: int, amplitud: int, paso: int, grosor: int, rgb: int) {
+    if ptrIsNull(hdc) || w <= 0 { return }
+    var gp = mutPtrNull<void>()
+    if GdipCreateFromHDC(hdc, mutPtrOf(mut gp)) != i32(0) || ptrIsNull(gp) { return }
+    activarCalidad(gp)
+    let amp = if amplitud > 1 { amplitud } else { 2 }
+    let stp = if paso > 1 { paso } else { 3 }
+    let ancho = if w > 6 { w } else { 6 }
+    let gPx = if grosor > 0 { grosor } else { 1 }
+    let endX = x + ancho
+    var path = mutPtrNull<void>()
+    if GdipCreatePath(i32(1), mutPtrOf(mut path)) == i32(0) && !ptrIsNull(path) {
+        let _ = GdipStartPathFigure(path)
+        var cx = x
+        var curY = y
+        var up = true
+        while cx < endX {
+            var nx = cx + stp
+            if nx > endX { nx = endX }
+            let ny = if up { y - amp } else { y }
+            let _ = GdipAddPathLine(path, f32(float(cx)), f32(float(curY)), f32(float(nx)), f32(float(ny)))
+            cx = nx
+            curY = ny
+            up = !up
+        }
+        let pen = crearPlumaRedondeada(rgb, float(gPx))
+        if !ptrIsNull(pen) {
+            let _ = GdipDrawPath(gp, pen, path)
+            let _ = GdipDeletePen(pen)
+        }
+        let _ = GdipDeletePath(path)
+    }
+    let _ = GdipDeleteGraphics(gp)
+}
+
+trusted fn dibujarIcono(hdc: MutPtr<void>, ic: iconos.Icono, x: int, y: int, tam: int, rgb: int) {
+    if ptrIsNull(hdc) || tam <= 2 || len(ic.trazos) == 0 { return }
+    var gp = mutPtrNull<void>()
+    if GdipCreateFromHDC(hdc, mutPtrOf(mut gp)) != i32(0) || ptrIsNull(gp) { return }
+    activarCalidad(gp)
+
+    let esc = float(tam) / 2400.0
+    var grosor = (float(tam) * 2.0) / 24.0
+    if grosor < 1.25 { grosor = 1.25 }
+
+    var path = mutPtrNull<void>()
+    if GdipCreatePath(i32(1), mutPtrOf(mut path)) == i32(0) && !ptrIsNull(path) {
+        for ti in 0..len(ic.trazos) {
+            let pts = ic.trazos[ti]
+            if len(pts) < 4 { continue }
+            let _ = GdipStartPathFigure(path)
+            var pi = 0
+            while pi + 3 < len(pts) {
+                let x1 = float(x) + float(pts[pi]) * esc
+                let y1 = float(y) + float(pts[pi + 1]) * esc
+                let x2 = float(x) + float(pts[pi + 2]) * esc
+                let y2 = float(y) + float(pts[pi + 3]) * esc
+                let _ = GdipAddPathLine(path, f32(x1), f32(y1), f32(x2), f32(y2))
+                pi += 2
+            }
+            if ti < len(ic.cerrado) && ic.cerrado[ti] {
+                let _ = GdipClosePathFigure(path)
+            }
+        }
+        if ic.relleno {
+            var br = mutPtrNull<void>()
+            if GdipCreateSolidFill(argbDesdeRgb(rgb), mutPtrOf(mut br)) == i32(0) && !ptrIsNull(br) {
+                let _ = GdipFillPath(gp, br, path)
+                let _ = GdipDeleteBrush(br)
+            }
+        } else {
+            let pen = crearPlumaRedondeada(rgb, grosor)
+            if !ptrIsNull(pen) {
+                let _ = GdipDrawPath(gp, pen, path)
+                let _ = GdipDeletePen(pen)
+            }
+        }
+        let _ = GdipDeletePath(path)
+    }
+    let _ = GdipDeleteGraphics(gp)
+}
+
+trusted fn dibujarLogoEnGp(gp: MutPtr<void>, x: int, y: int, tam: int) {
+    if ptrIsNull(gp) || tam <= 4 { return }
+    let t = float(tam)
+    let radio = if tam >= 12 { int((t * 0.24).round()) } else { 2 }
+    degradadoCajaEnGp(gp, x, y, tam, tam, radio, 0x3B82F6, 0x8B5CF6)
+
+    // Barra superior e inferior (T) blancas con esquinas redondeadas
+    let rT = t * 0.06
+    let topX = float(x) + t * 0.22
+    let topY = float(y) + t * 0.24
+    let topW = t * 0.56
+    let topH = t * 0.14
+    let stemX = float(x) + t * 0.43
+    let stemY = float(y) + t * 0.24
+    let stemW = t * 0.14
+    let stemH = t * 0.54
+
+    var brBlanco = mutPtrNull<void>()
+    if GdipCreateSolidFill(argbDesdeRgb(0xFFFFFF), mutPtrOf(mut brBlanco)) == i32(0) && !ptrIsNull(brBlanco) {
+        let pTop = crearRutaRedondeada(topX, topY, topW, topH, rT)
+        if !ptrIsNull(pTop) {
+            let _ = GdipFillPath(gp, brBlanco, pTop)
+            let _ = GdipDeletePath(pTop)
+        }
+        let pStem = crearRutaRedondeada(stemX, stemY, stemW, stemH, rT)
+        if !ptrIsNull(pStem) {
+            let _ = GdipFillPath(gp, brBlanco, pStem)
+            let _ = GdipDeletePath(pStem)
+        }
+        let _ = GdipDeleteBrush(brBlanco)
+    }
+
+    // Chispa cian (#22D3EE)
+    var brCian = mutPtrNull<void>()
+    if GdipCreateSolidFill(argbDesdeRgb(0x22D3EE), mutPtrOf(mut brCian)) == i32(0) && !ptrIsNull(brCian) {
+        let sr = t * 0.075
+        let scx = float(x) + t * 0.74
+        let scy = float(y) + t * 0.72
+        let _ = GdipFillEllipse(gp, brCian, f32(scx - sr), f32(scy - sr), f32(sr * 2.0), f32(sr * 2.0))
+        let _ = GdipDeleteBrush(brCian)
+    }
+}
+
+trusted fn dibujarLogo(hdc: MutPtr<void>, x: int, y: int, tam: int) {
+    if ptrIsNull(hdc) || tam <= 4 { return }
+    var gp = mutPtrNull<void>()
+    if GdipCreateFromHDC(hdc, mutPtrOf(mut gp)) != i32(0) || ptrIsNull(gp) { return }
+    activarCalidad(gp)
+    dibujarLogoEnGp(gp, x, y, tam)
+    let _ = GdipDeleteGraphics(gp)
+}
+
+trusted fn iconoVentana(tam: int) -> u64 {
+    let s = if tam > 8 { tam } else { 32 }
+    var bmp = mutPtrNull<void>()
+    if GdipCreateBitmapFromScan0(i32(s), i32(s), i32(0), i32(0x26200A), mutPtrNull<u8>(), mutPtrOf(mut bmp)) != i32(0) || ptrIsNull(bmp) {
+        return u64(0)
+    }
+    var gp = mutPtrNull<void>()
+    if GdipGetImageGraphicsContext(bmp, mutPtrOf(mut gp)) == i32(0) && !ptrIsNull(gp) {
+        activarCalidad(gp)
+        dibujarLogoEnGp(gp, 0, 0, s)
+        let _ = GdipDeleteGraphics(gp)
+    }
+    var hicon = u64(0)
+    if GdipCreateHICONFromBitmap(bmp, mutPtrOf(mut hicon)) != i32(0) {
+        hicon = u64(0)
+    }
+    let _ = GdipDisposeImage(bmp)
+    return hicon
+}
+
+trusted fn guardarPng(hbitmap: MutPtr<void>, ruta: str) -> bool {
+    if ptrIsNull(hbitmap) || len(ruta) == 0 { return false }
+    var bmp = mutPtrNull<void>()
+    if GdipCreateBitmapFromHBITMAP(hbitmap, mutPtrNull<void>(), mutPtrOf(mut bmp)) != i32(0) || ptrIsNull(bmp) {
+        return false
+    }
+    // CLSID PNG {557CF406-1A04-11D3-9A73-0000F81EF32E}
+    let clsid: [u8] = [
+        u8(0x06), u8(0xF4), u8(0x7C), u8(0x55),
+        u8(0x04), u8(0x1A), u8(0xD3), u8(0x11),
+        u8(0x9A), u8(0x73), u8(0x00), u8(0x00),
+        u8(0xF8), u8(0x1E), u8(0xF3), u8(0x2E),
+    ]
+    let rutaW = aUtf16Nulo(ruta)
+    let st = GdipSaveImageToFile(bmp, slicePtr(rutaW), slicePtr(clsid), ptrNull<void>())
+    let _ = GdipDisposeImage(bmp)
+    return st == i32(0)
+}
+
+fn pushU16Le(buf: mut [u8], v: int) {
+    push(mut buf, u8(v & 0xFF))
+    push(mut buf, u8((v >> 8) & 0xFF))
+}
+
+fn pushU32Le(buf: mut [u8], v: int) {
+    push(mut buf, u8(v & 0xFF))
+    push(mut buf, u8((v >> 8) & 0xFF))
+    push(mut buf, u8((v >> 16) & 0xFF))
+    push(mut buf, u8((v >> 24) & 0xFF))
+}
+
+trusted fn escribirIco(ruta: str, tamanos: [int]) -> bool {
+    if len(ruta) == 0 || len(tamanos) == 0 { return false }
+    var imgs: [[u8]] = []
+    for ti in 0..len(tamanos) {
+        let s = if tamanos[ti] > 8 { tamanos[ti] } else { 32 }
+        var bmp = mutPtrNull<void>()
+        if GdipCreateBitmapFromScan0(i32(s), i32(s), i32(0), i32(0x26200A), mutPtrNull<u8>(), mutPtrOf(mut bmp)) != i32(0) || ptrIsNull(bmp) {
+            return false
+        }
+        var gp = mutPtrNull<void>()
+        if GdipGetImageGraphicsContext(bmp, mutPtrOf(mut gp)) == i32(0) && !ptrIsNull(gp) {
+            activarCalidad(gp)
+            dibujarLogoEnGp(gp, 0, 0, s)
+            let _ = GdipDeleteGraphics(gp)
+        }
+        let andStride = ((s + 31) / 32) * 4
+        let andBytes = andStride * s
+        let xorBytes = s * s * 4
+        var dib: [u8] = []
+        reserve(mut dib, 40 + xorBytes + andBytes)
+        // BITMAPINFOHEADER (40 bytes)
+        pushU32Le(mut dib, 40)
+        pushU32Le(mut dib, s)
+        pushU32Le(mut dib, s * 2)
+        pushU16Le(mut dib, 1)
+        pushU16Le(mut dib, 32)
+        pushU32Le(mut dib, 0)
+        pushU32Le(mut dib, xorBytes)
+        pushU32Le(mut dib, 0)
+        pushU32Le(mut dib, 0)
+        pushU32Le(mut dib, 0)
+        pushU32Le(mut dib, 0)
+
+        var row = s - 1
+        while row >= 0 {
+            for col in 0..s {
+                var argb = u32(0)
+                let _ = GdipBitmapGetPixel(bmp, i32(col), i32(row), mutPtrOf(mut argb))
+                let pxVal = int(argb)
+                push(mut dib, u8(pxVal & 0xFF))
+                push(mut dib, u8((pxVal >> 8) & 0xFF))
+                push(mut dib, u8((pxVal >> 16) & 0xFF))
+                push(mut dib, u8((pxVal >> 24) & 0xFF))
+            }
+            row -= 1
+        }
+        for _ in 0..andBytes {
+            push(mut dib, u8(0))
+        }
+        let _ = GdipDisposeImage(bmp)
+        push(mut imgs, dib)
+    }
+
+    let count = len(imgs)
+    var out: [u8] = []
+    pushU16Le(mut out, 0)
+    pushU16Le(mut out, 1)
+    pushU16Le(mut out, count)
+    var offset = 6 + count * 16
+    for i in 0..count {
+        let s = if tamanos[i] > 8 { tamanos[i] } else { 32 }
+        let wh = if s >= 256 { 0 } else { s }
+        push(mut out, u8(wh))
+        push(mut out, u8(wh))
+        push(mut out, u8(0))
+        push(mut out, u8(0))
+        pushU16Le(mut out, 1)
+        pushU16Le(mut out, 32)
+        pushU32Le(mut out, len(imgs[i]))
+        pushU32Le(mut out, offset)
+        offset += len(imgs[i])
+    }
+    for i in 0..count {
+        for b in imgs[i] {
+            push(mut out, b)
+        }
+    }
+
+    let rutaW = aUtf16Nulo(ruta)
+    let h = CreateFileW(slicePtr(rutaW), u32(0x40000000), u32(0), mutPtrNull<void>(), u32(2), u32(0x80), mutPtrNull<void>())
+    if ptrAddr(h) == u64(0xFFFFFFFFFFFFFFFF) || ptrIsNull(h) {
+        return false
+    }
+    var wrote = u32(0)
+    let ok = WriteFile(h, slicePtr(out), u32(len(out)), mutPtrOf(mut wrote), mutPtrNull<void>())
+    let _ = CloseHandle(h)
+    return ok != i32(0) && int(wrote) == len(out)
+}

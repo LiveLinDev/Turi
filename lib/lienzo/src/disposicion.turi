@@ -1,0 +1,123 @@
+// Primitivas geometricas, cajas y planificador adaptable de filas y rejillas.
+
+import metrica
+
+struct Caja {
+    x: int
+    y: int
+    w: int
+    h: int
+}
+
+enum ModoItem {
+    Completo = 0
+    SoloIcono = 1
+    Desborde = 2
+}
+
+struct PlanFila {
+    modos: [int]
+    usaDesborde: bool
+}
+
+pure noalloc fn cajaVacia() -> Caja {
+    return Caja { x: 0, y: 0, w: 0, h: 0 }
+}
+
+pure noalloc fn contiene(c: Caja, px: int, py: int) -> bool {
+    return px >= c.x && px < c.x + c.w && py >= c.y && py < c.y + c.h
+}
+
+pure noalloc fn solapan(a: Caja, b: Caja) -> bool {
+    if a.w <= 0 || a.h <= 0 || b.w <= 0 || b.h <= 0 {
+        return false
+    }
+    if a.x + a.w <= b.x || b.x + b.w <= a.x {
+        return false
+    }
+    if a.y + a.h <= b.y || b.y + b.h <= a.y {
+        return false
+    }
+    return true
+}
+
+pure noalloc fn dentroDe(a: Caja, lim: Caja) -> bool {
+    if a.w < 0 || a.h < 0 {
+        return false
+    }
+    return a.x >= lim.x && a.y >= lim.y && a.x + a.w <= lim.x + lim.w && a.y + a.h <= lim.y + lim.h
+}
+
+pure noalloc fn recortar(c: Caja, dentro: Caja) -> Caja {
+    let x1 = metrica.maxI(c.x, dentro.x)
+    let y1 = metrica.maxI(c.y, dentro.y)
+    let x2 = metrica.minI(c.x + c.w, dentro.x + dentro.w)
+    let y2 = metrica.minI(c.y + c.h, dentro.y + dentro.h)
+    return Caja {
+        x: x1,
+        y: y1,
+        w: metrica.maxI(x2 - x1, 0),
+        h: metrica.maxI(y2 - y1, 0),
+    }
+}
+
+fn medirAnchoFila(anchoCompleto: [int], anchoIcono: [int], modos: [int], gap: int, conDesborde: bool, anchoBotonMas: int) -> int {
+    var total = 0
+    var visibles = 0
+    for i in 0..len(modos) {
+        let m = modos[i]
+        if m == int(ModoItem.Desborde) {
+            continue
+        }
+        if visibles > 0 {
+            total += gap
+        }
+        if m == int(ModoItem.SoloIcono) {
+            total += anchoIcono[i]
+        } else {
+            total += anchoCompleto[i]
+        }
+        visibles += 1
+    }
+    if conDesborde {
+        if visibles > 0 {
+            total += gap
+        }
+        total += anchoBotonMas
+    }
+    return total
+}
+
+fn planificarFila(anchoCompleto: [int], anchoIcono: [int], disponible: int, gap: int, anchoBotonMas: int) -> PlanFila {
+    let n = len(anchoCompleto)
+    var modos = repeat(int(ModoItem.Completo), n)
+    if n == 0 || disponible < 0 {
+        return PlanFila { modos: modos, usaDesborde: false }
+    }
+    if medirAnchoFila(anchoCompleto, anchoIcono, modos, gap, false, anchoBotonMas) <= disponible {
+        return PlanFila { modos: modos, usaDesborde: false }
+    }
+    var i = n - 1
+    while i >= 0 {
+        modos[i] = int(ModoItem.SoloIcono)
+        if medirAnchoFila(anchoCompleto, anchoIcono, modos, gap, false, anchoBotonMas) <= disponible {
+            return PlanFila { modos: modos, usaDesborde: false }
+        }
+        i -= 1
+    }
+    var j = n - 1
+    while j >= 0 {
+        modos[j] = int(ModoItem.Desborde)
+        if medirAnchoFila(anchoCompleto, anchoIcono, modos, gap, true, anchoBotonMas) <= disponible {
+            return PlanFila { modos: modos, usaDesborde: true }
+        }
+        j -= 1
+    }
+    return PlanFila { modos: modos, usaDesborde: true }
+}
+
+pure noalloc fn columnasRejilla(n: int, anchoCelda: int, gap: int, disponible: int) -> int {
+    let paso = metrica.maxI(anchoCelda + gap, 1)
+    let cols = (metrica.maxI(disponible, 0) + gap) / paso
+    return metrica.clampI(cols, 1, metrica.maxI(n, 1))
+}

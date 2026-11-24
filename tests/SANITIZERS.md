@@ -1,5 +1,23 @@
 # Verificación del compilador en Windows x64
 
+## Revisión con módulos y rangos
+
+La revisión actual pasó **13/13 grupos CTest** en release y con ASan/UBSan. Incluye proyectos, contexto A/B, criterio de victorias, límites afines, rangos y auditoría de copias, además de los grupos históricos.
+
+Durante la revisión, `fix` con `fn f(a: [int]) { a[0]=5 }` y una reparación en un proyecto produjeron un fallo de excepciones bajo ASan/UBSan. Controles mínimos mostraron que `check` directo funcionaba y que la captura seguida de reelevación dentro de la ruta con `Program` reproducía el fallo. La corrección captura `Diagnostic` como valor mediante `captureDiagnostic`, lo relanza fuera del `catch` y permite que `fix` reporte directamente sin reelevar. No se desactivó ASan ni UBSan en ninguna función.
+
+La puerta sanitizada usa el mismo script que release:
+
+```powershell
+powershell -File tools/build.ps1 -BuildDir build-sanitize-review -Sanitize
+```
+
+El parámetro localiza LLVM, CMake y Ninja, configura `RelWithDebInfo` con `-fsanitize=address,undefined`, `-fno-sanitize-recover=all`, instala las opciones `halt_on_error` y ejecuta los 13 grupos. La entrada de `fix` permanece en este informe como reproducción del fallo corregido.
+
+`tests/ranges.py` añade 31 casos de cotas y respaldos, incluidos dos iteradores homónimos anidados que antes podían ocultar un overflow. Una revisión detectó que `len(texto)` había recibido incorrectamente el tope de arrays. La regresión construye 16.777.217 caracteres ASCII y comprueba que `len(texto) * 549755813887` produce `R_OVERFLOW` en intérprete y nativo; la cota `[0,2²⁴]` ahora solo aplica a `[int]`. Otros casos cubren `repeat(x*x)`, reducciones, mutaciones, retornos, shadowing, recursión y los extremos de `int64`.
+
+## Evidencia histórica
+
 La versión 0.2 amplió CTest a siete grupos, añadiendo arreglos y eliminación comprobada del primer llenado. El compilador instrumentado y la compilación release pasaron los siete grupos. La instrumentación de los propios programas Turi se detalla en `MEMORIA.md`.
 
 El 20/11/2026 se compiló el compilador C++23 y el ejecutor de pruebas con Clang 23.1.4, AddressSanitizer y UndefinedBehaviorSanitizer, usando CMake y Ninja. CTest pasó los cinco grupos registrados, con un tiempo conjunto de 8,69 s en esta máquina.

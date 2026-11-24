@@ -1,0 +1,71 @@
+// Enrutador parametrico y validador de patrones en Turi puro.
+
+struct CoincidenciaRuta {
+    coincide: bool
+    params: Map<str, str>
+}
+
+fn dividirSegmentos(ruta: str) -> [str] {
+    var segs: [str] = []
+    let n = len(ruta)
+    var ini = 0
+    for i in 0..(n + 1) {
+        if i == n || int(ruta[i]) == 47 {
+            if i > ini {
+                segs.push(ruta[ini..i])
+            }
+            ini = i + 1
+        }
+    }
+    return segs
+}
+
+fn validarPatron(patron: str) -> Result<bool, str> {
+    if len(patron) == 0 || int(patron[0]) != 47 {
+        return Err("El patrón de ruta debe comenzar con '/'")
+    }
+    let segs = dividirSegmentos(patron)
+    for i in 0..len(segs) {
+        let s = segs[i]
+        if int(s[0]) == 42 {
+            if len(s) < 2 { return Err("Comodín '*' requiere un nombre") }
+            if i + 1 != len(segs) { return Err("El comodín '*nombre' debe ir al final de la ruta") }
+        } else if int(s[0]) == 58 {
+            if len(s) < 2 { return Err("Parámetro ':' requiere un nombre") }
+        }
+    }
+    return Ok(true)
+}
+
+fn coincidirRuta(patron: str, ruta: str) -> CoincidenciaRuta {
+    var params: Map<str, str> = mapNew()
+    let pSegs = dividirSegmentos(patron)
+    let rSegs = dividirSegmentos(ruta)
+    var pi = 0
+    var ri = 0
+    while pi < len(pSegs) {
+        let ps = pSegs[pi]
+        if int(ps[0]) == 42 {
+            let nombre = ps[1..len(ps)]
+            var sb = sbWithCap(32)
+            while ri < len(rSegs) {
+                if sb.len() > 0 { sb.pushByte(47) }
+                sb.push(rSegs[ri])
+                ri += 1
+            }
+            params.set(nombre, sb.take())
+            return CoincidenciaRuta { coincide: true, params: params }
+        }
+        if ri >= len(rSegs) {
+            return CoincidenciaRuta { coincide: false, params: params }
+        }
+        if int(ps[0]) == 58 {
+            params.set(ps[1..len(ps)], rSegs[ri])
+        } else if ps != rSegs[ri] {
+            return CoincidenciaRuta { coincide: false, params: params }
+        }
+        pi += 1
+        ri += 1
+    }
+    return CoincidenciaRuta { coincide: ri == len(rSegs), params: params }
+}

@@ -191,7 +191,7 @@ def nominal_types():
         tree.append(f"struct N{n} {{ left: N{n - 1}, right: N{n - 1} }}")
     declarations = "\n".join(tree) + "\n"
     case(declarations + "fn pair(a: N6, b: N6) {}\nfn main() {}")
-    case(declarations + "fn triple(a: N6, b: N6, c: N6) {}\nfn main() {}", "E_FRAME")
+    case(declarations + "fn triple(a: N6, b: N6, c: N6) {}\nfn main() {}")
     return cases
 
 

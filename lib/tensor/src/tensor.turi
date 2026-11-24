@@ -1,0 +1,177 @@
+// Modular float32 tensor operations with strict bounds and IEEE-754 semantics.
+
+struct TensorF32 {
+    rows: int
+    cols: int
+    data: [f32]
+}
+
+fn zeros(rows: int, cols: int) -> Result<TensorF32, str> {
+    if rows < 0 || cols < 0 {
+        return Err("E_TENSOR_DIM: rows and cols must be >= 0")
+    }
+    return Ok(TensorF32 { rows: rows, cols: cols, data: repeat(f32(0.0), rows * cols) })
+}
+
+fn ceros(filas: int, cols: int) -> Result<TensorF32, str> {
+    return zeros(filas, cols)
+}
+
+fn ones(rows: int, cols: int) -> Result<TensorF32, str> {
+    if rows < 0 || cols < 0 {
+        return Err("E_TENSOR_DIM: rows and cols must be >= 0")
+    }
+    return Ok(TensorF32 { rows: rows, cols: cols, data: repeat(f32(1.0), rows * cols) })
+}
+
+fn unos(filas: int, cols: int) -> Result<TensorF32, str> {
+    return ones(filas, cols)
+}
+
+fn fromArray(rows: int, cols: int, values: [f32]) -> Result<TensorF32, str> {
+    if rows < 0 || cols < 0 {
+        return Err("E_TENSOR_DIM: rows and cols must be >= 0")
+    }
+    if rows * cols != values.len() {
+        return Err("E_TENSOR_SHAPE: rows * cols != values.len()")
+    }
+    var copy = repeat(f32(0.0), values.len())
+    for i in 0..values.len() {
+        copy[i] = values[i]
+    }
+    return Ok(TensorF32 { rows: rows, cols: cols, data: copy })
+}
+
+fn desdeArreglo(filas: int, cols: int, valores: [f32]) -> Result<TensorF32, str> {
+    return fromArray(filas, cols, valores)
+}
+
+fn at(t: TensorF32, r: int, c: int) -> Result<f32, str> {
+    if r < 0 || r >= t.rows || c < 0 || c >= t.cols {
+        return Err("E_TENSOR_BOUNDS: index out of range")
+    }
+    return Ok(t.data[r * t.cols + c])
+}
+
+fn add(a: TensorF32, b: TensorF32) -> Result<TensorF32, str> {
+    if a.rows != b.rows || a.cols != b.cols || a.data.len() != b.data.len() {
+        return Err("E_TENSOR_SHAPE: shape mismatch in add")
+    }
+    let n = a.data.len()
+    var out = repeat(f32(0.0), n)
+    for i in 0..n {
+        out[i] = a.data[i] + b.data[i]
+    }
+    return Ok(TensorF32 { rows: a.rows, cols: a.cols, data: out })
+}
+
+fn sumar(a: TensorF32, b: TensorF32) -> Result<TensorF32, str> {
+    return add(a, b)
+}
+
+fn mul(a: TensorF32, b: TensorF32) -> Result<TensorF32, str> {
+    if a.rows != b.rows || a.cols != b.cols || a.data.len() != b.data.len() {
+        return Err("E_TENSOR_SHAPE: shape mismatch in mul")
+    }
+    let n = a.data.len()
+    var out = repeat(f32(0.0), n)
+    for i in 0..n {
+        out[i] = a.data[i] * b.data[i]
+    }
+    return Ok(TensorF32 { rows: a.rows, cols: a.cols, data: out })
+}
+
+fn multiplicar(a: TensorF32, b: TensorF32) -> Result<TensorF32, str> {
+    return mul(a, b)
+}
+
+fn relu(a: TensorF32) -> TensorF32 {
+    let n = a.data.len()
+    var out = repeat(f32(0.0), n)
+    let z = f32(0.0)
+    for i in 0..n {
+        let v = a.data[i]
+        out[i] = if v > z { v } else { z }
+    }
+    return TensorF32 { rows: a.rows, cols: a.cols, data: out }
+}
+
+fn transpose(a: TensorF32) -> Result<TensorF32, str> {
+    if a.rows * a.cols != a.data.len() {
+        return Err("E_TENSOR_SHAPE: corrupt tensor shape")
+    }
+    var out = repeat(f32(0.0), a.data.len())
+    for r in 0..a.rows {
+        let rowOff = r * a.cols
+        for c in 0..a.cols {
+            out[c * a.rows + r] = a.data[rowOff + c]
+        }
+    }
+    return Ok(TensorF32 { rows: a.cols, cols: a.rows, data: out })
+}
+
+fn transponer(a: TensorF32) -> Result<TensorF32, str> {
+    return transpose(a)
+}
+
+fn softmaxRows(a: TensorF32) -> Result<TensorF32, str> {
+    if a.cols <= 0 || a.rows * a.cols != a.data.len() {
+        return Err("E_TENSOR_SHAPE: softmaxRows requires cols > 0")
+    }
+    var out = repeat(f32(0.0), a.data.len())
+    let kEuler = 2.718281828459045
+    for r in 0..a.rows {
+        let off = r * a.cols
+        var mx = float(a.data[off])
+        for c in 1..a.cols {
+            let v = float(a.data[off + c])
+            if v > mx { mx = v }
+        }
+        var sum = 0.0
+        for c in 0..a.cols {
+            let ev = kEuler.pow(float(a.data[off + c]) - mx)
+            out[off + c] = f32(ev)
+            sum = sum + float(out[off + c])
+        }
+        if sum > 0.0 {
+            for c in 0..a.cols {
+                out[off + c] = f32(float(out[off + c]) / sum)
+            }
+        }
+    }
+    return Ok(TensorF32 { rows: a.rows, cols: a.cols, data: out })
+}
+
+fn matmul(a: TensorF32, b: TensorF32) -> Result<TensorF32, str> {
+    if a.cols != b.rows || a.rows < 0 || a.cols < 0 || b.cols < 0 ||
+       a.rows * a.cols != a.data.len() || b.rows * b.cols != b.data.len() {
+        return Err("E_TENSOR_SHAPE: incompatible dimensions for matmul")
+    }
+    let m = a.rows
+    let k = a.cols
+    let n = b.cols
+    var c = repeat(f32(0.0), m * n)
+    for i in 0..m {
+        let rowA = i * k
+        let rowC = i * n
+        for p in 0..k {
+            let av = a.data[rowA + p]
+            let rowB = p * n
+            for j in 0..n {
+                c[rowC + j] = c[rowC + j] + av * b.data[rowB + j]
+            }
+        }
+    }
+    return Ok(TensorF32 { rows: m, cols: n, data: c })
+}
+
+fn dot(a: [f32], b: [f32]) -> Result<f32, str> {
+    if a.len() != b.len() {
+        return Err("E_TENSOR_SHAPE: dot lengths differ")
+    }
+    var acc = f32(0.0)
+    for i in 0..a.len() {
+        acc = acc + a[i] * b[i]
+    }
+    return Ok(acc)
+}

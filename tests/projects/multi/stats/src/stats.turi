@@ -1,0 +1,13 @@
+import contracts
+
+fn score<T: contracts.Scored>(value: T) -> int {
+    return scoreOf(value)
+}
+
+fn copy(values: [int]) -> [int] {
+    return values
+}
+
+fn main() -> int {
+    return 99
+}

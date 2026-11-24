@@ -100,11 +100,13 @@ def compare(cli, folder, source, expected, trap=None):
             assert result.returncode != 0, (source, result.returncode)
             assert json.loads(result.stderr)["id"] == trap, (source, result.stderr)
     if trap:
-        location = json.loads(reference.stderr)["span"]
-        actual = json.loads(native.stderr)
-        assert (actual["start"], actual["end"]) == (location["start"], location["end"]), (
-            source, actual, location
-        )
+        reference_diagnostic = json.loads(reference.stderr)
+        location = reference_diagnostic["span"]
+        expected = json.dumps({
+            "id": trap, "file": reference_diagnostic["file"],
+            "start": location["start"], "end": location["end"],
+        }, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+        assert native.stderr == expected, (source, native.stderr, expected)
 
 
 def main():

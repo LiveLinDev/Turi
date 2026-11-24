@@ -1,0 +1,372 @@
+// Analizador y serializador JSON completo segun RFC 8259 en Turi puro.
+
+struct CampoJson {
+    clave: str
+    valor: JsonVal
+}
+
+enum JsonVal {
+    Nulo
+    Bool(v: bool)
+    Ent(v: int)
+    Num(v: float)
+    Texto(v: str)
+    Lista(v: [JsonVal])
+    Objeto(v: [CampoJson])
+}
+
+struct EstadoJson {
+    src: str
+    pos: int
+}
+
+fn esEspacioJson(b: int) -> bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn saltarEspaciosJson(st: mut EstadoJson) {
+    let n = len(st.src)
+    while st.pos < n && esEspacioJson(int(st.src[st.pos])) {
+        st.pos += 1
+    }
+}
+
+fn leerCadenaJson(st: mut EstadoJson) -> Result<str, str> {
+    let n = len(st.src)
+    if st.pos >= n || int(st.src[st.pos]) != 34 {
+        return Err("Se esperaba comilla de apertura")
+    }
+    st.pos += 1
+    var sb = sbWithCap(32)
+    while st.pos < n {
+        let c = int(st.src[st.pos])
+        if c == 34 {
+            st.pos += 1
+            return Ok(sb.take())
+        }
+        if c < 32 {
+            return Err("Carácter de control sin escapar en cadena JSON")
+        }
+        if c == 92 {
+            st.pos += 1
+            if st.pos >= n { return Err("Escape JSON incompleto") }
+            let esc = int(st.src[st.pos])
+            st.pos += 1
+            if esc == 34 { sb.pushByte(34) }
+            else if esc == 92 { sb.pushByte(92) }
+            else if esc == 47 { sb.pushByte(47) }
+            else if esc == 98 { sb.pushByte(8) }
+            else if esc == 102 { sb.pushByte(12) }
+            else if esc == 110 { sb.pushByte(10) }
+            else if esc == 114 { sb.pushByte(13) }
+            else if esc == 116 { sb.pushByte(9) }
+            else if esc == 117 {
+                if st.pos + 4 > n { return Err("Escape \\u incompleto") }
+                var cp = 0
+                for k in 0..4 {
+                    let ch = int(st.src[st.pos + k])
+                    var d = -1
+                    if ch >= 48 && ch <= 57 { d = ch - 48 }
+                    else if ch >= 97 && ch <= 102 { d = ch - 87 }
+                    else if ch >= 65 && ch <= 70 { d = ch - 55 }
+                    if d < 0 { return Err("Dígito hexadecimal inválido en \\u") }
+                    cp = (cp << 4) | d
+                }
+                st.pos += 4
+                if cp < 0x80 {
+                    sb.pushByte(cp)
+                } else if cp < 0x800 {
+                    sb.pushByte(0xC0 | (cp >> 6))
+                    sb.pushByte(0x80 | (cp & 0x3F))
+                } else {
+                    sb.pushByte(0xE0 | (cp >> 12))
+                    sb.pushByte(0x80 | ((cp >> 6) & 0x3F))
+                    sb.pushByte(0x80 | (cp & 0x3F))
+                }
+            } else {
+                return Err("Escape JSON inválido")
+            }
+        } else {
+            sb.pushByte(c)
+            st.pos += 1
+        }
+    }
+    return Err("Cadena JSON sin cierre")
+}
+
+fn esDigitoJson(b: int) -> bool {
+    return b >= 48 && b <= 57
+}
+
+fn leerNumeroJson(st: mut EstadoJson) -> Result<JsonVal, str> {
+    let n = len(st.src)
+    let ini = st.pos
+    var esReal = false
+    if st.pos < n && int(st.src[st.pos]) == 45 {
+        st.pos += 1
+    }
+    if st.pos >= n || !esDigitoJson(int(st.src[st.pos])) {
+        return Err("Número JSON inválido")
+    }
+    while st.pos < n && esDigitoJson(int(st.src[st.pos])) {
+        st.pos += 1
+    }
+    if st.pos < n && int(st.src[st.pos]) == 46 {
+        esReal = true
+        st.pos += 1
+        if st.pos >= n || !esDigitoJson(int(st.src[st.pos])) {
+            return Err("Fracción JSON inválida")
+        }
+        while st.pos < n && esDigitoJson(int(st.src[st.pos])) {
+            st.pos += 1
+        }
+    }
+    if st.pos < n && (int(st.src[st.pos]) == 101 || int(st.src[st.pos]) == 69) {
+        esReal = true
+        st.pos += 1
+        if st.pos < n && (int(st.src[st.pos]) == 43 || int(st.src[st.pos]) == 45) {
+            st.pos += 1
+        }
+        if st.pos >= n || !esDigitoJson(int(st.src[st.pos])) {
+            return Err("Exponente JSON inválido")
+        }
+        while st.pos < n && esDigitoJson(int(st.src[st.pos])) {
+            st.pos += 1
+        }
+    }
+    let trozo = st.src[ini..st.pos]
+    if esReal {
+        let f1 = tryParseFloat(trozo, 0.0)
+        let f2 = tryParseFloat(trozo, 1.0)
+        if f1 != f2 {
+            return Err("Número flotante fuera de rango")
+        }
+        return Ok(JsonVal.Num(f1))
+    }
+    let i1 = tryParseInt(trozo, 0)
+    let i2 = tryParseInt(trozo, 1)
+    if i1 == i2 {
+        return Ok(JsonVal.Ent(i1))
+    }
+    let f3 = tryParseFloat(trozo, 0.0)
+    let f4 = tryParseFloat(trozo, 1.0)
+    if f3 == f4 {
+        return Ok(JsonVal.Num(f3))
+    }
+    return Err("Número fuera de rango")
+}
+
+fn leerValorJson(st: mut EstadoJson, prof: int) -> Result<JsonVal, str> {
+    if prof > 64 { return Err("Profundidad JSON excesiva") }
+    saltarEspaciosJson(mut st)
+    let n = len(st.src)
+    if st.pos >= n { return Err("JSON vacío o truncado") }
+    let c = int(st.src[st.pos])
+    if c == 34 {
+        let s = leerCadenaJson(mut st)?
+        return Ok(JsonVal.Texto(s))
+    }
+    if c == 123 {
+        st.pos += 1
+        saltarEspaciosJson(mut st)
+        var campos: [CampoJson] = []
+        if st.pos < n && int(st.src[st.pos]) == 125 {
+            st.pos += 1
+            return Ok(JsonVal.Objeto(campos))
+        }
+        while true {
+            saltarEspaciosJson(mut st)
+            let k = leerCadenaJson(mut st)?
+            saltarEspaciosJson(mut st)
+            if st.pos >= n || int(st.src[st.pos]) != 58 {
+                return Err("Se esperaba ':' tras clave JSON")
+            }
+            st.pos += 1
+            let v = leerValorJson(mut st, prof + 1)?
+            campos.push(CampoJson { clave: k, valor: v })
+            saltarEspaciosJson(mut st)
+            if st.pos >= n { return Err("Objeto JSON sin cierre") }
+            let sep = int(st.src[st.pos])
+            if sep == 125 {
+                st.pos += 1
+                return Ok(JsonVal.Objeto(campos))
+            }
+            if sep != 44 { return Err("Se esperaba ',' o '\}' en objeto JSON") }
+            st.pos += 1
+        }
+    }
+    if c == 91 {
+        st.pos += 1
+        saltarEspaciosJson(mut st)
+        var items: [JsonVal] = []
+        if st.pos < n && int(st.src[st.pos]) == 93 {
+            st.pos += 1
+            return Ok(JsonVal.Lista(items))
+        }
+        while true {
+            let item = leerValorJson(mut st, prof + 1)?
+            items.push(item)
+            saltarEspaciosJson(mut st)
+            if st.pos >= n { return Err("Arreglo JSON sin cierre") }
+            let sep = int(st.src[st.pos])
+            if sep == 93 {
+                st.pos += 1
+                return Ok(JsonVal.Lista(items))
+            }
+            if sep != 44 { return Err("Se esperaba ',' o ']' en arreglo JSON") }
+            st.pos += 1
+        }
+    }
+    if c == 116 && st.pos + 4 <= n && st.src[st.pos..st.pos + 4] == "true" {
+        st.pos += 4
+        return Ok(JsonVal.Bool(true))
+    }
+    if c == 102 && st.pos + 5 <= n && st.src[st.pos..st.pos + 5] == "false" {
+        st.pos += 5
+        return Ok(JsonVal.Bool(false))
+    }
+    if c == 110 && st.pos + 4 <= n && st.src[st.pos..st.pos + 4] == "null" {
+        st.pos += 4
+        return Ok(JsonVal.Nulo)
+    }
+    if c == 45 || esDigitoJson(c) {
+        return leerNumeroJson(mut st)
+    }
+    return Err("Token JSON inesperado")
+}
+
+fn parsearJson(texto: str) -> Result<JsonVal, str> {
+    var st = EstadoJson { src: texto, pos: 0 }
+    let val = leerValorJson(mut st, 0)?
+    saltarEspaciosJson(mut st)
+    if st.pos != len(st.src) {
+        return Err("Contenido extra tras valor JSON")
+    }
+    return Ok(val)
+}
+
+fn escribirCadenaEscapada(sb: mut StringBuilder, s: str) {
+    let hex = "0123456789abcdef"
+    sb.pushByte(34)
+    for i in 0..len(s) {
+        let c = int(s[i])
+        if c == 34 { sb.push("\\\"") }
+        else if c == 92 { sb.push("\\\\") }
+        else if c == 10 { sb.push("\\n") }
+        else if c == 13 { sb.push("\\r") }
+        else if c == 9 { sb.push("\\t") }
+        else if c < 32 {
+            sb.push("\\u00")
+            sb.pushByte(int(hex[(c >> 4) & 15]))
+            sb.pushByte(int(hex[c & 15]))
+        } else {
+            sb.pushByte(c)
+        }
+    }
+    sb.pushByte(34)
+}
+
+fn escaparJson(s: str) -> str {
+    var sb = sbWithCap(len(s) + 8)
+    escribirCadenaEscapada(mut sb, s)
+    return sb.take()
+}
+
+fn serializarEn(sb: mut StringBuilder, v: JsonVal) {
+    match v {
+        JsonVal.Nulo => { sb.push("null") }
+        JsonVal.Bool(b) => { sb.push(if b { "true" } else { "false" }) }
+        JsonVal.Ent(n) => { sb.pushInt(n) }
+        JsonVal.Num(f) => { sb.pushFloat(f) }
+        JsonVal.Texto(s) => { escribirCadenaEscapada(mut sb, s) }
+        JsonVal.Lista(items) => {
+            sb.pushByte(91)
+            for i in 0..len(items) {
+                if i > 0 { sb.pushByte(44) }
+                serializarEn(mut sb, items[i])
+            }
+            sb.pushByte(93)
+        }
+        JsonVal.Objeto(campos) => {
+            sb.pushByte(123)
+            for i in 0..len(campos) {
+                if i > 0 { sb.pushByte(44) }
+                escribirCadenaEscapada(mut sb, campos[i].clave)
+                sb.pushByte(58)
+                serializarEn(mut sb, campos[i].valor)
+            }
+            sb.pushByte(125)
+        }
+    }
+}
+
+fn serializarJson(v: JsonVal) -> str {
+    var sb = sbWithCap(64)
+    serializarEn(mut sb, v)
+    return sb.take()
+}
+
+fn campo(obj: JsonVal, nombre: str) -> JsonVal? {
+    return match obj {
+        JsonVal.Objeto(campos) => {
+            for c in campos {
+                if c.clave == nombre { return Some(c.valor) }
+            }
+            return None
+        }
+        JsonVal.Nulo => None
+        JsonVal.Bool(b) => None
+        JsonVal.Ent(n) => None
+        JsonVal.Num(f) => None
+        JsonVal.Texto(s) => None
+        JsonVal.Lista(items) => None
+    }
+}
+
+fn obtenerInt(obj: JsonVal, nombre: str) -> int? {
+    let vOpt = campo(obj, nombre)
+    return match vOpt {
+        Some(v) => match v {
+            JsonVal.Ent(n) => Some(n)
+            JsonVal.Num(f) => Some(int(f))
+            JsonVal.Nulo => None
+            JsonVal.Bool(b) => None
+            JsonVal.Texto(s) => None
+            JsonVal.Lista(l) => None
+            JsonVal.Objeto(o) => None
+        }
+        None => None
+    }
+}
+
+fn obtenerTexto(obj: JsonVal, nombre: str) -> str? {
+    let vOpt = campo(obj, nombre)
+    return match vOpt {
+        Some(v) => match v {
+            JsonVal.Texto(s) => Some(s)
+            JsonVal.Nulo => None
+            JsonVal.Bool(b) => None
+            JsonVal.Ent(n) => None
+            JsonVal.Num(f) => None
+            JsonVal.Lista(l) => None
+            JsonVal.Objeto(o) => None
+        }
+        None => None
+    }
+}
+
+fn obtenerBool(obj: JsonVal, nombre: str) -> bool? {
+    let vOpt = campo(obj, nombre)
+    return match vOpt {
+        Some(v) => match v {
+            JsonVal.Bool(b) => Some(b)
+            JsonVal.Nulo => None
+            JsonVal.Ent(n) => None
+            JsonVal.Num(f) => None
+            JsonVal.Texto(s) => None
+            JsonVal.Lista(l) => None
+            JsonVal.Objeto(o) => None
+        }
+        None => None
+    }
+}

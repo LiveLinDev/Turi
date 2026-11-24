@@ -1,0 +1,42 @@
+import model
+import stats
+import contracts
+
+impl contracts.Scored for int {
+    fn scoreOf(value: int) -> int {
+        return value
+    }
+}
+
+impl contracts.Scored for model.Item {
+    fn scoreOf(value: model.Item) -> int {
+        return value.score
+    }
+}
+
+fn helper(value: int) -> int {
+    return value + 1
+}
+
+fn stateValue(value: model.State) -> int {
+    match value {
+        model.State.Ready => return 1
+        model.State.Blocked => return 0
+    }
+}
+
+fn main() {
+    let item = model.Item { score: 5 }
+    print(stats.score(7) + stats.score(item))
+    print(stateValue(model.State.Ready))
+    var original = repeat(3, 2)
+    var copied = stats.copy(original)
+    copied[0] = 9
+    print(original[0])
+    print(copied[0])
+    print(helper(1))
+}
+
+test "paquete raíz" {
+    assert stats.score(4) == 4
+}

@@ -1,0 +1,102 @@
+// Cliente PostgreSQL dinamico via libpq (carga perezosa, sin dependencia en tiempo de compilacion).
+
+extern "C" {
+    fn tz_pg_available() -> i32
+    fn tz_pg_connect(conninfo: Ptr<void>, errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>) -> MutPtr<void>
+    fn tz_pg_close(conn: MutPtr<void>)
+    fn tz_pg_free_buf(p: MutPtr<void>)
+    fn tz_pg_exec_json(
+        conn: MutPtr<void>, sql: Ptr<void>, packedParams: Ptr<void>, paramCount: i32,
+        outPtr: MutPtr<Ptr<u8>>, outLen: MutPtr<i64>,
+        errPtr: MutPtr<Ptr<u8>>, errLen: MutPtr<i64>
+    ) -> i32
+}
+
+struct PgConn {
+    ptr: MutPtr<void>
+}
+
+fn disponible() -> bool {
+    trusted {
+        return tz_pg_available() != i32(0)
+    }
+}
+
+fn available() -> bool {
+    return disponible()
+}
+
+fn conectar(conninfo: str) -> Result<PgConn, str> {
+    trusted {
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let p = tz_pg_connect(ptrCast<void>(ptrOf(conninfo)), mutPtrOf(mut ep), mutPtrOf(mut el))
+        if ptrIsNull(p) {
+            return Err(strFromPtr(ep, el))
+        }
+        return Ok(PgConn { ptr: p })
+    }
+}
+
+fn connect(conninfo: str) -> Result<PgConn, str> {
+    return conectar(conninfo)
+}
+
+fn cerrar(conn: PgConn) {
+    trusted {
+        tz_pg_close(conn.ptr)
+    }
+}
+
+fn close(conn: PgConn) {
+    cerrar(conn)
+}
+
+fn packParams(params: [str]) -> str {
+    var sb = sbWithCap(32)
+    for p in params {
+        sb.pushInt(p.len())
+        sb.push(":")
+        sb.push(p)
+    }
+    return sb.take()
+}
+
+fn consultarJson(conn: PgConn, sql: str, params: [str]) -> Result<str, str> {
+    let packed = packParams(params)
+    trusted {
+        var op = ptrNull<u8>()
+        var ol = i64(0)
+        var ep = ptrNull<u8>()
+        var el = i64(0)
+        let ok = tz_pg_exec_json(
+            conn.ptr,
+            ptrCast<void>(ptrOf(sql)),
+            ptrCast<void>(ptrOf(packed)),
+            i32(params.len()),
+            mutPtrOf(mut op), mutPtrOf(mut ol),
+            mutPtrOf(mut ep), mutPtrOf(mut el)
+        )
+        if ok == i32(0) {
+            return Err(strFromPtr(ep, el))
+        }
+        let res = strFromPtr(op, ol)
+        if !ptrIsNull(op) {
+            tz_pg_free_buf(mutPtrCast<void>(ptrMut(op)))
+        }
+        return Ok(res)
+    }
+}
+
+fn queryJson(conn: PgConn, sql: str, params: [str]) -> Result<str, str> {
+    return consultarJson(conn, sql, params)
+}
+
+fn ejecutar(conn: PgConn, sql: str, params: [str]) -> Result<bool, str> {
+    let _ = consultarJson(conn, sql, params)?
+    return Ok(true)
+}
+
+fn exec(conn: PgConn, sql: str, params: [str]) -> Result<bool, str> {
+    return ejecutar(conn, sql, params)
+}
