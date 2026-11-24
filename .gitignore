@@ -28,3 +28,6 @@ __pycache__/
 /autoresearch.md
 /EXPEDIENTE.md
 /FUENTES.json
+
+# Local agent memory (CI guardrails & cross-platform pitfalls)
+/AGENT_MEMORY.md
