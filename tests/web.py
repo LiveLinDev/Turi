@@ -246,25 +246,46 @@ fn main() {{
     servidor.montarEstaticos(srv, "/static", "{pub_posix}")
     ws.rutaWs(srv, "/ws", fnPtr(wsOpen), fnPtr(wsMsg), fnPtr(wsClose))
 
+    // Segundo servidor independiente para probar cliente HTTP saliente sin auto-bloqueo SO_REUSEPORT en Linux
+    let srvBack = servidor.nuevo("127.0.0.1", 0, 1)
+    servidor.estatica(srvBack, "/ping", 200, "text/plain; charset=utf-8", "pong")
+    servidor.post(srvBack, "/api/sumar", fnPtr(apiSumar))
+
     let _ = tls.disponible()
+
+    let pBackRes = servidor.iniciarFondo(srvBack)
+    let pBack = match pBackRes {{
+        Err(e) => {{
+            print("BACK_ERR=" + e)
+            sqlite.cerrar(bd)
+            servidor.liberar(srvBack)
+            servidor.liberar(srv)
+            return
+        }}
+        Ok(bp) => bp
+    }}
 
     match servidor.iniciarFondo(srv) {{
         Err(e) => {{
             print("SRV_ERR=" + e)
+            servidor.detener(srvBack)
             sqlite.cerrar(bd)
+            servidor.liberar(srvBack)
             servidor.liberar(srv)
             return
         }}
         Ok(p) => {{
-            print("PORT=" + str(p))
+            print("PORT=" + str(p) + " BACK=" + str(pBack))
             flush()
         }}
     }}
 
     let _ = readByte()
     servidor.detener(srv)
+    servidor.detener(srvBack)
     sqlite.cerrar(bd)
     servidor.liberar(srv)
+    servidor.liberar(srvBack)
     print("SALIDA_LIMPIA")
     flush()
 }}
@@ -299,8 +320,10 @@ fn main() {{
     try:
         port_line = proc.stdout.readline().strip()
         assert port_line.startswith("PORT="), (port_line, proc.stderr.read())
-        port = int(port_line.split("=", 1)[1])
-        assert port > 0
+        parts = dict(kv.split("=", 1) for kv in port_line.split())
+        port = int(parts["PORT"])
+        back_port = int(parts["BACK"])
+        assert port > 0 and back_port > 0, parts
 
         def http_req(raw_bytes):
             with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
@@ -377,10 +400,11 @@ fn main() {{
             st, _, body = read_one_http_resp(s, buf)
             assert st == 200 and json.loads(body) == {"id": 1, "nombre": "Transponder-Ka", "cantidad": 7}, (st, body)
 
-            # Outbound HTTP client self-test
-            s.sendall(f"GET /api/client-self?puerto={port} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
-            st, _, body = read_one_http_resp(s, buf)
-            assert st == 200 and body == b'pong|{"suma":35}', (st, body)
+            # Outbound HTTP client test targeting independent srvBack (avoids Linux SO_REUSEPORT self-deadlock)
+            for _ in range(5):
+                s.sendall(f"GET /api/client-self?puerto={back_port} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
+                st, _, body = read_one_http_resp(s, buf)
+                assert st == 200 and body == b'pong|{"suma":35}', (st, body)
 
             # 404 & 405
             s.sendall(b"GET /no-existe HTTP/1.1\r\nHost: localhost\r\n\r\n")
