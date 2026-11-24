@@ -276,6 +276,14 @@ static void tz_pool_init_impl(void) {
 #endif
     if (n < 2) n = 2;
     if (n > TZ_MAX_WORKERS) n = TZ_MAX_WORKERS;
+    const char* thr_env = getenv("TURI_THREADS");
+    if (thr_env && *thr_env) {
+        int req = atoi(thr_env);
+        if (req >= 1) {
+            if (req > TZ_MAX_WORKERS) req = TZ_MAX_WORKERS;
+            n = req;
+        }
+    }
     g_nworkers = n;
     for (int i = 0; i < n; ++i) {
         tz_lock_init(&g_deques[i].lock);
@@ -437,6 +445,52 @@ void tz_conc_parallel_for(int64_t n, void* user_ctx, tz_conc_pmap_chunk_fn fn) {
     int max_chunks = g_nworkers * 4;
     if (max_chunks > 64) max_chunks = 64;
     if (n < (int64_t)max_chunks) max_chunks = (int)n;
+
+    tz_conc_task tasks[64];
+    tz_pmap_chunk chunks[64];
+    int64_t base = n / max_chunks;
+    int64_t rem = n % max_chunks;
+    int64_t cur = 0;
+    for (int k = 0; k < max_chunks; ++k) {
+        int64_t sz = base + (k < rem ? 1 : 0);
+        chunks[k].user_ctx = user_ctx;
+        chunks[k].fn = fn;
+        chunks[k].lo = cur;
+        chunks[k].hi = cur + sz;
+        cur += sz;
+        tasks[k].run = tz_pmap_chunk_run;
+        tasks[k].drop_res = NULL;
+        tasks[k].next_in_scope = NULL;
+        tasks[k].ov_next = NULL;
+        tasks[k].refs = 1;
+        tasks[k].state = (k == 0) ? TZ_STATE_RUNNING : TZ_STATE_QUEUED;
+        tasks[k].consumed = 1;
+        tasks[k].payload = &chunks[k];
+    }
+    for (int k = max_chunks - 1; k >= 1; --k) {
+        tz_conc_task_submit(&tasks[k]);
+    }
+    fn(user_ctx, chunks[0].lo, chunks[0].hi);
+    for (int k = 1; k < max_chunks; ++k) {
+        tz_conc_task_wait(&tasks[k]);
+    }
+}
+
+void tz_conc_parallel_for_coarse(int64_t n, void* user_ctx, tz_conc_pmap_chunk_fn fn) {
+    if (n <= 0 || !fn) return;
+    if (n == 1) {
+        fn(user_ctx, 0, 1);
+        return;
+    }
+    tz_pool_ensure();
+    int max_chunks = g_nworkers;
+    if (max_chunks < 1) max_chunks = 1;
+    if (max_chunks > 64) max_chunks = 64;
+    if (n < (int64_t)max_chunks) max_chunks = (int)n;
+    if (max_chunks <= 1) {
+        fn(user_ctx, 0, n);
+        return;
+    }
 
     tz_conc_task tasks[64];
     tz_pmap_chunk chunks[64];

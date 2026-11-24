@@ -210,7 +210,20 @@ void buildBinary(const Program& program, const fs::path& destination, const Buil
     if (const char* env = std::getenv("VELOZ_CLANG"); env && *env) clang = pathFrom(env);
 #endif
     std::vector<fs::path> args{clang, options.release ? "-O3" : "-O2"};
-    if (!options.cpu.empty()) args.push_back(pathFrom("-march=" + options.cpu));
+    const auto appendCpuFlags = [](std::vector<fs::path>& out, const std::string& cpu) {
+        if (cpu.empty()) return;
+        if (cpu == "avx10") {
+#if defined(VELOZ_CLANG_MAJOR) && VELOZ_CLANG_MAJOR < 22
+            out.push_back(pathFrom("-march=graniterapids"));
+#else
+            out.push_back(pathFrom("-march=x86-64-v4"));
+            out.push_back(pathFrom("-mavx10.1"));
+#endif
+        } else {
+            out.push_back(pathFrom("-march=" + cpu));
+        }
+    };
+    appendCpuFlags(args, options.cpu);
     if (options.release) args.insert(args.end(), {"-flto", "-fuse-ld=lld"});
     if (options.hasPgoGen) {
         args.push_back(options.pgoGen.empty() ? fs::path("-fprofile-generate")
@@ -404,7 +417,8 @@ void buildBinary(const Program& program, const fs::path& destination, const Buil
     } else if (options.release && !options.cpu.empty()) {
         // Compile LLVM IR to native object first so lld LTO does not drop -march=<cpu> target features.
         auto irObj = stage.dir / "program.o";
-        std::vector<fs::path> irArgs{clang, "-O3", pathFrom("-march=" + options.cpu)};
+        std::vector<fs::path> irArgs{clang, "-O3"};
+        appendCpuFlags(irArgs, options.cpu);
         if (options.hasPgoGen) {
             irArgs.push_back(options.pgoGen.empty() ? fs::path("-fprofile-generate")
                                                     : pathFrom("-fprofile-generate=" + options.pgoGen));
@@ -415,7 +429,8 @@ void buildBinary(const Program& program, const fs::path& destination, const Buil
         if (clangProcess(irArgs))
             throw Diagnostic("E_CLANG", "Clang no pudo compilar el IR nativo", {});
 
-        std::vector<fs::path> linkArgs{clang, "-O3", pathFrom("-march=" + options.cpu), "-fuse-ld=lld"};
+        std::vector<fs::path> linkArgs{clang, "-O3", "-fuse-ld=lld"};
+        appendCpuFlags(linkArgs, options.cpu);
         if (options.hasPgoGen) {
             linkArgs.push_back(options.pgoGen.empty() ? fs::path("-fprofile-generate")
                                                       : pathFrom("-fprofile-generate=" + options.pgoGen));

@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-0EA5E9?style=flat-square)](LICENSE)
 [![C++23 & LLVM 23](https://img.shields.io/badge/Toolchain-C%2B%2B23%20%2B%20LLVM%2023-34D399?style=flat-square)](CMakeLists.txt)
-[![CTests](https://img.shields.io/badge/CTests-40%2F40%20Release%20%2B%20ASan%2FUBSan-8B5CF6?style=flat-square)](CMakeLists.txt)
+[![CTests](https://img.shields.io/badge/CTests-41%2F41%20Release%20%2B%20ASan%2FUBSan-8B5CF6?style=flat-square)](CMakeLists.txt)
 [![Platforms](https://img.shields.io/badge/Platforms-Windows%20IOCP%20%7C%20Linux%20epoll-F59E0B?style=flat-square)](#quick-start)
 [![AI Native](https://img.shields.io/badge/AI%20Tooling-Native%20MCP%20%2B%20LSP-EC4899?style=flat-square)](#ai-native-toolchain-veloz-mcp--veloz-lsp)
 
@@ -35,7 +35,7 @@
 ## For AI Agents: Instant Bootstrap
 
 > **Start here if you are an LLM or coding agent writing Turi:**
-> 1. **Syntax & types in ~1.5k tokens:** Read [`AGENT_CARD.md`](AGENT_CARD.md) first (`5,486` chars; syntax-checked continuously by `tests/agent.py`).
+> 1. **Syntax & types in ~1.5k tokens:** Read [`AGENT_CARD.md`](AGENT_CARD.md) first (`5,638` chars; syntax-checked continuously by `tests/agent.py`).
 > 2. **Connect live compiler feedback:** Run `veloz mcp` (stdio JSON-RPC 2.0, `10` tools) or `veloz lsp` before guessing fixes.
 > 3. **Audit & edit surgically:** Inspect guards with `veloz costs <file> --explain-checks`, inspect symbols with `veloz sig` / `veloz slice`, and patch safely by content hash with `veloz patch` / `veloz patch-body`.
 > 4. **Import only what you need:** Add `require <pkg> 0.1.0 "std"` in `veloz.pkg` (`web`, `gpu`, `tensor`, `crypto`, `data`, `cli`, `postgres`, `lienzo`). Unused packages emit **0 symbols and 0 bytes**.
@@ -49,8 +49,8 @@ Most languages force a tradeoff between **AI reliability**, **memory safety**, a
 | Pillar | What Turi (`veloz`) Delivers | How It Stays Honest & Safe |
 |---|---|---|
 | **AI-Native by Design** | Single compact spec card ([`AGENT_CARD.md`](AGENT_CARD.md)), structured JSON diagnostics, automatic verified fixes (`veloz fix`), hash-verified symbol patching (`sig`/`patch`), and native **`veloz mcp` + `veloz lsp`**. | Canonical formatting (`veloz fmt`), predictable contracts, and deterministic compiler errors reduce repair loops and token waste. |
-| **C/C++-Beating Native Speed** | Direct `.ll -> .o` LLVM lowering (`-O3 -march=znver4|native`), strict non-FMA `f32` GEMM panels, Barrett `u16` modular reduction, vectorized `argmin.u16`, async IOCP/`epoll` HTTP + TLS 1.3, and OpenCL disk caching. | Beats hand-tuned AVX-512 C (`10/10` kernels) and matches/beats C/Rust/Go/Goose HTTP servers under identical functionality & **strict IEEE-754**. |
-| **Deterministic Safety & Zero Bloat** | Automatic Region / Owner / Pool lifetime management, 16-byte SSO strings, bounds/overflow/div-zero/call-depth checks, and a modular `"std"` resolver. | Checks are elided **only** when statically proven redundant. Unused `"std"` modules emit **0 IR symbols and 0 bytes**. |
+| **C/C++-Beating Native Speed** | Direct `.ll -> .o` LLVM lowering (`-O3 -march=znver4|znver5|sapphirerapids|graniterapids|avx10|native`), auto-parallelized non-FMA `f32` GEMM panels, Barrett `u16` modular reduction, vectorized `argmin.u16`, async IOCP/`epoll` HTTP + TLS 1.3, and fused OpenCL GPU kernels. | Beats hand-tuned AVX-512 C (`10/10` 1T kernels and `2.23×` over 8T OpenMP `matmul`) and matches/beats C/Rust/Go/Goose HTTP under strict IEEE-754. |
+| **Deterministic Safety & Zero Bloat** | Automatic Region / Owner / Pool lifetime management, 16-byte SSO strings, rectangular `rows * cols` & strided `len / K` bounds proofs, and a modular `"std"` resolver. | Checks are elided **only** when statically proven redundant. Unused `"std"` modules emit **0 IR symbols and 0 bytes**. |
 
 ---
 
@@ -98,7 +98,7 @@ And verifying zero bloat on [`examples/fibonacci.turi`](examples/fibonacci.turi)
 ## Verified Performance & Honest Benchmarks
 
 <div align="center">
-  <img src="docs/assets/benchmarks.png" alt="Figure 3: Verified v0.7 Performance on Ryzen 7 7700X and RX 9070 XT" width="100%">
+  <img src="docs/assets/benchmarks.png" alt="Figure 3: Verified v0.8 Performance on Ryzen 7 7700X and RX 9070 XT" width="100%">
 </div>
 
 All comparisons match functionality, checksums, and strict IEEE-754 arithmetic (`no -ffast-math`). Detailed raw benchmark harnesses and evaluation suites are excluded from the public git tree via `.gitignore`.
@@ -106,46 +106,48 @@ All comparisons match functionality, checksums, and strict IEEE-754 arithmetic (
 ### 1. CPU Expert Ceiling (1T, Ryzen 7 7700X `znver4`)
 **10 / 10 wins** vs expert hand-written `<immintrin.h>` AVX-512 C (+ PGO) with exact checksums and `n = 1..33` parity:
 
-| Kernel | Turi v0.7 | Expert AVX-512 C | Speedup |
+| Kernel | Turi v0.8 | Expert AVX-512 C | Speedup |
 |---|---:|---:|---:|
-| `dotProduct` | **862.4 ns** | 3,322.0 ns | **3.852×** |
-| `integerVariance` | **688.6 ns** | 1,827.6 ns | **2.654×** |
-| `maxPool` | **602.1 ns** | 1,379.3 ns | **2.291×** |
-| `fivePoint` | **754.7 ns** | 1,326.6 ns | **1.758×** |
-| `sparsePages` | **2,503.6 ns** | 3,898.6 ns | **1.557×** |
-| `matrixMultiply` | **1,401.9 ns** | 2,168.2 ns | **1.547×** |
-| `sobelHorizontal` | **1,220.5 ns** | 1,674.6 ns | **1.372×** |
-| `floydDistances` | **818.0 ns** | 992.1 ns | **1.213×** |
-| `roundRobin` | **9,048.2 ns** | 10,363.6 ns | **1.145×** |
-| `selectionSort` | **1,947.1 ns** | 2,059.7 ns | **1.058×** |
+| `dotProduct` | **887.9 ns** | 3,322.7 ns | **3.742×** |
+| `integerVariance` | **651.2 ns** | 1,810.0 ns | **2.779×** |
+| `maxPool` | **599.2 ns** | 1,410.5 ns | **2.354×** |
+| `sparsePages` | **1,967.3 ns** | 3,899.8 ns | **1.982×** |
+| `fivePoint` | **730.7 ns** | 1,341.0 ns | **1.835×** |
+| `matrixMultiply` | **1,361.5 ns** | 2,151.7 ns | **1.580×** |
+| `sobelHorizontal` | **1,110.1 ns** | 1,665.3 ns | **1.500×** |
+| `roundRobin` | **8,211.4 ns** | 10,215.4 ns | **1.244×** |
+| `floydDistances` | **790.5 ns** | 915.9 ns | **1.159×** |
+| `selectionSort` | **1,945.2 ns** | 2,118.4 ns | **1.089×** |
 
 ### 2. Web HTTP/1.1 + TLS 1.3 (`64` connections, Windows IOCP, medians, `0` errors)
 
 | Runtime | `ping` (`pipe=1 / 8`) | `estado` (`pipe=1 / 8`) | `item` (`pipe=1 / 8`) | `calcular` (`pipe=1 / 8`) | `valorar` (`pipe=1 / 8`) | Binary Size | Peak RSS |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **Turi v0.7** | 158k / 1,188k | 159k / 1,107k | 158k / **1,226k** | **160k / 1,227k** | **156k / 1,019k** | 369.0 KiB | 6.95 MiB |
+| **Turi** | 158k / 1,188k | 159k / 1,107k | 158k / **1,226k** | **160k / 1,227k** | **156k / 1,019k** | 369.0 KiB | 6.95 MiB |
 | **C (`same_rt`)** | **163k / 1,236k** | **161k / 1,205k** | **160k** / 1,198k | 155k / 1,167k | 150k / 992k | 215.5 KiB | 6.39 MiB |
 | **C (`fast`) / C++ (`same_rt`)** | — | — | — | — | 992k / 951k (`pipe=8`) | 165.0 / 219.0 KiB | — / 6.42 MiB |
 | **Rust** | — | — | — | — | 329k (`pipe=8`) | 696.5 KiB | 8.60 MiB |
 | **Goose** | — | — | — | — | 78k (`pipe=8`) | 164.0 KiB | 4.48 MiB |
 | **Go** | — | — | — | — | 53k (`pipe=8`) | 8,622.5 KiB | 22.77 MiB |
 
-### 3. GPU OpenCL (RX 9070 XT) + CPU `f32` (`checksum_diff = 0.0`)
+### 3. Multi-Thread CPU `f32` + GPU OpenCL Fused Kernels (Ryzen 7 7700X + RX 9070 XT, `checksum_diff = 0.0`)
 
-| Workload | Turi CPU 1T | C++ AVX-512 1T | C++ AVX-512 8T | Turi GPU (Cold / Res) | C++ OpenCL (Cold / Res) |
+| Workload | Turi CPU (MT v0.8) | C++ AVX-512 1T | C++ AVX-512 8T | Turi GPU (Cold / Res) | C++ OpenCL (Cold / Res) |
 |---|---:|---:|---:|---:|---:|
-| `matmul` (`N=64 / 256 / 512 / 1024`) | **0.006 / 0.375 / 2.877 / 29.400 ms** | 0.017 / 0.862 / 6.423 / 53.496 ms | 0.395 / 0.509 / **1.771 / 11.142 ms** | 0.267–3.555 / **0.116–1.012 ms** | 0.255–3.550 / 0.104–1.003 ms |
-| `saxpy` (`16K / 1M / 4M / 16M`) | 0.002 / 0.041 / 1.697 / 8.482 ms | 0.006 / 0.037 / 1.784 / 8.248 ms | 0.007 / 0.439 / 1.745 / 7.981 ms | 1.783–17.138 / **0.129–0.482 ms** | — |
+| `matmul` (`N=64 / 256 / 512 / 1024`) | **0.006 / 0.154 / 0.641 / 4.644 ms** | 0.014 / 0.972 / 6.067 / 54.226 ms | 0.361 / 0.505 / 1.650 / 10.375 ms | 0.263–3.454 / **0.119–0.987 ms** | 0.278–3.139 / 0.106–0.979 ms |
+| `saxpy` (`16K / 262K / 4M / 16M`) | **0.002** / 0.039 / 1.914 / **7.695 ms** | 0.006 / **0.034** / 1.758 / 8.054 ms | 0.007 / 0.463 / **1.725** / 7.806 ms | 1.604–14.774 / **0.121–0.460 ms** | 1.680–15.351 / 0.115–0.464 ms |
 
-Binary sizes: `turi_gpu 196.0 KiB`, `turi_cpu 210.0 KiB`, `cpp_opencl 161.0 KiB`, `cpp_cpu_avx512 196.0 KiB`.  
-Offline `--extreme` superoptimizer: SHA-256 disk cache cuts recompile times from `10.69–13.23 s -> 1.46–1.85 s`, while full workloads already lowered by v0.7 base microkernels (`matmul_n38` `13.55 ms -> 13.31 ms`) fall within `0.984×–1.018×` process noise.
+- **Multi-thread CPU scaling:** Auto-parallelizing `@tz.gemm_f32_panel` across disjoint 4-row bands on `@tz_conc_parallel_for_coarse` cuts `matmul N=1024` from `29.400 ms` (`1T`) to **`4.644 ms`** (**`2.23×` faster than C++ AVX-512 8T OpenMP `10.375 ms`** and **`11.68×` faster than C++ 1T `54.226 ms`**), and wins at `N=512` (`0.641 ms` vs `1.650 ms`, `2.57×`) while honoring `TURI_THREADS`. `matmulAutoF32` dispatches at `~645³` ops (`268,435,456`, keeping `N=512` on fast CPU and `N >= 768` on GPU `1.201–3.454 ms`).
+- **Fused GPU resident kernels (RX 9070 XT):** `saxpyReluResidentF32` (`16M`) runs in **`0.473 ms`** vs `0.822 ms` unfused (**`1.74×` faster**); `matmulReluResidentF32` (`N=1024`) runs in **`0.920 ms`** vs `1.144 ms` unfused (**`1.24×` faster**).
+- **General bounds proofs & modern targets:** Static prover eliminates bounds checks across immutable rectangular `rows * cols` (both `repeat` and slice guards) and strided `len / K` loops (`--cpu znver5|sapphirerapids|graniterapids|avx10`).
+- **Offline `--extreme` superoptimizer:** SHA-256 disk cache cuts recompile times from `10.69–13.23 s -> 1.46–1.85 s`, while workloads already lowered by base microkernels (`matmul_n38` `13.55 ms -> 13.31 ms`) fall within `0.984×–1.018×` process noise.
 
 > [!NOTE]
 > **Known Limits & Honest Caveats**
-> - **Multi-thread CPU:** C++ **8-thread** OpenMP (`11.142 ms`) beats Turi **1-thread** CPU (`29.400 ms`) on `matmul N=1024`.
-> - **PCIe Cold Transfers:** Cold `saxpy <= 16M` copies over PCIe (`17.138 ms`) are slower than CPU (`8.482 ms`), so `saxpyAutoF32` dispatches thoughtfully.
-> - **Specialized Kernels:** CPU microkernels target specific common loop patterns; general loops rely on safe standard LLVM vectorization.
-> - **Untested Backends & Linux Saturation:** **CUDA, Metal, and Intel AVX10** have not been tested/implemented. Isolated Linux (`dev-adrian`, `g++ 13.3.0`) passed `semantics` (`3,405` programs), `stdlib`, `mcp_lsp`, TLS 1.3/WSS, and `PG_AVAIL=true`, while Linux HTTP saturation stress testing was intentionally skipped due to shared host load (`load average ~10.65`) and a live production app (`inventario-app`).
+> - **PCIe Cold Copies & WDDM Staging:** Cold `saxpy <= 16M` over PCIe (`14.774 ms`) remains slower than CPU (`7.695 ms`), and on Windows WDDM RX 9070 XT the `uploadF32Pinned`/`downloadF32Pinned` staging API (`4.837 / 5.143 ms` for `64 MB`) incurs host-to-host staging `memcpy` overhead relative to direct WDDM `uploadF32`/`downloadF32` (`2.888 / 3.551 ms`). Resident fused kernels (`0.473 ms` / `0.920 ms`) are the intended high-throughput path.
+> - **Untested Silicon & Backends:** CUDA Driver API + PTX 7.0 (`cuda`), Apple Metal (`metal`), and `--cpu avx10` are implemented and verified in build/codegen/probe tests (`backendName()`, `availableBackends()`, `TURI_GPU_BACKEND=metal` fallback, `--cpu avx10` object emission), but have **not yet been executed on physical NVIDIA, Apple Silicon, or Intel AVX10 hardware**.
+> - **Unspecialized Scalar Loops:** Arbitrary non-pattern scalar loops continue to rely on safe standard LLVM vectorization alongside expanded static bounds elimination (`1D`, square, rectangular `rows * cols`, and strided `len / K`).
+> - **Linux Verification Scope (`dev-adrian`):** Isolated Linux (`g++ 13.3.0`, QEMU 4 vCPU `SSE4.2`) compiled all `10` compiler C++ files cleanly, proved `kept_bounds=0` on rect/strided checks, verified `1T/4T` pthread `matmul` parity (`N=259` `1.609/1.965 ms`; `N=512` `11.113/7.730 ms`), headless `gpu.backendName() == "none"`, and passed a **gentle low-load** `epoll` (`500` reqs in `31.43 ms`, `p50=85.9 µs`) + `TLSv1.3` (`p50=41.4 µs`) check; full Linux HTTP saturation stress testing was intentionally avoided due to shared host load and a live production app (`inventario-app`).
 
 ---
 
@@ -242,7 +244,7 @@ require data 0.1.0 "std"
 | Package | Purpose | Key APIs / Modules | Runtime & Dependency Model |
 |---|---|---|---|
 | `web` | Async HTTP/1.1 (`IOCP` / `epoll`), WebSockets (RFC 6455), TLS 1.3, HTTPS client, SQLite WAL | `servidor`, `ws`, `cliente`, `tls`, `sqlite`, `http`, `json`, `router`, `mime` | Lazy IR injection (`--web` or call-site); dynamically loads OpenSSL 3 (`libssl-3-x64.dll` / `libssl.so.3`) & `sqlite3` |
-| `gpu` | OpenCL GPU compute + persistent binary disk cache + CPU/GPU auto-dispatch | `isAvailable`, `matmulF32`, `matmulAutoF32`, `saxpyF32`, `saxpyAutoF32`, `reluF32`, `vecAddF32`, `vecMulF32` | Lazy IR injection (`--gpu` or `import gpu`); dynamically loads `OpenCL.dll` / `libOpenCL.so` — **0 symbols** if unused |
+| `gpu` | Fused OpenCL GPU compute + persistent binary disk cache + multi-backend probe + CPU/GPU auto-dispatch | `isAvailable`, `backendName`, `availableBackends`, `matmulF32`, `matmulAutoF32`, `matmulReluResidentF32`, `saxpyF32`, `saxpyAutoF32`, `saxpyReluResidentF32`, `uploadF32Pinned`, `downloadF32Pinned`, `reluF32`, `vecAddF32` | Lazy IR injection (`--gpu` or `import gpu`); dynamic `OpenCL.dll`/`libOpenCL.so` + CUDA Driver API / Metal probe — **0 symbols** if unused |
 | `tensor` | Bounded `TensorF32` CPU arrays & neural/matrix primitives | `zeros`, `ones`, `fromArray`, `add`, `mul`, `relu`, `transpose`, `softmaxRows`, `matmul`, `dot` | Pure Turi; **0 OpenCL dependencies** |
 | `crypto` | Native cryptography without OpenSSL compile dependency | `sha256Hex`, `hmacSha256Hex`, `constantTimeEq`, `randomBytes`, `aeadSeal`, `aeadOpen` (ChaCha20-Poly1305) | Pure C99 RFC implementations + OS CSPRNG (`BCryptGenRandom` / `getrandom`); **0 extra DLLs** |
 | `data` | Structured parsing & serialization | RFC 4180 CSV (`parseCsv`, `parseCsvWithHeaders`, `toCsv`), RFC 8259 JSON (`parseJson`, `toJson`, `getStr`, `getInt`, `getBool`) | Pure Turi |
@@ -302,7 +304,7 @@ veloz new myapp --template cli     # templates: cli | web | gpu | lib
 cd myapp
 veloz check src/main.turi          # type, lifetime, effect & test check
 veloz run src/main.turi            # reference checked interpreter
-veloz build src/main.turi -o myapp --release --cpu native
+veloz build src/main.turi -o myapp --release --cpu native  # or znver4|znver5|sapphirerapids|graniterapids|avx10
 veloz costs src/main.turi --explain-checks
 veloz bench src/main.turi --rounds 5
 ```

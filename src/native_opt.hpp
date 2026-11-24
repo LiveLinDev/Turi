@@ -941,6 +941,14 @@ class FunctionProver {
     };
     std::unordered_map<std::size_t, std::unordered_map<unsigned, LoopMeanInfo>> loopSumSources;
     std::unordered_map<unsigned, std::pair<unsigned, std::int64_t>> squareArraySizes; // arrSlot -> (nSlot, offset)
+    struct RectShape {
+        unsigned rSlot = 0;
+        unsigned cSlot = 0;
+        std::int64_t rOff = 0;
+        std::int64_t cOff = 0;
+        bool operator==(const RectShape&) const = default;
+    };
+    std::unordered_map<unsigned, RectShape> rectArraySizes; // arrSlot -> (rSlot+rOff) * (cSlot+cOff)
     std::unordered_map<unsigned, Sym> linearArraySizes; // arrSlot -> size Sym
     std::unordered_map<unsigned, Sym> fullArraySizes;   // arrSlot -> size Sym (including immutable products like n*n)
 
@@ -981,6 +989,7 @@ class FunctionProver {
         std::unordered_map<unsigned, std::pair<unsigned, IntRange>> meanSources;
         std::unordered_map<unsigned, unsigned> remValLtSlot;
         std::unordered_map<unsigned, unsigned> idxElemLtSlot;
+        std::unordered_map<unsigned, RectShape> rectArrShapes;
     };
 
     static void invalidateSlot(Env& env, unsigned s) {
@@ -988,6 +997,7 @@ class FunctionProver {
         env.slotVal.erase(s);
         env.nonZeroSlots.erase(s);
         env.meanSources.erase(s);
+        env.rectArrShapes.erase(s);
         if (s < env.slotEpoch.size()) ++env.slotEpoch[s];
     }
 
@@ -3095,10 +3105,15 @@ class FunctionProver {
             if (isAnyArrayType(programPtr, fn.slots[s]) && arrayOriginCount[s] == 1 && repeatSite[s] &&
                 (!arrayEscapesOrAliased[s] || !slotWritable[s] || movedSource[s])) {
                 if (auto sz = shallowSym(repeatSite[s]->inputs[1].id, staticEnv)) {
-                    if (sz->hasProduct && sz->prodSlotA == sz->prodSlotB && sz->prodOffA == sz->prodOffB &&
-                        sz->prodCoeff == 1 && sz->constant == 0 && sz->linear.empty()) {
-                        squareArraySizes.emplace(static_cast<unsigned>(s),
-                                                 std::pair{sz->prodSlotA, sz->prodOffA});
+                    if (sz->hasProduct && sz->prodCoeff == 1 && sz->constant == 0 && sz->linear.empty()) {
+                        if (sz->prodSlotA == sz->prodSlotB && sz->prodOffA == sz->prodOffB) {
+                            squareArraySizes.emplace(static_cast<unsigned>(s),
+                                                     std::pair{sz->prodSlotA, sz->prodOffA});
+                        }
+                        if (!slotWritable[sz->prodSlotA] && !slotWritable[sz->prodSlotB]) {
+                            rectArraySizes.emplace(static_cast<unsigned>(s),
+                                                   RectShape{sz->prodSlotA, sz->prodSlotB, sz->prodOffA, sz->prodOffB});
+                        }
                     } else if (sz->isPureLinear()) {
                         linearArraySizes.emplace(static_cast<unsigned>(s), *sz);
                     }
@@ -3225,6 +3240,16 @@ class FunctionProver {
 
         const auto al = extractLinearAtom(L.id, env);
         const auto ar = extractLinearAtom(R.id, env);
+        auto recordRect = [&](const Value& lenSide, const Value& prodSide) {
+            auto a = extractLinearAtom(lenSide.id, env);
+            if (!a || !a->isArrLen || a->offset != 0) return;
+            if (auto ps = shallowSym(prodSide.id, env);
+                ps && ps->hasProduct && ps->prodCoeff == 1 && ps->constant == 0 && ps->linear.empty() &&
+                !slotWritable[ps->prodSlotA] && !slotWritable[ps->prodSlotB]) {
+                env.rectArrShapes[a->slot] = RectShape{ps->prodSlotA, ps->prodSlotB, ps->prodOffA, ps->prodOffB};
+                markContractNode(true, a->slot);
+            }
+        };
 
         if (cmp == "<" || cmp == "<=") {
             const std::int64_t off = (cmp == "<") ? -1 : 0;
@@ -3283,6 +3308,7 @@ class FunctionProver {
                     }
                 }
             }
+            recordRect(R, L);
             // Refine difference graph on linear expressions!
             auto sl = shallowSym(L.id, env);
             auto sr = shallowSym(R.id, env);
@@ -3324,6 +3350,8 @@ class FunctionProver {
                 }
             }
         } else if (cmp == "==") {
+            recordRect(L, R);
+            recordRect(R, L);
             auto merged = intersectRange(lr, rr);
             if (merged) {
                 env.valRanges[L.id] = *merged;
@@ -3564,23 +3592,30 @@ class FunctionProver {
                             }
                         }
                     }
-                } else if (c > 1 && sym->constant >= 0) {
-                    // Scaled loop index `i * K + off` with for-loop upper `(n + c) / K`, `len(arr) >= n >= 0`, `c + off <= K - 1` (e.g. sparsePages)
+                } else if (c > 1 && sym->constant >= 0 && sym->constant < c) {
+                    // Strided 1D loop index `i * stride + off` bounded by either:
+                    // (a) `(n + uCst) / K` with `0 <= n <= len(arr)` and `uCst + off <= K - 1` (`K >= c`)
+                    // (b) `len(arr) / K` directly (`Op::Length` on `arrSlot`, `K >= c`)
                     if (auto sr = env.diffs.rangeOf({false, s}); sr && sr->lower >= 0) {
                         for (const auto& [hb, fh] : forHeaders) {
                             if (!fh.valid || fh.iterSlot != s || !isEnclosingForHeader(hb)) continue;
                             auto udit = defOp.find(fh.upper.id);
                             if (udit != defOp.end() && udit->second->op == Op::Binary && udit->second->data == "/") {
                                 auto kConst = parseConstInt(defOp.count(udit->second->inputs[1].id) ? defOp.at(udit->second->inputs[1].id)->data : "");
-                                if (kConst == c) {
+                                if (kConst && *kConst >= c) {
+                                    if (auto uAtom = extractLinearAtom(udit->second->inputs[0].id, env);
+                                        uAtom && uAtom->isArrLen && uAtom->slot == arrSlot &&
+                                        uAtom->offset <= 0 && sym->constant <= *kConst - 1) {
+                                        return finish(ProofKind::LoopBound);
+                                    }
                                     if (auto numSym = shallowSym(udit->second->inputs[0].id, env);
                                         numSym && numSym->isPureLinear() && numSym->linear.size() == 1) {
                                         auto [ns, nc] = *numSym->linear.begin();
                                         if (nc == 1 && !slotWritable[ns] && numSym->constant >= 0 &&
-                                            numSym->constant + sym->constant <= c - 1) {
+                                            numSym->constant + sym->constant <= *kConst - 1) {
                                             if (auto nr = env.diffs.rangeOf({false, ns}); nr && nr->lower >= 0) {
                                                 if (auto d = env.diffs.maxDiff({false, ns}, {true, arrSlot})) {
-                                                    if (*d + numSym->constant + sym->constant - c <= -1)
+                                                    if (*d + numSym->constant + sym->constant - *kConst <= -1)
                                                         return finish(ProofKind::LoopBound);
                                                 }
                                             }
@@ -3986,6 +4021,66 @@ class FunctionProver {
                     if (checkPair(rowSlots[0].first, rowSlots[1].first, rowCst) &&
                         checkPair(colSlots[0].first, colSlots[1].first, colCst))
                         return finish(ProofKind::DiffGraph);
+                }
+            }
+        }
+
+        // 5. General rectangular 2D index: len(arr) >= (rSlot + rOff) * (cSlot + cOff)
+        std::optional<RectShape> rectShape;
+        if (auto er = env.rectArrShapes.find(arrSlot); er != env.rectArrShapes.end()) {
+            rectShape = er->second;
+        } else if (auto sr = rectArraySizes.find(arrSlot); sr != rectArraySizes.end()) {
+            rectShape = sr->second;
+        }
+        if (rectShape && !slotWritable[rectShape->rSlot] && !slotWritable[rectShape->cSlot]) {
+            if (auto full = buildSym(idxVal.id, env); full && full->hasProduct && full->prodCoeff == 1) {
+                auto tryRectOrient = [&](unsigned rowBSlot, std::int64_t rowBOff,
+                                         unsigned colBSlot, std::int64_t colBOff) -> bool {
+                    const bool matchB = (full->prodSlotB == colBSlot && full->prodOffB == colBOff);
+                    const bool matchA = (!matchB && full->prodSlotA == colBSlot && full->prodOffA == colBOff);
+                    if (!matchA && !matchB) return false;
+                    const unsigned rowBase = matchB ? full->prodSlotA : full->prodSlotB;
+                    const std::int64_t rowBaseOff = matchB ? full->prodOffA : full->prodOffB;
+
+                    std::int64_t rowCarry = 0;
+                    Sym colSym = Sym::makeConst(full->constant);
+                    for (const auto& [ls, lc] : full->linear) {
+                        if (ls == colBSlot) {
+                            rowCarry += lc;
+                            colSym.constant -= lc * colBOff;
+                        } else {
+                            colSym.linear[ls] = lc;
+                        }
+                    }
+
+                    auto checkBounded = [&](unsigned s, std::int64_t cst, unsigned boundSlot, std::int64_t boundOff) -> bool {
+                        auto sr = env.diffs.rangeOf({false, s});
+                        if (!sr || sr->lower == kMinInt) return false;
+                        auto lo = checkedAdd64(sr->lower, cst);
+                        if (!lo || *lo < 0) return false;
+                        if (auto d = env.diffs.maxDiff({false, s}, {false, boundSlot})) {
+                            auto diff = checkedAdd64(*d, cst - boundOff);
+                            return diff && *diff <= -1;
+                        }
+                        return false;
+                    };
+
+                    if (!checkBounded(rowBase, rowBaseOff + rowCarry, rowBSlot, rowBOff)) return false;
+
+                    if (colSym.linear.empty()) {
+                        auto br = env.diffs.rangeOf({false, colBSlot});
+                        return colSym.constant >= 0 && br && br->lower != kMinInt && br->lower + colBOff > colSym.constant;
+                    }
+                    if (colSym.linear.size() == 1) {
+                        auto [cs, cc] = *colSym.linear.begin();
+                        return cc == 1 && checkBounded(cs, colSym.constant, colBSlot, colBOff);
+                    }
+                    return false;
+                };
+
+                if (tryRectOrient(rectShape->rSlot, rectShape->rOff, rectShape->cSlot, rectShape->cOff) ||
+                    tryRectOrient(rectShape->cSlot, rectShape->cOff, rectShape->rSlot, rectShape->rOff)) {
+                    return finish(env.contractArrLens.contains(arrSlot) ? ProofKind::ContractRequires : ProofKind::DiffGraph);
                 }
             }
         }

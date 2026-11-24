@@ -31,7 +31,7 @@ std::string jsonString(std::string_view input) {
 namespace {
 constexpr auto help = R"(veloz check ARCHIVO [--format] [--max-level N]
 veloz run ARCHIVO [--steps N]
-veloz build ARCHIVO -o EJECUTABLE [--release] [--web] [--gpu] [--cpu x86-64-v2|x86-64-v3|x86-64-v4|znver4|native] [--pgo-gen[=RUTA]|--pgo-use=RUTA] [--extreme] [--extreme-budget=N] [--extreme-cache=DIR] [--extreme-train=ARGS] [--extreme-proposer=CMD] [--max-level N]
+veloz build ARCHIVO -o EJECUTABLE [--release] [--web] [--gpu] [--cpu x86-64-v2|x86-64-v3|x86-64-v4|znver4|znver5|sapphirerapids|graniterapids|avx10|native] [--pgo-gen[=RUTA]|--pgo-use=RUTA] [--extreme] [--extreme-budget=N] [--extreme-cache=DIR] [--extreme-train=ARGS] [--extreme-proposer=CMD] [--max-level N]
 veloz emit-ir ARCHIVO [--target x86_64-windows-msvc|x86_64-linux-gnu|aarch64-linux-gnu|arm64-apple-darwin] [--audit-copies]
 veloz sig ARCHIVO [SÍMBOLO] [--offset N] [--max-tokens N]
 veloz slice ARCHIVO SÍMBOLO [--offset N] [--max-tokens N]
@@ -281,6 +281,8 @@ int dispatch(const std::vector<std::string>& args) {
                     options.cpu = args[++i];
                     if (options.cpu != "x86-64-v2" && options.cpu != "x86-64-v3" &&
                         options.cpu != "x86-64-v4" && options.cpu != "znver4" &&
+                        options.cpu != "znver5" && options.cpu != "sapphirerapids" &&
+                        options.cpu != "graniterapids" && options.cpu != "avx10" &&
                         options.cpu != "native") usage();
                 } else if (args[i] == "--pgo-gen" && !options.hasPgoGen && options.pgoUse.empty()) {
                     options.hasPgoGen = true;
