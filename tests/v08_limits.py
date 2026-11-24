@@ -361,7 +361,7 @@ fn main() {
         encoding="utf-8",
     )
 
-    exe = tmp / exe_name("gpu_v08")
+    exe = tmp / exe_name("gpu_v08_bin")
     bld = run_cli("build", entry, "-o", exe, "--release")
     assert bld.returncode == 0, (bld.stdout, bld.stderr)
     res = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60)
