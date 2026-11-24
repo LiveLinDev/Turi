@@ -39,6 +39,8 @@ extern char** environ;
 namespace veloz {
 namespace {
 
+struct JsonEntry;
+
 struct JsonVal {
     enum Kind { Null, Bool, Int, Double, String, Array, Object };
     Kind kind = Null;
@@ -47,29 +49,53 @@ struct JsonVal {
     double dval = 0.0;
     std::string sval;
     std::vector<JsonVal> arr;
-    std::vector<std::pair<std::string, JsonVal>> obj;
+    std::vector<JsonEntry> obj;
 
-    const JsonVal* get(std::string_view key) const {
-        if (kind != Object) return nullptr;
-        for (const auto& [k, v] : obj) {
-            if (k == key) return &v;
-        }
-        return nullptr;
-    }
-    std::string getStr(std::string_view key, std::string_view def = {}) const {
-        const auto* v = get(key);
-        return (v && v->kind == String) ? v->sval : std::string(def);
-    }
-    std::optional<std::int64_t> getInt(std::string_view key) const {
-        const auto* v = get(key);
-        if (!v || v->kind != Int) return std::nullopt;
-        return v->ival;
-    }
-    bool getBool(std::string_view key, bool def = false) const {
-        const auto* v = get(key);
-        return (v && v->kind == Bool) ? v->bval : def;
-    }
+    JsonVal();
+    ~JsonVal();
+    JsonVal(const JsonVal&);
+    JsonVal(JsonVal&&) noexcept;
+    JsonVal& operator=(const JsonVal&);
+    JsonVal& operator=(JsonVal&&) noexcept;
+
+    const JsonVal* get(std::string_view key) const;
+    std::string getStr(std::string_view key, std::string_view def = {}) const;
+    std::optional<std::int64_t> getInt(std::string_view key) const;
+    bool getBool(std::string_view key, bool def = false) const;
 };
+
+struct JsonEntry {
+    std::string first;
+    JsonVal second;
+};
+
+inline JsonVal::JsonVal() = default;
+inline JsonVal::~JsonVal() = default;
+inline JsonVal::JsonVal(const JsonVal&) = default;
+inline JsonVal::JsonVal(JsonVal&&) noexcept = default;
+inline JsonVal& JsonVal::operator=(const JsonVal&) = default;
+inline JsonVal& JsonVal::operator=(JsonVal&&) noexcept = default;
+
+inline const JsonVal* JsonVal::get(std::string_view key) const {
+    if (kind != Object) return nullptr;
+    for (const auto& [k, v] : obj) {
+        if (k == key) return &v;
+    }
+    return nullptr;
+}
+inline std::string JsonVal::getStr(std::string_view key, std::string_view def) const {
+    const auto* v = get(key);
+    return (v && v->kind == String) ? v->sval : std::string(def);
+}
+inline std::optional<std::int64_t> JsonVal::getInt(std::string_view key) const {
+    const auto* v = get(key);
+    if (!v || v->kind != Int) return std::nullopt;
+    return v->ival;
+}
+inline bool JsonVal::getBool(std::string_view key, bool def) const {
+    const auto* v = get(key);
+    return (v && v->kind == Bool) ? v->bval : def;
+}
 
 void appendUtf8(std::string& out, std::uint32_t cp) {
     if (cp < 0x80u) {
@@ -176,7 +202,7 @@ struct JsonParser {
                 ++pos;
                 auto val = parseValue(depth + 1);
                 if (!val) return std::nullopt;
-                v.obj.emplace_back(std::move(*key), std::move(*val));
+                v.obj.push_back(JsonEntry{std::move(*key), std::move(*val)});
                 skipWs();
                 if (pos < src.size() && src[pos] == ',') { ++pos; continue; }
                 if (pos < src.size() && src[pos] == '}') { ++pos; return v; }

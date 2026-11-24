@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y clang lld cmake ninja-build python3 libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y clang lld cmake ninja-build python3 libssl-dev libsqlite3-dev openssl
       - name: Configure and build
         env:
           CC: clang
@@ -27,6 +27,22 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install LLVM 23
+        shell: pwsh
+        run: |
+          $msi = Join-Path $env:RUNNER_TEMP 'LLVM-23.1.6-win64.msi'
+          Invoke-WebRequest -Uri 'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.6/LLVM-23.1.6-win64.msi' -OutFile $msi
+          $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/a', $msi, '/qn', 'TARGETDIR=C:\LLVM23') -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "msiexec failed with exit code $($proc.ExitCode)" }
+          $clangxx = Get-ChildItem 'C:\LLVM23' -Recurse -Filter 'clang++.exe' | Select-Object -First 1
+          if (-not $clangxx) { throw 'clang++.exe not found under C:\LLVM23' }
+          $llvmBin = $clangxx.DirectoryName
+          foreach ($req in @('clang.exe', 'llvm-rc.exe', 'lld-link.exe')) {
+            if (-not (Test-Path (Join-Path $llvmBin $req))) { throw "Missing $req in $llvmBin" }
+          }
+          & $clangxx.FullName --version
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "VELOZ_CLANG=$(Join-Path $llvmBin 'clang.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build and test Release
         shell: pwsh
         run: .\tools\build.ps1

@@ -4329,6 +4329,8 @@ static int tz_sql_init_api(void) {
             "C:\\Python311\\DLLs\\sqlite3.dll",
             "C:\\Python312\\DLLs\\sqlite3.dll",
             "C:\\Python313\\DLLs\\sqlite3.dll",
+            "C:\\Python314\\DLLs\\sqlite3.dll",
+            "C:\\Python315\\DLLs\\sqlite3.dll",
             NULL
         };
         for (int i = 0; !mod && kCandidates[i]; ++i) mod = LoadLibraryA(kCandidates[i]);

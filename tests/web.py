@@ -277,6 +277,16 @@ fn main() {{
     assert bld.returncode == 0, (bld.returncode, bld.stdout, bld.stderr)
     assert exe_path.is_file(), "falta ejecutable"
 
+    srv_env = dict(os.environ)
+    if sys.platform == "win32" and not srv_env.get("TURI_SQLITE_PATH"):
+        for cand in (
+            Path(sys.executable).parent / "DLLs" / "sqlite3.dll",
+            Path(sys.base_prefix) / "DLLs" / "sqlite3.dll",
+        ):
+            if cand.is_file():
+                srv_env["TURI_SQLITE_PATH"] = str(cand)
+                break
+
     proc = subprocess.Popen(
         [str(exe_path)],
         stdin=subprocess.PIPE,
@@ -284,6 +294,7 @@ fn main() {{
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
+        env=srv_env,
     )
     try:
         port_line = proc.stdout.readline().strip()

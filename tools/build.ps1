@@ -48,6 +48,7 @@ $cmakeBin = Split-Path -Parent $cmake
 $ninjaBin = Split-Path -Parent $ninja
 $ctest = Join-Path $cmakeBin 'ctest.exe'
 $cxxArg = $cxx.Replace('\', '/')
+$clangArg = (Join-Path $llvmBin 'clang.exe').Replace('\', '/')
 $rcArg = $rc.Replace('\', '/')
 $ninjaArg = $ninja.Replace('\', '/')
 $oldPath = $env:Path
@@ -63,7 +64,7 @@ try {
         $env:ASAN_OPTIONS = 'halt_on_error=1'
         $env:UBSAN_OPTIONS = 'halt_on_error=1:print_stacktrace=1'
     }
-    & $cmake -S $root -B $build -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninjaArg" "-DCMAKE_CXX_COMPILER=$cxxArg" "-DCMAKE_RC_COMPILER=$rcArg" "-DCMAKE_BUILD_TYPE=$buildType" @extra
+    & $cmake -S $root -B $build -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninjaArg" "-DCMAKE_CXX_COMPILER=$cxxArg" "-DCMAKE_RC_COMPILER=$rcArg" "-DVELOZ_CLANG=$clangArg" "-DCMAKE_BUILD_TYPE=$buildType" @extra
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
     & $cmake --build $build --parallel 8
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
