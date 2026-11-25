@@ -240,6 +240,39 @@ fn main() {
     print(v[0] + v[1])
 }
 """, "42\neheh!\n23\n"),
+    # Regresión (25 nov 2026): una cadena que se acumula dentro de un `if` en un bucle. El pase que
+    # convierte un `if` en selección ejecutaba sin condición el Drop del valor anterior y el nativo
+    # devolvía la cadena vacía.
+    ("condAccum", """fn rev(words: [str]) -> str {
+    var result = ""
+    var i = 2
+    while i >= 0 {
+        result = result + words[i]
+        if i > 0 {
+            result = result + " "
+        }
+        i = i - 1
+    }
+    return result
+}
+
+fn tags(n: int) -> [str] {
+    var out: [str] = []
+    var label = "n"
+    for i in 0..n {
+        if i % 2 == 0 {
+            label = label + str(i)
+        }
+        out.push(label)
+    }
+    return out
+}
+
+fn main() {
+    print(rev(["one", "two", "three"]))
+    print(tags(5).join(","))
+}
+""", "three two one\nn0,n0,n02,n02,n024\n"),
 ]
 
 

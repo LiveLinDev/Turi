@@ -211,6 +211,20 @@ Escrita en Turi e importada sin declarar nada. Nombres iguales a los de Python y
 *Prueba:* `tests/core_lib.py`, una tabla de casos por función en intérprete y nativo.
 *Objetivo medido:* mediana de tokens de la solución correcta ≤ la de Go en `tools/aibench` (**alcanzado: 66 frente a 72**), y después ≤ la de Python (36).
 
+### I0 · Sintaxis de Python como cara principal (prioridad del bloque)
+
+**Estado (25 de noviembre de 2026):** medido con un traductor de prueba (`tools/pyfront/py2turi.py`, adaptador `turipy` del banco). Resultado: 59 de 60 a la primera con 37 tokens por solución y 131 de encargo, frente a 59, 68 y 1.133 con la sintaxis propia. Ver `DECISIONES.md`, Turi 0.9.2.
+
+Trabajo para llevarlo al compilador:
+
+1. **Lector de Python en `src/parser.cpp`**: `def`, `:` y sangría, `elif`, `for x in`, `range`, comprensiones, cortes, `in`, `not`, cadenas f, tuplas. Produce el mismo árbol que la sintaxis actual; se elige por extensión de archivo o por detección.
+2. **Declaración por primera asignación** y ámbito de función (hoy lo hace el traductor): en el comprobador, con deducción de tipos para `[]`, `{}` y `set()` a partir del primer uso.
+3. **Semántica que el modelo da por hecha:** `//` y `%` de Python, índices negativos, cortes sin error fuera de rango, `s[i]` como cadena, orden de inserción en diccionarios (enlaza con el mapa de entradas densas de M2), parámetros de lista modificados visibles para quien llama (`mut` deducido en la llamada, M3).
+4. **Lo que no se copia:** tipos dinámicos, `eval`, herencia dinámica, excepciones como control de flujo. Se rechazan con un mensaje corto y un arreglo sugerido; nunca se explican por adelantado en el encargo (una tarjeta de avisos subió la solución de 36 a 66 tokens).
+5. **Enteros:** decidir entre desbordamiento detectado (hoy) y enteros grandes automáticos cuando el compilador no pueda acotar el valor.
+6. **Biblioteca:** `re`, `math`, `collections` (`Counter`, `defaultdict`, `deque`), `itertools` básicos, `sorted(key=...)`, escritos en Turi.
+7. **Medición:** repetir `turipy` con un conjunto público (MultiPL-E/HumanEval) y más modelos, y usar `tools/pyfront/replay.py` como prueba diferencial del compilador (ya encontró un fallo de compilación).
+
 ### I2 · Tarjeta nueva
 
 Una sola fuente (`docs/card.md`) de la que se generan `AGENT_CARD.md` y la tarjeta de `tools/aibench/langs.py`. En inglés, ≤ 700 tokens, con la forma más corta de cada cosa. `tests/agent.py` compila todos sus ejemplos.

@@ -240,6 +240,49 @@ class Turi(Lang):
         return [self.compiler, "build", str(workdir / "main.turi"), "-o", str(exe)], [str(exe)]
 
 
+# ----------------------------------------------------------------------------- Python syntax on the Turi compiler
+TURIPY_CARD = """Write ordinary Python 3 with type hints on every function parameter and result. The code is compiled ahead of time to machine code by the Turi compiler (no interpreter), so keep to the static core of the language: functions, int/float/bool/str, list, dict, set and tuple, loops, slices, comprehensions, f-strings and the usual built-ins (len, range, sum, min, max, sorted, enumerate, zip, abs, ord, chr, str, int, float) and str/list/dict methods. No classes, no try/except, no imports other than math, no sorted(key=...)."""
+
+
+class TuriPy(Turi):
+    """The model writes Python; tools/pyfront translates it to Turi and the Turi compiler builds it."""
+    name, title, ext, fence = "turipy", "Python 3", ".py", "python"
+    # Sin tarjeta: el encargo es idéntico al de Python. Con TURIPY_CARD el modelo se volvía cauteloso
+    # (anotaba cada variable y evitaba sorted, split...) y la solución pasaba de 36 a 66 tokens.
+    card = ""
+    _py = {"int": "int", "float": "float", "bool": "bool", "str": "str",
+           "list[int]": "list[int]", "list[str]": "list[str]"}
+
+    def fn(self, task):
+        return task.name
+
+    def signature(self, task):
+        params = ", ".join(f"{n}: {self._py[t]}" for n, t in task.params)
+        return f"def {task.name}({params}) -> {self._py[task.ret]}:"
+
+    def call_text(self, task, args):
+        return f"{task.name}({', '.join(repr(a) for a in args)})"
+
+    def program(self, task, code):
+        sys.path.insert(0, str(ROOT / "tools" / "pyfront"))
+        import py2turi
+        try:
+            turi = py2turi.translate(code)
+        except py2turi.Unsupported as error:
+            return {"main.turi": "", "py2turi.err": f"py2turi: {error}\n"}
+        except SyntaxError as error:
+            return {"main.turi": "", "py2turi.err": f"SyntaxError: {error}\n"}
+        files = super().program(task, turi)
+        files["answer.py"] = code
+        return files
+
+    def commands(self, workdir, files):
+        if "py2turi.err" in files:
+            show = "import sys; sys.stderr.write(open(sys.argv[1], encoding='utf-8').read()); sys.exit(1)"
+            return [sys.executable, "-I", "-c", show, str(workdir / "py2turi.err")], [sys.executable, "-c", "pass"]
+        return super().commands(workdir, files)
+
+
 # ----------------------------------------------------------------------------- C
 class C(Lang):
     name, title, ext, fence = "c", "C (C17)", ".c", "c"
@@ -529,7 +572,7 @@ class Go(Lang):
 
 
 def all_langs(compiler=None):
-    return [Turi(compiler), Python(), C(), Cpp(), Rust(), Go()]
+    return [Turi(compiler), TuriPy(compiler), Python(), C(), Cpp(), Rust(), Go()]
 
 
 def run_candidate(lang, task, code, workdir, timeout=20):

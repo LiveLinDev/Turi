@@ -3268,6 +3268,7 @@ class ModuleWriter {
             break;
         }
         case Op::ClearOwner: {
+            if (op.elided) break; // la ranura no se vuelve a leer ni a soltar
             const Type slotT = curSlotTypes.at(op.slot);
             bodies << "  store " << llvmType(slotT) << " zeroinitializer, ptr " << slotPtr(op.slot) << "\n";
             break;

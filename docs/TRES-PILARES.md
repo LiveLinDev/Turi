@@ -14,7 +14,7 @@ Los tres pilares son los del proyecto y no se mezclan:
 |---|---|---|
 | Velocidad | `python benchmarks/run.py`: Turi frente a C experto en programas clásicos con tamaño de problema dado en ejecución | **Cumplido en 3 de 6, empate en 2.** Media 1,13× frente a C portable experto (0,49× al empezar). Pierde solo `binarytrees` (0,75×). Falta la comparación con C con intrínsecos. |
 | IA: errores | `python tools/aibench/run.py`: 60 tareas × 6 lenguajes con el mismo enunciado y pruebas ocultas, modelo de la DGX Spark | **Cumplido frente a C, C++, Rust y Go** (59 de 60 a la primera, igual que Rust y Go y por delante de C y C++; 60 de 60 compilan a la primera). Falta Python (60 de 60). |
-| IA: tokens | Misma herramienta, tokens de la solución correcta con el tokenizador del modelo | **Cumplido frente a C, C++, Rust y Go** (66 a 68 tokens de mediana según la medición, frente a 70 a 120). Falta Python (36). La tarjeta sigue costando unos 970 tokens por petición. |
+| IA: tokens | Misma herramienta, tokens de la solución correcta con el tokenizador del modelo | **Cumplido frente a C, C++, Rust y Go** (66 a 68 tokens frente a 70 a 120). Con sintaxis de Python compilada por Turi (prototipo): 37 tokens, como Python (36), y el encargo baja de 1.133 a 131 tokens. |
 | Memoria | `benchmarks/run.py` (tiempo y memoria pico) más el recuento de marcas de memoria que escribe el programador | **En parte.** Árboles y listas ya se escriben sin nada de memoria (0 marcas) y van 10 veces más rápido que en C++ y Rust; frente a C con arena, 0,75×. En cadenas y mapas (`kmers`, 0 marcas) Turi va 3 veces más rápido que C++ y Rust y queda a 0,84× del C con tabla propia; usa más memoria pico que los cuatro. |
 
 ## Por qué otras IAs no se creían los benchmarks publicados
@@ -129,6 +129,18 @@ Lecturas:
 - **Errores:** Turi iguala a Rust y Go y supera a C y C++. Solo Python queda por delante, por una tarea. Con 60 tareas una diferencia de una tarea no es significativa.
 - **Tokens:** la solución en Turi ocupa menos que en Rust, Go, C++ y C. Python sigue siendo casi la mitad. Además Turi paga la tarjeta en cada petición (unos 1.100 tokens de entrada frente a unos 130).
 - **Límites de esta medición:** un solo modelo, tareas escritas para este banco (no un conjunto público), dificultad baja, sin Goose, y la tarjeta y el compilador se ajustaron mirando estas mismas tareas. Hace falta repetirla con un conjunto que no se haya visto.
+
+### Python por fuera, Turi por dentro (medido el 25 de noviembre)
+
+Los estudios publicados coinciden en que un modelo rinde mejor cuanto más ha visto un lenguaje, y en que los lenguajes poco vistos cuestan más tokens por la conducta del modelo (reintentos), no por el tokenizador. Se midió qué pasa si el modelo escribe el Python que ya conoce y lo compila Turi (traductor de prueba `tools/pyfront`):
+
+| | Correcto a la primera | Tokens de la solución | Tokens del encargo |
+|---|---:|---:|---:|
+| Python real (interpretado) | 60/60 | 36 | 130 |
+| **Python compilado por Turi** | 59/60 | 37 | 131 |
+| Turi con su sintaxis | 59/60 | 68 | 1.133 |
+
+Mismos errores que hoy, la mitad de tokens en la solución y casi nueve veces menos en el encargo, sin perder velocidad (`spectralnorm` en Python traducido: 95 ms, igual que en Turi; C experto: 231 ms). El único fallo fue un `import re`. Esto contesta la pregunta de diseño: la cara del lenguaje para la IA debe ser la sintaxis de Python, con el compilador y la memoria de Turi debajo. Falta llevarlo al compilador y decidir las diferencias de comportamiento (enteros de 64 bits, orden de los diccionarios, copia en `b = a`, sin excepciones). Detalle en `DECISIONES.md` (Turi 0.9.2).
 
 ### Qué se cambió en el lenguaje
 

@@ -10274,7 +10274,7 @@ inline void cacheArgExtremeValue(
             op.op == Op::BoxDyn || op.op == Op::DynCall || op.op == Op::MakeClosure || op.op == Op::ClosureCall ||
             op.op == Op::Print || op.op == Op::ArrayLit || op.op == Op::Interp || op.op == Op::Slice ||
             op.op == Op::FieldSet || op.op == Op::PlaceSet || op.op == Op::RepeatHeap ||
-            op.op == Op::RepeatRegion || op.op == Op::Clone || op.op == Op::ClearOwner ||
+            op.op == Op::RepeatRegion || op.op == Op::Clone || op.op == Op::ClearOwner || op.op == Op::Drop ||
             op.op == Op::ClearField || op.op == Op::ClearIndex || op.op == Op::IndexSet ||
             ((op.op == Op::Index) && !op.boundsProven) ||
             (op.op == Op::Assert && !op.boundsProven && !op.unchecked)) {
@@ -10862,7 +10862,7 @@ inline void ifConvertUnpredictableDiamonds(FunctionIR& fn) {
             op.op == Op::BoxDyn || op.op == Op::DynCall || op.op == Op::MakeClosure || op.op == Op::ClosureCall ||
             op.op == Op::Print || op.op == Op::ArrayLit || op.op == Op::Interp || op.op == Op::Slice ||
             op.op == Op::FieldSet || op.op == Op::PlaceSet || op.op == Op::RepeatHeap ||
-            op.op == Op::RepeatRegion || op.op == Op::Clone || op.op == Op::ClearOwner ||
+            op.op == Op::RepeatRegion || op.op == Op::Clone || op.op == Op::ClearOwner || op.op == Op::Drop ||
             op.op == Op::ClearField || op.op == Op::ClearIndex ||
             op.op == Op::TileRepeat || op.op == Op::FindFirst ||
             op.op == Op::GemmF32 || op.op == Op::MatMulMod ||
@@ -11704,7 +11704,7 @@ inline void tagVectorizableAndUnrollableLoops(FunctionIR& fn) {
                         op.op == Op::BoxDyn || op.op == Op::DynCall || op.op == Op::MakeClosure || op.op == Op::ClosureCall ||
                         op.op == Op::Print || op.op == Op::ArrayLit || op.op == Op::Interp || op.op == Op::Slice ||
                         op.op == Op::FieldSet || op.op == Op::PlaceSet || op.op == Op::RepeatHeap ||
-                        op.op == Op::RepeatRegion || op.op == Op::Clone || op.op == Op::ClearOwner ||
+                        op.op == Op::RepeatRegion || op.op == Op::Clone || op.op == Op::ClearOwner || op.op == Op::Drop ||
                         op.op == Op::ClearField || op.op == Op::ClearIndex ||
                         op.op == Op::TileRepeat || op.op == Op::FindFirst ||
                         op.op == Op::GemmF32 || op.op == Op::MatMulMod ||
@@ -11749,7 +11749,7 @@ inline void tagVectorizableAndUnrollableLoops(FunctionIR& fn) {
                 op.op == Op::BoxDyn || op.op == Op::DynCall || op.op == Op::MakeClosure || op.op == Op::ClosureCall ||
                 op.op == Op::Print || op.op == Op::ArrayLit || op.op == Op::Interp || op.op == Op::Slice ||
                 op.op == Op::FieldSet || op.op == Op::PlaceSet || op.op == Op::RepeatHeap ||
-                op.op == Op::RepeatRegion || op.op == Op::Clone || op.op == Op::ClearOwner ||
+                op.op == Op::RepeatRegion || op.op == Op::Clone || op.op == Op::ClearOwner || op.op == Op::Drop ||
                 op.op == Op::ClearField || op.op == Op::ClearIndex ||
                 op.op == Op::TileRepeat || op.op == Op::FindFirst ||
                 op.op == Op::GemmF32 || op.op == Op::MatMulMod ||

@@ -403,6 +403,7 @@ struct Operation {
     bool unchecked = false;
     bool reassoc = false; // acumulación flotante `x += e`: el orden de agrupación es libre
     bool regionEnd = false; // Drop de algo que muere con su región de celdas: se puede omitir
+    bool elided = false;    // ClearOwner que solo marca la entrega de un temporal: no genera código
     bool modNoOp = false;
     std::uint8_t modSubSteps = 0; // 0 = full %, 1 = 0 <= x < 2*m, 2 = 0 <= x < 3*m
     std::int64_t lhsUpper = -1;
@@ -923,10 +924,13 @@ class Lowerer {
         const auto listed = floor <= temporaries.size()
             ? std::find(temporaries.begin() + static_cast<std::ptrdiff_t>(floor), temporaries.end(), *value.owner)
             : temporaries.end();
-        if (born != tempBlock.end() && born->second == here && listed != temporaries.end())
-            temporaries.erase(listed);
-        else
-            emit(Op::ClearOwner, Type::Void, {}, {}, *value.owner);
+        // El ClearOwner se sigue emitiendo, marcado como `elided`: los pases del optimizador lo usan
+        // como señal de que el bloque mueve un valor con dueño (sin él, el pase que convierte un `if`
+        // en selección ejecutaba sin condición el Drop del valor anterior). No genera código.
+        const bool elide = born != tempBlock.end() && born->second == here && listed != temporaries.end();
+        if (elide) temporaries.erase(listed);
+        emit(Op::ClearOwner, Type::Void, {}, {}, *value.owner);
+        if (elide) fn.blocks[here].ops.back().elided = true;
         value.owner.reset();
         return value;
     }
