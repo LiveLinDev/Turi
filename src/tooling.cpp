@@ -526,6 +526,11 @@ std::string handleMcpToolCall(const JsonVal& params, bool& outIsError) {
             return formatSource(in.source);
         }
         if (tool == "turi_fix") {
+            struct StrictScope {
+                bool previous = strictSyntax();
+                StrictScope() { strictSyntax() = true; }
+                ~StrictScope() { strictSyntax() = previous; }
+            } strictScope; // fix reescribe a la forma canónica
             std::string cur = in.source;
             SourceOverrides ov = in.overrides;
             for (unsigned edits = 0; edits < 64; ++edits) {

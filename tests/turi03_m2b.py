@@ -455,7 +455,12 @@ fn main() {
         workdir,
         "E_IMMUTABLE",
     )
-    expect_diag(cli, 'fn main() {\n    let x = "a" + 1\n}', workdir, "E_TYPE")
+    # `str + escalar` convierte el escalar con str() (como JS, Java o Kotlin); otros tipos siguen siendo error.
+    concat = workdir / "concat.turi"
+    concat.write_text('fn main() {\n    print("a" + 1 + true)\n}\n', encoding="utf-8", newline="\n")
+    concat_run = run_cmd([str(cli), "run", str(concat)])
+    assert concat_run.returncode == 0 and concat_run.stdout.strip() == "a1true", concat_run.stderr
+    expect_diag(cli, 'fn main() {\n    let x = "a" + [1]\n}', workdir, "E_TYPE")
     expect_diag(cli, 'fn main() {\n    print(sbNew() == sbNew())\n}', workdir, "E_EQUALITY")
     expect_diag(cli, 'fn main() {\n    print(parseInt(123))\n}', workdir, "E_TYPE")
     expect_diag(cli, 'struct S { x: int }\nfn main() {\n    print(str(S { x: 1 }))\n}', workdir, "E_TYPE")

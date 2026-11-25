@@ -2,8 +2,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <iosfwd>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -13,6 +15,25 @@
 namespace veloz {
 // UTF-8 byte offsets, half-open. file indexes Program::files in a project.
 struct Span { std::size_t start = 0, end = 0, file = 0; };
+// Modo estricto: solo la grafía canónica (sin `;`, `elif`, `let mut`, snake_case...) y sin inferir
+// mutabilidad. Lo usan `veloz fix` (para reescribir a la forma canónica) y `--strict` / VELOZ_STRICT=1.
+// Por defecto el front-end es tolerante: acepta lo que solo tiene una lectura posible.
+inline bool envEnabled(const char* name) {
+#ifdef _WIN32
+    char* env = nullptr;
+    std::size_t length = 0;
+    const bool on = !_dupenv_s(&env, &length, name) && env && env[0] == '1';
+    std::free(env);
+    return on;
+#else
+    const char* env = std::getenv(name);
+    return env && env[0] == '1';
+#endif
+}
+inline bool& strictSyntax() {
+    static bool strict = envEnabled("VELOZ_STRICT");
+    return strict;
+}
 struct Edit { Span span; std::string replacement; };
 struct Diagnostic : std::exception {
     std::string id, message;
@@ -315,6 +336,20 @@ struct Program {
         Type result = Type::Void;
     };
     std::vector<Function> functions;
+    // Tipos T para los que el programa modifica alguna celda Shared<T> en su sitio (sharedSet o
+    // sharedUpdate). El contenido de las demás celdas no cambia nunca tras crearlas, así que se
+    // puede leer prestado sin copiarlo.
+    std::vector<Type> mutatedCells;
+    bool anyCellMutated = false;
+    // Análisis de regiones de celdas (native_ir.hpp), calculado una vez por programa.
+    mutable std::shared_ptr<void> cellRegionCache;
+    mutable std::size_t cellRegionCacheFns = 0;
+    bool cellMutated(Type elem) const {
+        if (anyCellMutated) return true;
+        for (Type t : mutatedCells)
+            if (t == elem) return true;
+        return false;
+    }
     std::vector<std::string> typeNames;
     std::vector<std::pair<Type, Type>> arrayElems;
     std::vector<TypeApp> typeApps;
@@ -701,6 +736,8 @@ struct Program {
     }
 };
 Program parse(std::string_view source);
+// Tipos del programa que se guardan en celdas porque se contienen a sí mismos (semantics.cpp).
+std::vector<std::string> recursiveTypeNames(const Program& program);
 void parseInto(Program& program, std::string_view source, std::string_view module, std::size_t file);
 void check(Program& program); // throws Diagnostic; populates Expr::type
 struct Limits { std::uint64_t steps = 10000000; unsigned depth = 256; };

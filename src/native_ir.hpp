@@ -39,10 +39,322 @@ inline bool needsDropType(const Program& program, Type t) {
     return check(check, t);
 }
 
+// ---- Regiones de celdas ---------------------------------------------------------------------
+// Una celda es la caja del montón de un campo recursivo (Shared<T>). Un árbol que se crea y se
+// consume dentro de una vuelta de bucle no necesita liberarse nodo a nodo: sus celdas se reservan
+// en una región y la región entera se suelta de golpe al acabar la vuelta. Para que eso sea
+// seguro, nada creado dentro puede seguir vivo fuera y nada de fuera puede quedar retenido dentro.
+
+// ¿Un valor de este tipo no puede contener ninguna celda? Ante la duda, false.
+inline bool holdsNoCells(const Program& program, Type t) {
+    std::unordered_set<Type> seen;
+    auto check = [&](auto& self, Type tp) -> bool {
+        if (tp == Type::Unknown) return false;
+        if (tp == Type::Void || tp == Type::Bool || tp == Type::Str || tp == Type::StringBuilder ||
+            tp == Type::IntArray || Program::isNumericType(tp)) return true;
+        if (program.isShared(tp) || program.isDyn(tp) || program.isFn(tp) || program.isPool(tp) ||
+            program.isTask(tp) || program.isFrozen(tp) || program.isAtomic(tp) || program.isRingQueue(tp) ||
+            program.isAnyPtr(tp) || program.isHandle(tp) || Program::isPrimitiveResource(tp)) return false;
+        if (program.isArray(tp)) return self(self, program.elemOf(tp));
+        if (program.isMap(tp)) return self(self, program.mapKey(tp)) && self(self, program.mapVal(tp));
+        if (program.isSet(tp)) return self(self, program.setElem(tp));
+        if (program.isSimd(tp)) return true;
+        if (tp < Type::NamedBase) return false;
+        const auto* decl = program.declaration(tp);
+        if (!decl) return false;
+        if (!seen.insert(tp).second) return true;
+        for (const auto& v : decl->variants)
+            for (const auto& f : v.fields)
+                if (!self(self, f.type)) return false;
+        return true;
+    };
+    return check(check, t);
+}
+
+struct CellRegionInfo {
+    std::unordered_set<std::string> safe;          // funciones que pueden ejecutarse dentro de una región
+    std::unordered_set<std::string> allocs;        // funciones que crean celdas, ellas o lo que llaman
+    std::unordered_map<std::string, bool> userFns; // función del usuario -> ¿es externa (C)?
+};
+
+template <class OnExpr, class OnStmt>
+void walkAst(const Expr& e, OnExpr& onExpr, OnStmt& onStmt);
+template <class OnExpr, class OnStmt>
+void walkAst(const std::vector<Stmt>& body, OnExpr& onExpr, OnStmt& onStmt) {
+    for (const auto& s : body) {
+        onStmt(s);
+        for (const auto& e : s.exprs) walkAst(e, onExpr, onStmt);
+        walkAst(s.body, onExpr, onStmt);
+        walkAst(s.otherwise, onExpr, onStmt);
+        for (const auto& arm : s.arms) {
+            walkAst(arm.body, onExpr, onStmt);
+            if (arm.resultExpr) walkAst(*arm.resultExpr, onExpr, onStmt);
+        }
+    }
+}
+template <class OnExpr, class OnStmt>
+void walkAst(const Expr& e, OnExpr& onExpr, OnStmt& onStmt) {
+    onExpr(e);
+    for (const auto& a : e.args) walkAst(a, onExpr, onStmt);
+    if (e.matchExpr) {
+        walkAst(e.matchExpr->scrutinee, onExpr, onStmt);
+        for (const auto& arm : e.matchExpr->arms) {
+            walkAst(arm.body, onExpr, onStmt);
+            if (arm.resultExpr) walkAst(*arm.resultExpr, onExpr, onStmt);
+        }
+    }
+    if (e.closure) walkAst(e.closure->body, onExpr, onStmt);
+    if (e.ifExpr) {
+        walkAst(e.ifExpr->condition, onExpr, onStmt);
+        walkAst(e.ifExpr->thenBody, onExpr, onStmt);
+        if (e.ifExpr->thenResult) walkAst(*e.ifExpr->thenResult, onExpr, onStmt);
+        walkAst(e.ifExpr->elseBody, onExpr, onStmt);
+        if (e.ifExpr->elseResult) walkAst(*e.ifExpr->elseResult, onExpr, onStmt);
+    }
+}
+
+// ¿Puede este programa ejecutar código Turi en más de un hilo? Lo hace si lanza tareas, si entrega
+// punteros a función a código C o si exporta funciones que C puede llamar desde donde quiera.
+inline bool programMayUseThreads(const Program& program) {
+    bool threads = false;
+    auto onExpr = [&](const Expr& e) {
+        if (e.kind == ExprKind::Call &&
+            (e.text == "taskSpawn" || e.text == "taskSpawnMove" || e.text == "parallelMap" ||
+             e.text == "taskScope" || e.text == "fnPtr"))
+            threads = true;
+    };
+    auto onStmt = [](const Stmt&) {};
+    for (const auto& f : program.functions) {
+        if (f.isExternC && !f.isExternDecl) return true;
+        walkAst(f.body, onExpr, onStmt);
+    }
+    return threads;
+}
+
+// Operaciones integradas que no sacan una celda de la región ni meten una de fuera: aritmética,
+// texto, colecciones y celdas. Lo que no está aquí (hilos, canales, punteros, cierres, FFI,
+// archivos) impide usar una región.
+inline bool cellRegionBuiltin(const std::string& name) {
+    static const std::unordered_set<std::string> ok{
+        "Some", "None", "Ok", "Err", "abs", "argAt", "argsCount", "bswap", "cap", "ceil", "clear", "clockNs",
+        "clz", "cos", "ctz", "float", "floor", "int", "isErr", "isInf", "isNaN", "isNone", "isOk", "isSome",
+        "len", "mapDel", "mapGet", "mapHas", "mapKeys", "mapNew", "mapSet", "mapValues", "mapWithCap", "max",
+        "min", "ord", "parseFloat", "parseInt", "pop", "popcnt", "pow", "push", "repeat", "reserve", "rotl",
+        "rotr", "round", "saturatingAdd", "saturatingMul", "saturatingSub", "sbClear", "sbNew", "sbPush",
+        "sbPushByte", "sbPushFloat", "sbPushInt", "sbStr", "sbTake", "sbWithCap", "setAdd", "setDel",
+        "setHas", "setItems", "setNew", "setWithCap", "sharedGet", "sharedNew", "sin", "sort", "sortStable",
+        "sqrt", "str", "strContains", "strEndsWith", "strFromByte", "strIndexOf", "strStartsWith",
+        "tryParseFloat", "tryParseInt", "unwrapOr", "wrappingAdd", "wrappingMul", "wrappingSub",
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
+        "eprint", "write", "ewrite", "flush", "writeByte"};
+    return ok.contains(name);
+}
+
+// Lo que un trozo de código hace respecto a las celdas: a quién llama, si crea celdas y si
+// contiene algo que impide una región.
+struct CellRegionScan {
+    std::vector<std::string> calls;
+    bool allocs = false;
+    bool blocked = false;
+};
+inline CellRegionScan scanCellRegion(const std::vector<Stmt>& body,
+                                     const std::unordered_map<std::string, bool>& userFns) {
+    CellRegionScan scan;
+    auto onExpr = [&](const Expr& e) {
+        if (e.isResourceMove) scan.blocked = true;
+        switch (e.kind) {
+        case ExprKind::Call: {
+            if (auto it = userFns.find(e.text); it != userFns.end()) {
+                if (it->second) scan.blocked = true;
+                else scan.calls.push_back(e.text);
+            } else if (!cellRegionBuiltin(e.text)) {
+                scan.blocked = true;
+            } else if (e.text == "sharedNew") {
+                scan.allocs = true;
+            }
+            break;
+        }
+        case ExprKind::MethodCall: case ExprKind::AssocCall: case ExprKind::DynCall: case ExprKind::BoxDyn:
+        case ExprKind::Closure: case ExprKind::ClosureCall:
+            scan.blocked = true;
+            break;
+        default:
+            break;
+        }
+    };
+    auto onStmt = [&](const Stmt& s) {
+        if (s.kind == StmtKind::SafetyBlock) scan.blocked = true;
+    };
+    walkAst(body, onExpr, onStmt);
+    return scan;
+}
+
+inline std::shared_ptr<const CellRegionInfo> cellRegionInfo(const Program& program) {
+    if (program.cellRegionCache && program.cellRegionCacheFns == program.functions.size())
+        return std::static_pointer_cast<const CellRegionInfo>(program.cellRegionCache);
+    auto info = std::make_shared<CellRegionInfo>();
+    for (const auto& f : program.functions)
+        if (!f.isTest) info->userFns.emplace(f.name, f.isExternC || f.isExternDecl);
+    std::unordered_map<std::string, CellRegionScan> scans;
+    for (const auto& f : program.functions) {
+        if (f.isTest || f.isExternC || f.isExternDecl || scans.contains(f.name)) continue;
+        auto scan = scanCellRegion(f.body, info->userFns);
+        if (!scan.blocked) info->safe.insert(f.name);
+        if (scan.allocs) info->allocs.insert(f.name);
+        scans.emplace(f.name, std::move(scan));
+    }
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (const auto& [name, scan] : scans) {
+            if (info->safe.contains(name)) {
+                for (const auto& callee : scan.calls) {
+                    if (!info->safe.contains(callee)) { info->safe.erase(name); changed = true; break; }
+                }
+            }
+            if (!info->allocs.contains(name)) {
+                for (const auto& callee : scan.calls) {
+                    if (info->allocs.contains(callee)) { info->allocs.insert(name); changed = true; break; }
+                }
+            }
+        }
+    }
+    program.cellRegionCache = info;
+    program.cellRegionCacheFns = program.functions.size();
+    return info;
+}
+
+// ---- Resultado construido en su celda ---------------------------------------------------------
+// `Node { left: Some(build(d - 1)), ... }` guarda en una celda lo que `build` devuelve. Devolver el
+// valor (por memoria si no cabe en dos registros), releerlo y copiarlo a la celda son tres pasadas por
+// los mismos bytes. Para cada función cuyo resultado alguien mete directamente en una celda se genera
+// una variante `f.cell` que reserva la celda, construye el resultado dentro y devuelve el puntero.
+// Las llamadas `sharedNew(f(...))` pasan a ser `f.cell(...)`. La función original no cambia.
+inline void wrapReturnsInCell(Expr& e, Type cellT);
+inline void wrapReturnsInCell(std::vector<Stmt>& body, Type cellT) {
+    for (auto& s : body) {
+        for (auto& e : s.exprs) wrapReturnsInCell(e, cellT);
+        if (s.kind == StmtKind::Return && !s.exprs.empty()) {
+            Expr inner = std::move(s.exprs[0]);
+            Expr call{ExprKind::Call, inner.span, "sharedNew", {}};
+            call.args.push_back(std::move(inner));
+            call.type = cellT;
+            s.exprs[0] = std::move(call);
+        }
+        wrapReturnsInCell(s.body, cellT);
+        wrapReturnsInCell(s.otherwise, cellT);
+        for (auto& arm : s.arms) {
+            wrapReturnsInCell(arm.body, cellT);
+            if (arm.resultExpr) wrapReturnsInCell(*arm.resultExpr, cellT);
+        }
+    }
+}
+inline void wrapReturnsInCell(Expr& e, Type cellT) {
+    // Las closures tienen sus propios `return`: no se entra en ellas.
+    for (auto& a : e.args) wrapReturnsInCell(a, cellT);
+    if (e.matchExpr) {
+        wrapReturnsInCell(e.matchExpr->scrutinee, cellT);
+        for (auto& arm : e.matchExpr->arms) {
+            wrapReturnsInCell(arm.body, cellT);
+            if (arm.resultExpr) wrapReturnsInCell(*arm.resultExpr, cellT);
+        }
+    }
+    if (e.ifExpr) {
+        wrapReturnsInCell(e.ifExpr->condition, cellT);
+        wrapReturnsInCell(e.ifExpr->thenBody, cellT);
+        if (e.ifExpr->thenResult) wrapReturnsInCell(*e.ifExpr->thenResult, cellT);
+        wrapReturnsInCell(e.ifExpr->elseBody, cellT);
+        if (e.ifExpr->elseResult) wrapReturnsInCell(*e.ifExpr->elseResult, cellT);
+    }
+}
+
+template <class OnExpr>
+void rewriteExprs(Expr& e, OnExpr& onExpr);
+template <class OnExpr>
+void rewriteExprs(std::vector<Stmt>& body, OnExpr& onExpr) {
+    for (auto& s : body) {
+        for (auto& e : s.exprs) rewriteExprs(e, onExpr);
+        rewriteExprs(s.body, onExpr);
+        rewriteExprs(s.otherwise, onExpr);
+        for (auto& arm : s.arms) {
+            rewriteExprs(arm.body, onExpr);
+            if (arm.resultExpr) rewriteExprs(*arm.resultExpr, onExpr);
+        }
+    }
+}
+template <class OnExpr>
+void rewriteExprs(Expr& e, OnExpr& onExpr) {
+    for (auto& a : e.args) rewriteExprs(a, onExpr);
+    if (e.matchExpr) {
+        rewriteExprs(e.matchExpr->scrutinee, onExpr);
+        for (auto& arm : e.matchExpr->arms) {
+            rewriteExprs(arm.body, onExpr);
+            if (arm.resultExpr) rewriteExprs(*arm.resultExpr, onExpr);
+        }
+    }
+    if (e.ifExpr) {
+        rewriteExprs(e.ifExpr->condition, onExpr);
+        rewriteExprs(e.ifExpr->thenBody, onExpr);
+        if (e.ifExpr->thenResult) rewriteExprs(*e.ifExpr->thenResult, onExpr);
+        rewriteExprs(e.ifExpr->elseBody, onExpr);
+        if (e.ifExpr->elseResult) rewriteExprs(*e.ifExpr->elseResult, onExpr);
+    }
+    if (e.closure) rewriteExprs(e.closure->body, onExpr);
+    onExpr(e);
+}
+
+inline void addCellVariants(Program& program) {
+    if (envEnabled("VELOZ_NO_CELL_RETURN")) return;
+    std::unordered_map<std::string, std::size_t> byName;
+    for (std::size_t i = 0; i < program.functions.size(); ++i)
+        if (!program.functions[i].isTest) byName.emplace(program.functions[i].name, i);
+    const auto eligible = [&](const Expr& e) -> const Function* {
+        if (e.kind != ExprKind::Call || e.text != "sharedNew" || e.args.size() != 1) return nullptr;
+        if (byName.contains("sharedNew")) return nullptr;
+        const Expr& call = e.args[0];
+        if (call.kind != ExprKind::Call) return nullptr;
+        const auto found = byName.find(call.text);
+        if (found == byName.end()) return nullptr;
+        const Function& f = program.functions[found->second];
+        if (f.isExternC || f.isExternDecl || f.isImpl || !f.generics.empty() || !f.ensuresClauses.empty() ||
+            f.name == "main" || f.result != call.type || !program.declaration(f.result) ||
+            !program.isShared(e.type) || program.sharedElem(e.type) != f.result)
+            return nullptr;
+        if (call.args.size() != f.params.size()) return nullptr;
+        for (const auto& a : call.args)
+            if (a.isMutArg) return nullptr;
+        return &f;
+    };
+    std::unordered_map<std::string, Type> wanted; // función -> tipo de su celda
+    auto collect = [&](Expr& e) {
+        if (const Function* f = eligible(e)) wanted.emplace(f->name, e.type);
+    };
+    for (auto& f : program.functions) rewriteExprs(f.body, collect);
+    if (wanted.empty()) return;
+    for (const auto& [name, cellT] : wanted) {
+        if (byName.contains(name + ".cell")) continue;
+        Function variant = program.functions[byName.at(name)];
+        variant.name = name + ".cell";
+        variant.sourceName = variant.sourceName + ".cell";
+        variant.result = cellT;
+        wrapReturnsInCell(variant.body, cellT);
+        program.functions.push_back(std::move(variant));
+    }
+    auto redirect = [&](Expr& e) {
+        const Function* f = eligible(e);
+        if (!f || !wanted.contains(f->name)) return;
+        Expr call = std::move(e.args[0]);
+        call.text = f->name + ".cell";
+        call.type = wanted.at(f->name);
+        e = std::move(call);
+    };
+    for (auto& f : program.functions) rewriteExprs(f.body, redirect);
+}
+
 struct Value {
     Type type; unsigned id;
     std::optional<unsigned> owner{}; // slot that can transfer its heap allocation
     bool freshRegion = false;
+    bool immortal = false; // celda constante compartida: se usa sin contar referencias
 };
 enum class Op {
     Int, Float, Bool, Text, ArrayLit, Interp, Slice, Load, Store, Call, ExternCall, FnPtr, Builtin, BoxDyn, DynCall, MakeClosure, ClosureCall, Length, Negate, Not, BitNot, Binary, Print, Assert,
@@ -55,6 +367,7 @@ struct PlaceStepIR {
     bool isIndex = false;
     unsigned fieldIdx = 0;
     unsigned idxSlot = 0;
+    bool boundsProven = false; // índice demostrado dentro de rango: sin guarda R_BOUNDS
 };
 enum class ProofKind : std::uint8_t {
     None,
@@ -88,6 +401,8 @@ struct Operation {
     int aliasGroup = -1;
     int loopAccessGroup = -1;
     bool unchecked = false;
+    bool reassoc = false; // acumulación flotante `x += e`: el orden de agrupación es libre
+    bool regionEnd = false; // Drop de algo que muere con su región de celdas: se puede omitir
     bool modNoOp = false;
     std::uint8_t modSubSteps = 0; // 0 = full %, 1 = 0 <= x < 2*m, 2 = 0 <= x < 3*m
     std::int64_t lhsUpper = -1;
@@ -131,9 +446,13 @@ class Lowerer {
         std::unordered_map<std::string, unsigned> names;
         std::vector<unsigned> arrays;
         std::optional<Value> mark;
+        std::optional<Value> cellMark; // región de celdas abierta por este ámbito
+        std::size_t cellLoopDepth = 0; // bucles abiertos cuando se abrió la región
     };
     std::vector<Scope> scopes{1};
     std::vector<unsigned> temporaries;
+    std::unordered_map<unsigned, unsigned> tempBlock; // temporal -> bloque donde se creó
+    std::optional<unsigned> movedSlot;                // variable que un `return` acaba de entregar
     std::size_t tempFloor = 0;
     std::unordered_map<const Expr*, Value> forwardedReads;
     std::unordered_set<std::string> reassigned;
@@ -538,6 +857,26 @@ class Lowerer {
         fn.blocks[here].ops.back().fields = std::move(path);
         return result;
     }
+    // Valor cuyos bits son todos cero: 0, false, la primera variante sin campos de un enum (None) y
+    // los structs hechos solo de eso.
+    bool zeroConst(const Expr& e) const {
+        if (e.kind == ExprKind::Integer) return e.text == "0";
+        if (e.kind == ExprKind::Boolean) return e.text == "false";
+        if (e.kind != ExprKind::Construct) return false;
+        const auto* decl = program.declaration(e.type);
+        if (!decl) return false;
+        if (decl->isEnum && (!e.args.empty() || variantOf(*decl, e.text) != 0)) return false;
+        for (const auto& a : e.args)
+            if (!zeroConst(a)) return false;
+        return true;
+    }
+    // La celda compartida lleva un contador que no es atómico: solo en programas de un hilo.
+    std::optional<bool> zeroCellsMemo;
+    bool zeroCellsAllowed() {
+        if (!zeroCellsMemo)
+            zeroCellsMemo = !envEnabled("VELOZ_NO_ZERO_CELLS") && !programMayUseThreads(program);
+        return *zeroCellsMemo;
+    }
     Value construct(const Expr& e) {
         const auto& decl = *program.declaration(e.type);
         const auto tag = decl.isEnum ? variantOf(decl, e.text) : 0;
@@ -550,19 +889,44 @@ class Lowerer {
     Value load(unsigned slot) { return emit(Op::Load, fn.slots.at(slot), {}, {}, slot); }
     void store(unsigned slot, Value value) { emit(Op::Store, Type::Void, {value}, {}, slot); }
     void drop(unsigned slot) { emit(Op::Drop, Type::Void, {}, {}, slot); }
+    // Dentro de una región de celdas, lo que muere fuera de un bucle interior no hace falta soltarlo:
+    // la región entera se libera al salir. Dentro de un bucle interior sí se suelta, para que su
+    // memoria se reutilice y no crezca con el número de vueltas. El generador omite el Drop solo si
+    // el tipo no posee nada más que celdas de región.
+    bool dropsDieWithRegion() const {
+        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it)
+            if (it->cellMark) return loopTargets.size() == it->cellLoopDepth;
+        return false;
+    }
+    void scopeDrop(unsigned slot) {
+        drop(slot);
+        if (dropsDieWithRegion()) fn.blocks[here].ops.back().regionEnd = true;
+    }
     Value track(Value value) {
-        if (needsDrop(value.type) && !value.freshRegion) {
+        if (needsDrop(value.type) && !value.freshRegion && !value.immortal) {
             const auto slot = allocate(value.type);
             store(slot, value);
             temporaries.push_back(slot);
+            tempBlock[slot] = here;
             value.owner = slot;
         }
         return value;
     }
     Value own(Value value, Span span) {
-        if (!needsDrop(value.type) || value.freshRegion) return value;
+        if (!needsDrop(value.type) || value.freshRegion || value.immortal) return value;
         if (!value.owner) return emit(Op::Clone, value.type, {value}, {}, 0, span);
-        emit(Op::ClearOwner, Type::Void, {}, {}, *value.owner);
+        // Un temporal que se entrega en el mismo bloque donde nació ya no hay que soltarlo en
+        // ningún camino: se quita de la lista en vez de vaciarlo y soltarlo vacío después.
+        std::size_t floor = tempFloor;
+        for (const auto& lt : loopTargets) floor = std::max(floor, lt.tempCount);
+        const auto born = tempBlock.find(*value.owner);
+        const auto listed = floor <= temporaries.size()
+            ? std::find(temporaries.begin() + static_cast<std::ptrdiff_t>(floor), temporaries.end(), *value.owner)
+            : temporaries.end();
+        if (born != tempBlock.end() && born->second == here && listed != temporaries.end())
+            temporaries.erase(listed);
+        else
+            emit(Op::ClearOwner, Type::Void, {}, {}, *value.owner);
         value.owner.reset();
         return value;
     }
@@ -575,6 +939,7 @@ class Lowerer {
         for (const auto& scope : scopes) {
             if (std::ranges::find(scope.arrays, slot) != scope.arrays.end()) {
                 value.owner = slot;
+                movedSlot = slot;
                 break;
             }
         }
@@ -582,7 +947,7 @@ class Lowerer {
     }
     void dropTemporaries() {
         while (temporaries.size() > tempFloor) {
-            drop(temporaries.back());
+            scopeDrop(temporaries.back());
             temporaries.pop_back();
         }
     }
@@ -600,8 +965,12 @@ class Lowerer {
         }
     }
     void release(const Scope& scope) {
-        for (auto it = scope.arrays.rbegin(); it != scope.arrays.rend(); ++it) drop(*it);
+        for (auto it = scope.arrays.rbegin(); it != scope.arrays.rend(); ++it) {
+            if (movedSlot && *it == *movedSlot) continue; // ya entregada al que llama
+            scopeDrop(*it);
+        }
         if (scope.mark) emit(Op::RegionRewind, Type::Void, {*scope.mark});
+        if (scope.cellMark) emit(Op::Builtin, Type::Void, {*scope.cellMark}, "cellLeave");
     }
     void cleanupReturn() {
         emitTemporaryDropsDownTo(0);
@@ -634,6 +1003,76 @@ class Lowerer {
         jump(end);
         here = end;
         return load(slot);
+    }
+    // Lectura sin efectos: como `callFree`, pero puede atravesar celdas que nunca se modifican.
+    bool pureRead(const Expr& e) const {
+        if (callFree(e)) return true;
+        if (e.kind == ExprKind::Field || e.kind == ExprKind::Index) {
+            for (const auto& a : e.args)
+                if (!pureRead(a)) return false;
+            return true;
+        }
+        return borrowsCell(e);
+    }
+    // `sharedGet(x)` cuyo contenido se puede prestar en vez de copiar: `x` es una lectura sin
+    // efectos y el programa no modifica en su sitio ninguna celda de ese tipo.
+    bool borrowsCell(const Expr& e) const {
+        return e.kind == ExprKind::Call && e.text == "sharedGet" && e.args.size() == 1 &&
+               program.isShared(e.args[0].type) && !program.cellMutated(program.sharedElem(e.args[0].type)) &&
+               pureRead(e.args[0]);
+    }
+    // Contenido de una celda sin copiarlo ni tomar posesión: quien necesite conservarlo lo clona.
+    Value sharedPeek(const Expr& get) {
+        const Value cell = expression(get.args[0]);
+        return emit(Op::Builtin, get.type, {cell}, "sharedPeek", 0, get.span);
+    }
+    // Sitio que no cambia mientras viva su variable: una variable que la función nunca reasigna ni
+    // presta con `mut`, sus campos, y las celdas inmutables que cuelgan de ella.
+    bool stablePlace(const Expr& e) const {
+        if (e.kind == ExprKind::Name) return !reassigned.contains(e.text) && findSlot(e.text).has_value();
+        if (e.kind == ExprKind::Field) return e.args.size() == 1 && stablePlace(e.args[0]);
+        return borrowsCell(e) && stablePlace(e.args[0]);
+    }
+    // Expresión sin llamadas ni efectos: literales, nombres y aritmética, campos, índices y cortes sobre ellos.
+    static bool callFree(const Expr& e) {
+        switch (e.kind) {
+        case ExprKind::Integer: case ExprKind::Float: case ExprKind::Boolean: case ExprKind::String:
+        case ExprKind::Name:
+            return true;
+        case ExprKind::Unary: case ExprKind::Binary: case ExprKind::Field: case ExprKind::Index: case ExprKind::Slice:
+            for (const auto& a : e.args)
+                if (!callFree(a)) return false;
+            return true;
+        default:
+            return false;
+        }
+    }
+    static bool sameExpr(const Expr& a, const Expr& b) {
+        if (a.kind != b.kind || a.text != b.text || a.args.size() != b.args.size()) return false;
+        for (std::size_t i = 0; i < a.args.size(); ++i)
+            if (!sameExpr(a.args[i], b.args[i])) return false;
+        return true;
+    }
+    // Reconoce `mapSet(m, k, unwrapOr(mapGet(m, k), 0) op d)` con valor int o float de 64 bits.
+    // Devuelve `d`, o nullptr si no es esa forma.
+    const Expr* mapUpdateDelta(const Expr& e) const {
+        if (e.text != "mapSet" || e.args.size() != 3 || e.args[0].kind != ExprKind::Name) return nullptr;
+        const Type vt = program.mapVal(e.args[0].type);
+        if (vt != Type::Int && vt != Type::Float) return nullptr;
+        const Expr& value = e.args[2];
+        if (value.kind != ExprKind::Binary || value.args.size() != 2 ||
+            (value.text != "+" && value.text != "-" && value.text != "*")) return nullptr;
+        const Expr& current = value.args[0];
+        if (current.kind != ExprKind::Call || current.text != "unwrapOr" || current.args.size() != 2) return nullptr;
+        const Expr& get = current.args[0];
+        const Expr& zero = current.args[1];
+        if (get.kind != ExprKind::Call || get.text != "mapGet" || get.args.size() != 2) return nullptr;
+        if (get.args[0].kind != ExprKind::Name || get.args[0].text != e.args[0].text) return nullptr;
+        const bool isZero = (zero.kind == ExprKind::Integer && zero.text == "0") ||
+                            (zero.kind == ExprKind::Float && (zero.text == "0.0" || zero.text == "0"));
+        if (!isZero || !sameExpr(get.args[1], e.args[1])) return nullptr;
+        if (!callFree(e.args[1]) || !callFree(value.args[1])) return nullptr;
+        return &value.args[1];
     }
     struct Repetition { Value array, element; };
     Repetition repeat(const Expr& e, bool initialize) {
@@ -755,7 +1194,8 @@ class Lowerer {
             return res;
         }
         case ExprKind::Field: {
-            const auto base = expression(e.args.at(0));
+            // Leer un campo a través de una celda no necesita copiar el valor entero de la celda.
+            const auto base = borrowsCell(e.args.at(0)) ? sharedPeek(e.args.at(0)) : expression(e.args.at(0));
             return field(base, e.type, {static_cast<unsigned>(e.fieldIndices.at(0))});
         }
         case ExprKind::Unary: {
@@ -814,6 +1254,15 @@ class Lowerer {
                 std::vector<std::vector<PlaceStepIR>> mutPaths(e.args.size());
                 bool anyMut = false;
                 arguments.reserve(e.args.size());
+                // Un parámetro por valor es un préstamo de solo lectura. Si el argumento sale de una
+                // celda y nada en esta llamada puede modificarla (sin argumentos `mut` ni otras
+                // llamadas entre los argumentos), se presta el contenido de la celda sin copiarlo.
+                bool canPeek = true;
+                for (std::size_t i = 0; i < e.args.size(); ++i) {
+                    if (i >= callee->params.size() || callee->params[i].byRef ||
+                        !(callFree(e.args[i]) || borrowsCell(e.args[i])))
+                        canPeek = false;
+                }
                 for (std::size_t i = 0; i < e.args.size(); ++i) {
                     if (i < callee->params.size() && callee->params[i].byRef) {
                         anyMut = true;
@@ -821,6 +1270,8 @@ class Lowerer {
                         mutArgs[i] = cSlot;
                         mutPaths[i] = std::move(pSteps);
                         arguments.push_back(Value{e.args[i].type, nextValue++});
+                    } else if (canPeek && borrowsCell(e.args[i]) && !callee->params[i].writable) {
+                        arguments.push_back(sharedPeek(e.args[i]));
                     } else {
                         arguments.push_back(expression(e.args[i]));
                     }
@@ -894,6 +1345,24 @@ class Lowerer {
                 e.text == "taskSpawn" || e.text == "taskSpawnMove" ||
                 e.text == "ptrOf" || e.text == "mutPtrOf" || e.text == "mutSlicePtr" ||
                 e.text == "regionAlloc" || e.text == "regionAllocAligned" || e.text == "regionReset") {
+                if (const Expr* delta = mapUpdateDelta(e)) {
+                    // mapSet(m, k, mapGet(m, k).unwrapOr(0) op d): leer y escribir la misma clave es una
+                    // sola búsqueda. `k` y `d` son expresiones sin llamadas, así que el orden no se nota.
+                    std::vector<unsigned> mutArgs(3, ~0u);
+                    std::vector<std::vector<PlaceStepIR>> mutPaths(3);
+                    auto [mSlot, mSteps] = resolveMutArg(e.args[0]);
+                    mutArgs[0] = mSlot;
+                    mutPaths[0] = std::move(mSteps);
+                    std::vector<Value> arguments;
+                    arguments.push_back(Value{e.args[0].type, nextValue++});
+                    arguments.push_back(expression(e.args[1]));
+                    arguments.push_back(expression(*delta));
+                    auto value = emit(Op::Builtin, e.type, std::move(arguments), "mapUpdate" + e.args[2].text, 0, e.span);
+                    auto& op = fn.blocks[here].ops.back();
+                    op.mutArgSlots = std::move(mutArgs);
+                    op.mutArgPaths = std::move(mutPaths);
+                    return track(value);
+                }
                 std::vector<Value> arguments;
                 std::vector<unsigned> mutArgs(e.args.size(), ~0u);
                 std::vector<std::vector<PlaceStepIR>> mutPaths(e.args.size());
@@ -936,6 +1405,14 @@ class Lowerer {
                 op.unchecked = (curSafety == SafetyTier::Raw);
                 if (op.unchecked) op.proofKind = ProofKind::RawUnchecked;
                 return track(value);
+            }
+            if (e.text == "sharedNew" && zeroConst(e.args[0]) && zeroCellsAllowed()) {
+                // Una celda no tiene identidad: todas las que guardan la misma constante pueden ser la
+                // misma. Para un contenido todo ceros (`Node { left: None, right: None }`, la hoja de
+                // cualquier árbol) se usa una única celda estática que nunca se libera.
+                Value cell = emit(Op::Builtin, e.type, {}, "sharedZero", 0, e.span);
+                cell.immortal = true;
+                return cell;
             }
             if (e.text == "sharedNew" || e.text == "freeze" || e.text == "taskJoin") {
                 const Value inner = own(expression(e.args[0]), e.args[0].span);
@@ -1150,12 +1627,90 @@ class Lowerer {
                     continue;
                 }
             }
+            // Una sentencia suelta que crea celdas y no deja ninguna viva (`print(check(build(n)))`,
+            // `total += check(build(n))`) tiene su propia región, igual que la vuelta de un bucle.
+            if ((stmt.kind == StmtKind::Print || stmt.kind == StmtKind::Call || stmt.kind == StmtKind::Assign) &&
+                statementRegionFits(stmt)) {
+                scopes.emplace_back();
+                scopes.back().cellMark = emit(Op::Builtin, Type::Int, {}, "cellEnter", 0, stmt.span);
+                scopes.back().cellLoopDepth = loopTargets.size();
+                statement(stmt);
+                dropTemporaries();
+                if (fn.blocks[here].exit == Exit::Open) release(scopes.back());
+                scopes.pop_back();
+                continue;
+            }
             statement(stmt);
             dropTemporaries();
         }
     }
-    void nested(const std::vector<Stmt>& statements) {
+    bool statementRegionFits(const Stmt& stmt) const {
+        if (program.anyCellMutated || !program.mutatedCells.empty()) return false;
+        if (cellRegionInfo(program)->allocs.empty()) return false;
+        for (const auto& scope : scopes)
+            if (scope.cellMark) return false; // ya hay una región abierta alrededor
+        const std::vector<Stmt> one{stmt};
+        return cellRegionFits(one);
+    }
+    // ¿El cuerpo de este bucle puede tener su propia región de celdas? Hace falta que:
+    //  - cree celdas (si no, no hay nada que ganar);
+    //  - todo lo que ejecuta sea seguro para una región (`CellRegionInfo::safe`);
+    //  - no nombre ninguna variable de fuera que pueda contener celdas: así ni se escapa una celda
+    //    de la región a una variable que la sobrevive, ni una celda de la región retiene una vieja;
+    //  - no pueda devolver celdas con `return` o `?` desde dentro.
+    bool cellRegionFits(const std::vector<Stmt>& body) const {
+        if (body.empty() || program.anyCellMutated || !program.mutatedCells.empty()) return false;
+        const auto info = cellRegionInfo(program);
+        if (info->allocs.empty()) return false; // el programa no crea celdas en ningún sitio
+        const auto scan = scanCellRegion(body, info->userFns);
+        if (scan.blocked) return false;
+        bool allocs = scan.allocs;
+        for (const auto& callee : scan.calls) {
+            if (!info->safe.contains(callee)) return false;
+            allocs = allocs || info->allocs.contains(callee);
+        }
+        if (!allocs) return false;
+        std::unordered_set<std::string> declared;
+        bool leaves = false, ok = true;
+        auto collectExpr = [&](const Expr& e) {
+            if (e.kind == ExprKind::Try) leaves = true;
+            if (e.matchExpr)
+                for (const auto& arm : e.matchExpr->arms)
+                    for (const auto& n : arm.names) declared.insert(n);
+        };
+        auto collectStmt = [&](const Stmt& s) {
+            if (s.kind == StmtKind::Let || s.kind == StmtKind::Var || s.kind == StmtKind::For ||
+                s.kind == StmtKind::ForEach)
+                declared.insert(s.name);
+            if (s.kind == StmtKind::Return) leaves = true;
+            for (const auto& arm : s.arms)
+                for (const auto& n : arm.names) declared.insert(n);
+        };
+        walkAst(body, collectExpr, collectStmt);
+        if (leaves && !holdsNoCells(program, fn.source.result)) return false;
+        const auto outerHoldsCells = [&](const std::string& name) {
+            const auto slot = findSlot(name);
+            return slot && !holdsNoCells(program, fn.slots.at(*slot));
+        };
+        auto checkExpr = [&](const Expr& e) {
+            if (e.kind != ExprKind::Name || holdsNoCells(program, e.type)) return;
+            if (!declared.contains(e.text) || outerHoldsCells(e.text)) ok = false;
+        };
+        auto checkStmt = [&](const Stmt& s) {
+            if (s.kind == StmtKind::Assign || s.kind == StmtKind::IndexSet || s.kind == StmtKind::FieldSet ||
+                s.kind == StmtKind::PlaceSet) {
+                if (outerHoldsCells(s.name)) ok = false;
+            }
+        };
+        walkAst(body, checkExpr, checkStmt);
+        return ok;
+    }
+    void nested(const std::vector<Stmt>& statements, bool loopBody = false) {
         scopes.emplace_back();
+        if (loopBody && cellRegionFits(statements)) {
+            scopes.back().cellMark = emit(Op::Builtin, Type::Int, {}, "cellEnter", 0, statements.front().span);
+            scopes.back().cellLoopDepth = loopTargets.size();
+        }
         markRegion(statements);
         sequence(statements);
         if (fn.blocks[here].exit == Exit::Open) release(scopes.back());
@@ -1257,6 +1812,83 @@ class Lowerer {
             release(scopes[k - 1]);
     }
 
+    // ---- Adelanto de caché en bucles de mapa ----------------------------------------------------
+    // En `for i in a..b { ... m[clave(i)] ... }` las búsquedas de vueltas distintas son independientes,
+    // pero cada una espera a que la memoria traiga su trozo de tabla. El compilador sabe qué es un mapa:
+    // al empezar cada vuelta calcula la clave de unas vueltas más adelante y pide ya sus líneas de caché.
+    // La clave adelantada se evalúa con aritmética envolvente y sin comprobaciones (solo literales,
+    // variables enteras y + - *), y el runtime descarta un corte fuera de rango: nada puede fallar por
+    // adelantar, aunque esa vuelta no llegue a ejecutarse.
+    static constexpr int kMapLookahead = 8;
+    bool wrapSafeInt(const Expr& e) const {
+        if (e.kind == ExprKind::Integer) return true;
+        if (e.kind == ExprKind::Name) return e.type == Type::Int && findSlot(e.text).has_value();
+        if (e.kind == ExprKind::Binary && e.args.size() == 2 && (e.text == "+" || e.text == "-" || e.text == "*"))
+            return e.type == Type::Int && wrapSafeInt(e.args[0]) && wrapSafeInt(e.args[1]);
+        return false;
+    }
+    Value wrapEval(const Expr& e) {
+        if (e.kind != ExprKind::Binary) return expression(e);
+        const Value a = wrapEval(e.args[0]);
+        const Value b = wrapEval(e.args[1]);
+        const char* op = e.text == "+" ? "wrappingAdd" : e.text == "-" ? "wrappingSub" : "wrappingMul";
+        return emit(Op::Builtin, Type::Int, {a, b}, op, 0, e.span);
+    }
+    static bool mentionsName(const Expr& e, const std::string& name) {
+        if (e.kind == ExprKind::Name && e.text == name) return true;
+        for (const auto& a : e.args)
+            if (mentionsName(a, name)) return true;
+        return false;
+    }
+    const Expr* lookaheadTarget(const Stmt& loop) const {
+        const Expr* found = nullptr;
+        auto onExpr = [&](const Expr& e) {
+            if (found || e.kind != ExprKind::Call || e.args.size() < 2) return;
+            if (e.text != "mapSet" && e.text != "mapGet" && e.text != "mapHas") return;
+            if (findUserFunction(e.text)) return;
+            const Expr& m = e.args[0];
+            if (m.kind != ExprKind::Name || !program.isMap(m.type) || !findSlot(m.text)) return;
+            const Expr& key = e.args[1];
+            if (!mentionsName(key, loop.name)) return;
+            const Type kt = program.mapKey(m.type);
+            if (kt == Type::Int && key.type == Type::Int && wrapSafeInt(key)) {
+                found = &e;
+            } else if (kt == Type::Str && key.kind == ExprKind::Slice && key.args.size() == 3 &&
+                       key.args[0].kind == ExprKind::Name && key.args[0].type == Type::Str &&
+                       findSlot(key.args[0].text) && wrapSafeInt(key.args[1]) && wrapSafeInt(key.args[2])) {
+                found = &e;
+            }
+        };
+        auto onStmt = [](const Stmt&) {};
+        for (const auto& st : loop.body) {
+            if (st.kind == StmtKind::While || st.kind == StmtKind::For || st.kind == StmtKind::ForEach) continue;
+            for (const auto& e : st.exprs) walkAst(e, onExpr, onStmt);
+        }
+        return found;
+    }
+    void emitMapLookahead(const Stmt& loop, unsigned iterator) {
+        if (envEnabled("VELOZ_NO_MAP_LOOKAHEAD")) return;
+        const Expr* access = lookaheadTarget(loop);
+        if (!access) return;
+        const Expr& m = access->args[0];
+        const Expr& key = access->args[1];
+        const Value table = load(lookup(m.text));
+        const unsigned ahead = allocate(Type::Int);
+        const Value distance = emit(Op::Int, Type::Int, {}, std::to_string(kMapLookahead));
+        store(ahead, emit(Op::Builtin, Type::Int, {load(iterator), distance}, "wrappingAdd"));
+        scopes.emplace_back();
+        scopes.back().names.emplace(loop.name, ahead);
+        if (key.kind == ExprKind::Slice) {
+            const Value base = load(lookup(key.args[0].text));
+            const Value lo = wrapEval(key.args[1]);
+            const Value hi = wrapEval(key.args[2]);
+            emit(Op::Builtin, Type::Void, {table, base, lo, hi}, "mapPrefetchStr");
+        } else {
+            emit(Op::Builtin, Type::Void, {table, wrapEval(key)}, "mapPrefetchInt");
+        }
+        scopes.pop_back();
+    }
+
     void loop(const Stmt& s) {
         std::unordered_set<std::string> mutated;
         collectMutRootsInBlock(s.body, mutated);
@@ -1320,7 +1952,8 @@ class Lowerer {
         }
         loopTargets.push_back({s.label, stepBlk ? *stepBlk : header, end, breakScopeCount, continueScopeCount, loopTempCount});
         beginLoopBody(s);
-        nested(s.body);
+        if (counting && s.name != "_") emitMapLookahead(s, *iterator);
+        nested(s.body, true);
         endLoopBody(s);
         loopTargets.pop_back();
         validIndices.resize(saved);
@@ -1386,7 +2019,7 @@ class Lowerer {
             store(declare(s.name, elemType), elem);
         }
         loopTargets.push_back({s.label, stepBlk ? *stepBlk : header, end, breakScopeCount, continueScopeCount, loopTempCount});
-        nested(s.body);
+        nested(s.body, true);
         loopTargets.pop_back();
         if (fn.blocks[here].exit == Exit::Open) release(scopes.back());
         scopes.pop_back();
@@ -1411,8 +2044,12 @@ class Lowerer {
                                    bool isExpr, Type exprType) {
         const std::size_t prevFloor = tempFloor;
         if (isExpr) tempFloor = temporaries.size();
-        auto candRaw = expression(scrutinee);
-        const bool ownCand = needsDrop(candRaw.type);
+        // Si lo examinado sale de un sitio que no cambia durante el match, las ramas lo toman
+        // prestado: no se copia ni se cuentan referencias. La variable de la que cuelga sigue viva
+        // y sin cambios hasta que el match termina.
+        const bool borrowed = stablePlace(scrutinee);
+        auto candRaw = borrowed && borrowsCell(scrutinee) ? sharedPeek(scrutinee) : expression(scrutinee);
+        const bool ownCand = needsDrop(candRaw.type) && !(borrowed && !candRaw.owner);
         Value candidate = candRaw;
         unsigned candSlot = 0;
         if (ownCand) {
@@ -1568,6 +2205,16 @@ class Lowerer {
             const auto slot = lookup(s.name);
             if (rhs.kind == ExprKind::Name && lookup(rhs.text) == slot) break;
             const auto v = own(expression(rhs), rhs.span);
+            // `acc += e` (también `-=` y `*=`) sobre un escalar flotante local es una reducción: Turi
+            // permite agruparla en cualquier orden, igual que el experto reparte la suma en varios
+            // acumuladores a mano. Así LLVM puede vectorizarla. El resto de operaciones conserva su orden.
+            if (Program::isFloatType(v.type) && rhs.kind == ExprKind::Binary && rhs.args.size() == 2 &&
+                (rhs.text == "+" || rhs.text == "-" || rhs.text == "*") &&
+                rhs.args[0].kind == ExprKind::Name && rhs.args[0].text == s.name) {
+                auto& ops = fn.blocks[here].ops;
+                if (!ops.empty() && ops.back().op == Op::Binary && ops.back().result.id == v.id)
+                    ops.back().reassoc = true;
+            }
             if (needsDrop(v.type)) {
                 if (v.type == Type::IntArray) arrayElementRanges.erase(slot);
                 drop(slot);
@@ -1652,6 +2299,7 @@ class Lowerer {
             if (!s.exprs.empty()) v = returned(s.exprs[0]);
             emitEnsures(v);
             cleanupReturn();
+            movedSlot.reset();
             fn.blocks[here].exit = Exit::Return;
             fn.blocks[here].value = v;
             break;

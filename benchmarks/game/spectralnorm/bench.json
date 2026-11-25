@@ -1,0 +1,1 @@
+{"args": [3000], "about": "spectral norm power iteration, O(n^2) division-heavy loops"}

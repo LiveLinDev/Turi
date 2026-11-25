@@ -1,5 +1,9 @@
 # Estado · 23 de noviembre de 2026
 
+> **24 de noviembre de 2026 · Revisión de los tres pilares.** Las comparaciones de velocidad y de IA de este archivo son anteriores a la auditoría descrita en [docs/TRES-PILARES.md](docs/TRES-PILARES.md) y no deben citarse como prueba de que Turi supera a C: dependían de entradas generadas por fórmula, de un C no experto y de pases ajustados al propio banco. Las cifras vigentes son las de `benchmarks/run.py` y `tools/aibench/run.py`, que incluyen las derrotas. El mismo documento recoge los cambios de Turi 0.9 (front-end tolerante, mutabilidad inferida, sintaxis nueva y cinco mejoras generales de rendimiento) y el orden de trabajo.
+
+> **25 de noviembre de 2026 · Turi 0.9.1.** Tuplas, tipos recursivos directos (`struct Node { left: Node?, right: Node? }` sin `Pool` ni `Handle`), lecturas prestadas, región de celdas por vuelta de bucle y liberación iterativa. Detalle en `DECISIONES.md`; lo pendiente del pilar de memoria, en el apartado M1 de [docs/DISENO.md](docs/DISENO.md).
+
 Las dos campañas completas de 100 algoritmos por CPU, los resultados Turi 0.5 (`ryzen-v05`), los contadores de memoria y las pruebas funcionales de generación se encuentran en [Resultados de Ryzen y DGX Spark](bench/amplia/RESULTADOS.md). La tabla siguiente conserva el punto de partida histórico.
 
 | Hito | Estado comprobado |

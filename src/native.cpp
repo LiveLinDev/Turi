@@ -57,6 +57,9 @@ class ModuleWriter {
     bool usesArgMinU16 = false;
     std::set<std::uint8_t> usesFindFirstBits;
     std::unordered_map<unsigned, std::int64_t> curConstInts;
+    // Arreglos pequeños de tamaño constante que no escapan: viven en la pila (alloca), no en el heap.
+    std::unordered_map<const Operation*, unsigned> curStackRepeats; // repeat -> nº de elementos
+    std::unordered_set<unsigned> curStackSlots;                    // ranuras cuyo Drop se omite
     bool usesSysArgs = false;
     bool usesDropFile = false;
     bool usesDropListener = false;
@@ -67,6 +70,7 @@ class ModuleWriter {
     bool usesDropTask = false;
     bool usesDropRegion = false;
     bool usesDropAtomic = false;
+    bool needCells = false; // algún tipo usa celdas de tamaño fijo (@tz.cellAlloc/@tz.cellFree)
     bool usesCloneAtomic = false;
     bool usesDropRing = false;
     bool usesCloneRing = false;
@@ -99,6 +103,10 @@ class ModuleWriter {
     std::vector<bool> curSlotByRef;
     std::set<Type> emitDrops, emitDropUnaligned, emitClones, emitRepeats, emitSlices, emitAts, emitPushes, emitPops, emitClears;
     std::set<Type> emitVClones, emitMapSets, emitMapHas, emitMapDels, emitMapKeys, emitMapVals;
+    std::set<Type> emitMapSlots, doneMapSlots;
+    std::set<Type> emitMapPrefetchStr, emitMapPrefetchInt, doneMapPrefetchStr, doneMapPrefetchInt;
+    std::set<Type> emitZeroCells, doneZeroCells;
+    std::set<Type> emitDropRes, doneDropRes;
     std::set<Type> emitSetAdds, emitSetHas, emitSetDels, emitSetItems;
     std::set<Type> emitTblClears, emitTblReserves, emitTblWithCaps;
     std::map<Type, Type> emitMapGets;
@@ -178,6 +186,46 @@ class ModuleWriter {
         std::set<Type> seen;
         return needsDropImpl(t, seen);
     }
+    // ¿Las celdas Shared<T> de este tipo pueden vivir en una región? Hace falta que su contenido solo
+    // pueda poseer otras celdas de región (o nada): así, soltar la región entera no deja nada sin
+    // liberar, ni texto, ni arreglos, ni celdas de las que se reservan aparte.
+    bool regionContent(Type t, std::set<Type>& seen) const {
+        if (!needsDrop(t)) return true;
+        if (program.isShared(t)) return regionCellImpl(t, seen);
+        if (t == Type::IntArray || t == Type::Str || t == Type::StringBuilder ||
+            Program::isPrimitiveResource(t) ||
+            program.isArray(t) || program.isMap(t) || program.isSet(t) ||
+            program.isPool(t) || program.isTask(t) ||
+            program.isFrozen(t) || program.isAtomic(t) || program.isRingQueue(t) ||
+            program.isDyn(t) || program.isFn(t) || t < Type::NamedBase) return false;
+        const auto* decl = program.declaration(t);
+        if (!decl) return false;
+        if (!seen.insert(t).second) return true;
+        for (const auto& v : decl->variants)
+            for (const auto& f : v.fields)
+                if (!regionContent(f.type, seen)) return false;
+        return true;
+    }
+    bool regionCellImpl(Type shT, std::set<Type>& seen) const {
+        const Type et = program.sharedElem(shT);
+        if (isZeroSized(et)) return false;
+        const auto [size, align] = sizeAlignOf(et);
+        if (align > 8 || size + 8 > 256) return false;
+        if (!seen.insert(shT).second) return true;
+        return regionContent(et, seen);
+    }
+    bool regionCell(Type shT) const {
+        std::set<Type> seen;
+        return regionCellImpl(shT, seen);
+    }
+    // ¿Puede este programa ejecutar código Turi en más de un hilo? Lo hace si lanza tareas, si
+    // entrega punteros a función a código C o si exporta funciones que C puede llamar desde donde quiera.
+    mutable std::optional<bool> threadsMemo;
+    bool mayUseThreads() const {
+        if (!threadsMemo) threadsMemo = scanForThreads();
+        return *threadsMemo;
+    }
+    bool scanForThreads() const { return native::programMayUseThreads(program); }
     std::string strideExpr(Type elemType) const {
         return "ptrtoint (ptr getelementptr (" + llvmType(elemType) + ", ptr null, i32 1) to i64)";
     }
@@ -298,6 +346,15 @@ class ModuleWriter {
     std::string requestMapSet(Type tblT) {
         emitMapSets.insert(tblT);
         return "@tz.mapSet.t" + std::to_string(static_cast<int>(tblT));
+    }
+    std::string requestMapSlot(Type tblT) {
+        emitMapSlots.insert(tblT);
+        return "@tz.mapSlot.t" + std::to_string(static_cast<int>(tblT));
+    }
+    std::string requestMapPrefetch(Type tblT, bool sliceKey) {
+        (sliceKey ? emitMapPrefetchStr : emitMapPrefetchInt).insert(tblT);
+        return std::string(sliceKey ? "@tz.mapPrefetchStr.t" : "@tz.mapPrefetchInt.t") +
+               std::to_string(static_cast<int>(tblT));
     }
     std::string requestMapGet(Type tblT, Type optT) {
         emitMapGets[tblT] = optT;
@@ -670,7 +727,75 @@ class ModuleWriter {
         }
         return std::nullopt;
     }
+    // Fusión de `a*b + c` y `a*b - c` decidida aquí y no en el selector de instrucciones de LLVM.
+    // Con solo la marca `contract`, cuál de dos productos se funde lo decide una heurística interna
+    // (en `r*r - i*i + c` fundía `i*i` y dejaba el camino r -> resultado en 11 ciclos en vez de 7).
+    // Regla fija, la misma que aplica clang al leer C: se funde el producto de la izquierda si solo
+    // se usa aquí; si no, el de la derecha. El producto fundido no se emite por separado.
+    std::unordered_map<unsigned, const Operation*> fusedMul; // producto -> su operación (no se emite)
+    std::unordered_map<unsigned, unsigned> fusedInto;        // suma o resta -> producto que funde
+    void planFusedMultiplies(const FunctionIR& ir) {
+        fusedMul.clear();
+        fusedInto.clear();
+        if (envEnabled("VELOZ_NO_FMA_PLAN")) return;
+        std::unordered_map<unsigned, unsigned> uses;
+        for (const auto& blk : ir.blocks) {
+            for (const auto& op : blk.ops)
+                for (const auto& in : op.inputs) ++uses[in.id];
+            if (blk.value) ++uses[blk.value->id];
+        }
+        const auto scalarFloat = [](Type t) { return t == Type::Float || t == Type::F32; };
+        for (const auto& blk : ir.blocks) {
+            std::unordered_map<unsigned, const Operation*> products;
+            for (const auto& op : blk.ops) {
+                if (op.op != Op::Binary || op.inputs.size() != 2 || op.reassoc || !scalarFloat(op.result.type) ||
+                    !scalarFloat(op.inputs[0].type) || !scalarFloat(op.inputs[1].type))
+                    continue;
+                if (op.data == "*") {
+                    products.emplace(op.result.id, &op);
+                } else if (op.data == "+" || op.data == "-") {
+                    for (const auto& in : op.inputs) {
+                        const auto found = products.find(in.id);
+                        if (found == products.end() || uses[in.id] != 1 || fusedMul.contains(in.id)) continue;
+                        if (op.inputs[0].id == op.inputs[1].id) continue;
+                        fusedMul.emplace(in.id, found->second);
+                        fusedInto.emplace(op.result.id, in.id);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    bool emitFused(const Operation& op) {
+        const auto plan = fusedInto.find(op.result.id);
+        if (plan == fusedInto.end()) return false;
+        const Operation& mul = *fusedMul.at(plan->second);
+        const std::string ty = llvmType(op.result.type);
+        const std::string result = reg(op.result);
+        const bool mulIsLeft = op.inputs[0].id == plan->second;
+        const Value other = mulIsLeft ? op.inputs[1] : op.inputs[0];
+        const std::string intr = std::string("llvm.fmuladd.") + (op.result.type == Type::F32 ? "f32" : "f64");
+        usedRawDecls.insert("declare " + ty + " @" + intr + "(" + ty + ", " + ty + ", " + ty + ")");
+        std::string a = reg(mul.inputs[0]);
+        std::string addend = reg(other);
+        if (op.data == "-") {
+            if (mulIsLeft) {
+                // a*b - c
+                bodies << "  " << result << ".neg = fneg " << ty << " " << addend << "\n";
+                addend = result + ".neg";
+            } else {
+                // c - a*b = (-a)*b + c
+                bodies << "  " << result << ".neg = fneg " << ty << " " << a << "\n";
+                a = result + ".neg";
+            }
+        }
+        bodies << "  " << result << " = call " << ty << " @" << intr << "(" << ty << " " << a << ", " << ty << " "
+               << reg(mul.inputs[1]) << ", " << ty << " " << addend << ")\n";
+        return true;
+    }
     void binary(const Operation& op) {
+        if (fusedMul.contains(op.result.id)) return; // se emite fundido en la suma o resta que lo usa
+        if (emitFused(op)) return;
         const auto left = op.inputs[0];
         const auto right = op.inputs[1];
         const auto result = reg(op.result);
@@ -680,10 +805,14 @@ class ModuleWriter {
             return;
         }
         if (Program::isFloatType(left.type)) {
+            // `contract` permite fusionar a*b+c en una FMA (un solo redondeo, más exacto), igual que
+            // C/C++ con su -ffp-contract=on por defecto y que la especificación de Go.
             static const std::map<std::string, std::string> fOps{
-                {"+", "fadd"}, {"-", "fsub"}, {"*", "fmul"}, {"/", "fdiv"}};
+                {"+", "fadd contract"}, {"-", "fsub contract"}, {"*", "fmul contract"}, {"/", "fdiv"}};
             if (auto it = fOps.find(token); it != fOps.end()) {
-                bodies << "  " << result << " = " << it->second << " " << operand(left) << ", " << reg(right) << "\n";
+                std::string opcode = it->second;
+                if (op.reassoc && token != "/") opcode.insert(opcode.find(' ') + 1, "reassoc ");
+                bodies << "  " << result << " = " << opcode << " " << operand(left) << ", " << reg(right) << "\n";
                 return;
             }
             static const std::map<std::string, std::string> fPreds{
@@ -1546,6 +1675,12 @@ class ModuleWriter {
                    << operand(op.inputs.at(0)) << ", " << diagnostic("R_ALLOC", op.span) << ")\n";
             return;
         }
+        if (name == "sharedZero") {
+            emitZeroCells.insert(op.result.type);
+            bodies << "  " << result << " = getelementptr inbounds i8, ptr @tz.zeroCell.t"
+                   << static_cast<int>(op.result.type) << ", i64 0\n";
+            return;
+        }
         if (name == "sharedNew") {
             bodies << "  " << result << " = call ptr " << requestRcNew(op.result.type) << "("
                    << operand(op.inputs.at(0)) << ", " << diagnostic("R_ALLOC", op.span) << ")\n";
@@ -1555,6 +1690,30 @@ class ModuleWriter {
             bodies << "  " << result << " = call ptr " << requestRcReuse(op.result.type) << "("
                    << operand(op.inputs.at(0)) << ", " << operand(op.inputs.at(1)) << ", "
                    << diagnostic("R_ALLOC", op.span) << ")\n";
+            return;
+        }
+        if (name == "cellEnter") {
+            needCells = true;
+            bodies << "  " << result << " = call i64 @tz.cellEnter(" << diagnostic("R_ALLOC", op.span) << ")\n";
+            return;
+        }
+        if (name == "cellLeave") {
+            needCells = true;
+            bodies << "  call void @tz.cellLeave(" << operand(op.inputs.at(0)) << ")\n";
+            return;
+        }
+        if (name == "sharedPeek") {
+            const Type shT = op.inputs.at(0).type;
+            const Type et = program.sharedElem(shT);
+            if (isZeroSized(et)) {
+                bodies << "  " << result << " = call " << llvmType(op.result.type) << " " << requestRcGet(shT)
+                       << "(" << operand(op.inputs.at(0)) << ", " << diagnostic("R_ALLOC", op.span) << ")\n";
+                return;
+            }
+            const std::string eLlvm = llvmType(et);
+            bodies << "  " << result << ".vp = getelementptr inbounds { i64, " << eLlvm << " }, "
+                   << operand(op.inputs.at(0)) << ", i32 0, i32 1\n"
+                   << "  " << result << " = load " << eLlvm << ", ptr " << result << ".vp\n";
             return;
         }
         if (name == "sharedGet") {
@@ -1591,6 +1750,35 @@ class ModuleWriter {
         }
         if (name == "mapSecure" || name == "setSecure") {
             bodies << "  " << result << " = call %table " << requestTblSecure() << "()\n";
+            return;
+        }
+        if (name == "mapPrefetchStr" || name == "mapPrefetchInt") {
+            bodies << "  call void " << requestMapPrefetch(op.inputs.at(0).type, name == "mapPrefetchStr") << "(";
+            for (std::size_t i = 0; i < op.inputs.size(); ++i)
+                bodies << (i ? ", " : "") << operand(op.inputs[i]);
+            bodies << ")\n";
+            return;
+        }
+        if (name.starts_with("mapUpdate")) {
+            // m[k] op= v con una sola búsqueda: dirección del valor (insertando cero si falta), operar, guardar.
+            const Type tblT = op.inputs.at(0).type;
+            const Type vt = program.mapVal(tblT);
+            const std::string vty = llvmType(vt);
+            const std::string token = name.substr(9);
+            const std::string sp = mutArgPtr(op, 0, result);
+            bodies << "  " << result << ".p = call ptr " << requestMapSlot(tblT) << "(ptr " << sp << ", "
+                   << operand(op.inputs.at(1)) << ", " << diagnostic("R_ALLOC", op.span) << ")\n"
+                   << "  " << result << ".old = load " << vty << ", ptr " << result << ".p\n";
+            if (Program::isFloatType(vt)) {
+                const char* fop = token == "+" ? "fadd" : token == "-" ? "fsub" : "fmul";
+                bodies << "  " << result << ".new = " << fop << " contract " << vty << " " << result << ".old, "
+                       << reg(op.inputs.at(2)) << "\n";
+            } else {
+                const char* fn = token == "+" ? "add" : token == "-" ? "sub" : "mul";
+                bodies << "  " << result << ".new = call i64 @tz." << fn << "(i64 " << result << ".old, "
+                       << operand(op.inputs.at(2)) << ", " << diagnostic("R_OVERFLOW", op.span) << ")\n";
+            }
+            bodies << "  store " << vty << " " << result << ".new, ptr " << result << ".p\n";
             return;
         }
         if (name == "mapSet") {
@@ -3016,6 +3204,26 @@ class ModuleWriter {
             break;
         case Op::RepeatHeap:
         case Op::RepeatRegion: {
+            if (auto stk = curStackRepeats.find(&op); stk != curStackRepeats.end()) {
+                const unsigned count = stk->second;
+                const std::string elemTy = stackElemType(op);
+                if (op.initialize) {
+                    std::string value = first();
+                    if (op.result.type == Type::IntArray && elemTy != "i64") {
+                        bodies << "  " << result << ".fill = trunc " << first() << " to " << elemTy << "\n";
+                        value = elemTy + " " + result + ".fill";
+                    }
+                    for (unsigned k = 0; k < count; ++k) {
+                        bodies << "  " << result << ".e" << k << " = getelementptr inbounds [" << count << " x " << elemTy
+                               << "], ptr " << stackArrayReg(op) << ", i64 0, i64 " << k << "\n"
+                               << "  store " << value << ", ptr " << result << ".e" << k << "\n";
+                    }
+                }
+                bodies << "  " << result << ".a0 = insertvalue %array zeroinitializer, ptr " << stackArrayReg(op) << ", 0\n"
+                       << "  " << result << ".a1 = insertvalue %array " << result << ".a0, i32 " << count << ", 1\n"
+                       << "  " << result << " = insertvalue %array " << result << ".a1, i32 " << count << ", 2\n";
+                break;
+            }
             if (op.result.type == Type::IntArray) {
                 const unsigned bits = static_cast<unsigned>(op.elemBits);
                 const std::string suffix = bits < 64 ? (".i" + std::to_string(bits)) : "";
@@ -3045,7 +3253,17 @@ class ModuleWriter {
             }
             break;
         case Op::Drop: {
+            if (curStackSlots.contains(op.slot)) break; // arreglo en la pila: nada que liberar
             const Type slotT = curSlotTypes.at(op.slot);
+            if (op.regionEnd) {
+                std::set<Type> seen;
+                if (regionContent(slotT, seen)) {
+                    emitDropRes.insert(slotT);
+                    bodies << "  call void @tz.dropRe.t" << static_cast<int>(slotT) << "(ptr " << slotPtr(op.slot)
+                           << ")\n";
+                    break;
+                }
+            }
             bodies << "  call void " << requestDrop(slotT) << "(ptr " << slotPtr(op.slot) << ")\n";
             break;
         }
@@ -3211,9 +3429,16 @@ class ModuleWriter {
                 if (step.isIndex) {
                     bodies << "  " << stepPfx << ".arr = load %array, ptr " << ptr
                            << (packedField ? ", align 1" : "") << "\n";
-                    const std::string atFn = (curT == Type::IntArray) ? "@tz.at" : requestAt(curT);
-                    bodies << "  " << stepPfx << ".ep = call ptr " << atFn << "(%array " << stepPfx << ".arr, "
-                           << operand(op.inputs.at(idxPos++)) << ", " << diagnostic("R_BOUNDS", op.span) << ")\n";
+                    if (step.boundsProven) {
+                        const std::string elemLlvm = (curT == Type::IntArray) ? "i64" : llvmType(elemOf(curT));
+                        bodies << "  " << stepPfx << ".base = extractvalue %array " << stepPfx << ".arr, 0\n"
+                               << "  " << stepPfx << ".ep = getelementptr inbounds " << elemLlvm << ", ptr "
+                               << stepPfx << ".base, " << operand(op.inputs.at(idxPos++)) << "\n";
+                    } else {
+                        const std::string atFn = (curT == Type::IntArray) ? "@tz.at" : requestAt(curT);
+                        bodies << "  " << stepPfx << ".ep = call ptr " << atFn << "(%array " << stepPfx << ".arr, "
+                               << operand(op.inputs.at(idxPos++)) << ", " << diagnostic("R_BOUNDS", op.span) << ")\n";
+                    }
                     ptr = stepPfx + ".ep";
                     curT = elemOf(curT);
                     packedField = false;
@@ -3596,35 +3821,155 @@ public:
     }
     void trampoline(const FunctionIR& ir, const std::string& fastCallee, const std::string& slowCallee) {
         const auto& f = ir.source;
+        const auto paramDecl = [&](unsigned i) {
+            return f.params[i].byRef ? std::string("ptr noalias %arg") + std::to_string(i)
+                                     : llvmType(f.params[i].type) + " %arg" + std::to_string(i);
+        };
+        const auto paramPass = [&](unsigned i) {
+            return f.params[i].byRef ? std::string("ptr %arg") + std::to_string(i)
+                                     : llvmType(f.params[i].type) + " %arg" + std::to_string(i);
+        };
         bodies << "define internal " << llvmType(f.result) << " " << symbol(f.name) << "(i32 %depth";
-        for (unsigned i = 0; i < f.params.size(); ++i) bodies << ", " << llvmType(f.params[i].type) << " %arg" << i;
+        for (unsigned i = 0; i < f.params.size(); ++i) bodies << ", " << paramDecl(i);
         bodies << ") sanitize_address {\nentry:\n";
-        std::string accReg = "%arg0";
-        for (unsigned i = 1; i < f.params.size(); ++i) {
-            std::string nextReg = "%fast.or" + std::to_string(i);
-            bodies << "  " << nextReg << " = or i64 " << accReg << ", %arg" << i << "\n";
-            accReg = nextReg;
+        // Una sola comparación por grupo: el OR de todos los enteros y el OR de todas las longitudes.
+        std::string intAcc, lenAcc;
+        const auto fold = [&](std::string& acc, const std::string& reg, const std::string& tag, unsigned i) {
+            if (acc.empty()) { acc = reg; return; }
+            const std::string next = "%fast." + tag + std::to_string(i);
+            bodies << "  " << next << " = or i64 " << acc << ", " << reg << "\n";
+            acc = next;
+        };
+        for (unsigned i = 0; i < f.params.size(); ++i) {
+            const auto& p = f.params[i];
+            const std::string arg = "%arg" + std::to_string(i);
+            if (!p.byRef && p.type == Type::Int) {
+                fold(intAcc, arg, "ior", i);
+            } else if (p.type == Type::IntArray || program.isArray(p.type)) {
+                const std::string base = "%fast.len" + std::to_string(i);
+                std::string header = arg;
+                if (p.byRef) {
+                    header = base + ".hdr";
+                    bodies << "  " << header << " = load %array, ptr " << arg << "\n";
+                }
+                bodies << "  " << base << ".l32 = extractvalue %array " << header << ", 1\n"
+                       << "  " << base << " = zext i32 " << base << ".l32 to i64\n";
+                fold(lenAcc, base, "lor", i);
+            }
         }
-        bodies << "  %fast.ok = icmp ule i64 " << accReg << ", 1048575\n"
-               << "  br i1 %fast.ok, label %fast.call, label %slow.call\n"
+        if (!intAcc.empty()) bodies << "  %fast.intOk = icmp ule i64 " << intAcc << ", " << native::kFastIntParamMax << "\n";
+        if (!lenAcc.empty()) bodies << "  %fast.lenOk = icmp ule i64 " << lenAcc << ", " << native::kFastArrayLenMax << "\n";
+        if (!intAcc.empty() && !lenAcc.empty()) bodies << "  %fast.ok = and i1 %fast.intOk, %fast.lenOk\n";
+        else if (!intAcc.empty()) bodies << "  %fast.ok = and i1 %fast.intOk, true\n";
+        else bodies << "  %fast.ok = and i1 %fast.lenOk, true\n";
+        bodies << "  br i1 %fast.ok, label %fast.call, label %slow.call\n"
                << "fast.call:\n  ";
         if (f.result != Type::Void) bodies << "%fast.res = ";
         bodies << "tail call " << llvmType(f.result) << " " << symbol(fastCallee) << "(i32 %depth";
-        for (unsigned i = 0; i < f.params.size(); ++i)
-            bodies << ", " << llvmType(f.params[i].type) << " %arg" << i;
+        for (unsigned i = 0; i < f.params.size(); ++i) bodies << ", " << paramPass(i);
         bodies << ")\n";
         if (f.result != Type::Void) bodies << "  ret " << llvmType(f.result) << " %fast.res\n";
         else bodies << "  ret void\n";
         bodies << "slow.call:\n  ";
         if (f.result != Type::Void) bodies << "%slow.res = ";
         bodies << "tail call " << llvmType(f.result) << " " << symbol(slowCallee) << "(i32 %depth";
-        for (unsigned i = 0; i < f.params.size(); ++i)
-            bodies << ", " << llvmType(f.params[i].type) << " %arg" << i;
+        for (unsigned i = 0; i < f.params.size(); ++i) bodies << ", " << paramPass(i);
         bodies << ")\n";
         if (f.result != Type::Void) bodies << "  ret " << llvmType(f.result) << " %slow.res\n";
         else bodies << "  ret void\n";
         bodies << "}\n";
     }
+    // Un arreglo local creado con repeat(valor, N) con N constante y pequeño, que solo se usa por
+    // índice, longitud o copia, no necesita el heap: C lo declararía como arreglo local. En la pila
+    // LLVM puede además mantenerlo en registros (SROA) y vectorizarlo sin tráfico de memoria.
+    void planStackArrays(const FunctionIR& ir) {
+        curStackRepeats.clear();
+        curStackSlots.clear();
+        // VELOZ_NO_STACK_ARRAYS=1 conserva la reserva en heap (pruebas que inspeccionan ese IR).
+        static const bool disabled = envEnabled("VELOZ_NO_STACK_ARRAYS");
+        if (disabled) return;
+        constexpr std::int64_t maxElems = 64;
+        constexpr std::size_t maxBytes = 512;
+        struct Use { const Operation* op; std::size_t input; };
+        std::unordered_map<unsigned, std::vector<Use>> uses;
+        std::unordered_set<unsigned> exitValues;
+        for (const auto& blk : ir.blocks) {
+            if (blk.value) exitValues.insert(blk.value->id);
+            for (const auto& op : blk.ops)
+                for (std::size_t k = 0; k < op.inputs.size(); ++k) uses[op.inputs[k].id].push_back({&op, k});
+        }
+        const auto paramCount = ir.source.params.size();
+        for (const auto& blk : ir.blocks) {
+            for (const auto& rep : blk.ops) {
+                if ((rep.op != Op::RepeatHeap && rep.op != Op::RepeatRegion) || rep.inputs.size() < 2) continue;
+                const Type arrT = rep.result.type;
+                const Type elemT = elemOf(arrT);
+                if (!(Program::isNumericType(elemT) || elemT == Type::Bool) || needsDrop(elemT)) continue;
+                auto cnt = curConstInts.find(rep.inputs[1].id);
+                if (cnt == curConstInts.end() || cnt->second < 1 || cnt->second > maxElems) continue;
+                if (static_cast<std::size_t>(cnt->second) * sizeAlignOf(elemT).first > maxBytes) continue;
+                if (exitValues.contains(rep.result.id)) continue;
+                // El valor solo puede guardarse en ranuras locales.
+                std::unordered_set<unsigned> slots;
+                bool ok = true;
+                for (const auto& use : uses[rep.result.id]) {
+                    if (use.op->op != Op::Store) { ok = false; break; }
+                    slots.insert(use.op->slot);
+                }
+                if (!ok || slots.empty()) continue;
+                for (unsigned slot : slots) {
+                    if (slot < paramCount || slot >= ir.slots.size() || ir.slots[slot] != arrT ||
+                        (slot < ir.slotByRef.size() && ir.slotByRef[slot]) || curStackSlots.contains(slot)) { ok = false; break; }
+                }
+                if (!ok) continue;
+                // Cada uso de esas ranuras debe ser lectura por índice/longitud/copia o escritura de elemento.
+                for (const auto& b2 : ir.blocks) {
+                    for (const auto& op : b2.ops) {
+                        for (unsigned ms : op.mutArgSlots)
+                            if (slots.contains(ms)) ok = false;
+                        switch (op.op) {
+                        case Op::Store:
+                            if (slots.contains(op.slot) && (op.inputs.empty() || op.inputs[0].id != rep.result.id)) ok = false;
+                            break;
+                        case Op::Load:
+                            if (slots.contains(op.slot)) {
+                                if (exitValues.contains(op.result.id)) ok = false;
+                                for (const auto& use : uses[op.result.id]) {
+                                    const Op k = use.op->op;
+                                    const bool reads = use.input == 0 &&
+                                        (k == Op::Index || k == Op::IndexSet || k == Op::Length || k == Op::Clone);
+                                    if (!reads) ok = false;
+                                }
+                            }
+                            break;
+                        case Op::PlaceSet:
+                            if (slots.contains(op.slot) && (op.placeSteps.empty() || !op.placeSteps[0].isIndex)) ok = false;
+                            break;
+                        case Op::FieldSet:
+                        case Op::ClearField:
+                            if (slots.contains(op.slot)) ok = false;
+                            break;
+                        default:
+                            break;
+                        }
+                        if (!ok) break;
+                    }
+                    if (!ok) break;
+                }
+                if (!ok) continue;
+                curStackRepeats.emplace(&rep, static_cast<unsigned>(cnt->second));
+                curStackSlots.insert(slots.begin(), slots.end());
+            }
+        }
+    }
+    std::string stackArrayReg(const Operation& op) const { return reg(op.result) + ".stk"; }
+    // Un [int] puede estar compactado a 8, 16 o 32 bits por elemento cuando el rango lo permite.
+    std::string stackElemType(const Operation& op) const {
+        if (op.result.type == Type::IntArray)
+            return "i" + std::to_string(op.elemBits ? static_cast<unsigned>(op.elemBits) : 64u);
+        return llvmType(elemOf(op.result.type));
+    }
+
     void function(const FunctionIR& ir, bool depthKnownSafe, const std::string& overrideName = "",
                   bool coldNoInline = false, bool noInline = false, bool fastParamRange = false) {
         const auto& f = ir.source;
@@ -3713,6 +4058,15 @@ public:
                     const char* end = beg + op.data.size();
                     const auto res = std::from_chars(beg, end, cv);
                     if (res.ec == std::errc{} && res.ptr == end) curConstInts[op.result.id] = cv;
+                }
+            }
+        }
+        planStackArrays(ir);
+        for (const auto& blk : ir.blocks) {
+            for (const auto& op : blk.ops) {
+                if (auto it = curStackRepeats.find(&op); it != curStackRepeats.end()) {
+                    bodies << "  " << stackArrayReg(op) << " = alloca [" << it->second << " x "
+                           << stackElemType(op) << "], align 64\n";
                 }
             }
         }
@@ -4081,6 +4435,7 @@ public:
             }
         }
         bodies << "  br label %b0\n";
+        planFusedMultiplies(ir);
         for (unsigned i = 0; i < ir.blocks.size(); ++i) {
             if (auto oit = outlinedCold.find(i); oit != outlinedCold.end()) {
                 const auto& oc = oit->second;
@@ -4199,6 +4554,12 @@ public:
                 out << "declare ptr @tz_col_map_find(ptr, ptr, i32, i64, i64)\n";
             else if (d == "tz_col_map_set")
                 out << "declare i8 @tz_col_map_set(ptr, ptr, ptr, i32, i64, i64, ptr)\n";
+            else if (d == "tz_col_map_slot")
+                out << "declare ptr @tz_col_map_slot(ptr, ptr, i32, i64, i64)\n";
+            else if (d == "tz_col_map_prefetch_str")
+                out << "declare void @tz_col_map_prefetch_str(ptr, ptr, i64, i64, i64, i64)\n";
+            else if (d == "tz_col_map_prefetch_int")
+                out << "declare void @tz_col_map_prefetch_int(ptr, i64, i64, i64)\n";
             else if (d == "tz_col_map_del")
                 out << "declare i8 @tz_col_map_del(ptr, ptr, i32, i64, i64, ptr)\n";
             else if (d == "tz_col_set_add")
@@ -4306,7 +4667,7 @@ public:
              doneDropMutex = false, doneDropLock = false,
              doneDropScope = false, doneDropTask = false,
              doneDropRegion = false, doneDropAtomic = false, doneCloneAtomic = false,
-             doneDropRing = false, doneCloneRing = false;
+             doneDropRing = false, doneCloneRing = false, doneCells = false;
         auto emitStoreKey = [&](std::ostream& s, Type k, const std::string& valReg, const std::string& ptrReg, const std::string& pfx) {
             if (k == Type::Bool) {
                 s << "  " << pfx << ".b8 = zext i1 " << valReg << " to i8\n"
@@ -4349,6 +4710,237 @@ public:
         bool progress = true;
         while (progress) {
             progress = false;
+            // Reservador de celdas pequeñas de tamaño fijo. El compilador conoce el tamaño de cada celda
+            // al liberarla, así que no hace falta cabecera ni buscar la clase de tamaño como hace
+            // free() en C: liberar es apilar la celda en la lista de su tamaño y reservar es desapilar
+            // (o avanzar un puntero en un bloque de 64 KiB). Las listas son por hilo.
+            // En el IR de `emit-ir` queda desactivado (malloc/free) para que ASan y las auditorías de
+            // reservas vean cada celda; `veloz build` lo activa.
+            if (needCells && !doneCells) {
+                doneCells = true;
+                progress = true;
+                // El estado del reservador es por hilo solo si el programa puede usar más de uno.
+                const char* tls = mayUseThreads() ? "thread_local " : "";
+                out << "@tz.cellSlab = internal constant i1 false\n"
+                    << "@tz.cellHeads = internal " << tls << "global [33 x ptr] zeroinitializer\n"
+                    << "@tz.crDepth = internal " << tls << "global i64 0\n"
+                    << "@tz.crCur = internal " << tls << "global ptr null\n"
+                    << "@tz.crEnd = internal " << tls << "global ptr null\n"
+                    << "@tz.crChunk = internal " << tls << "global ptr null\n"
+                    << "@tz.crFirst = internal " << tls << "global ptr null\n"
+                    << "@tz.crHeads = internal " << tls << "global [33 x ptr] zeroinitializer\n"
+                    << "@tz.crUsed = internal " << tls << "global i64 0\n"
+                    << "@tz.cellCur = internal " << tls << "global ptr null\n"
+                    << "@tz.cellEnd = internal " << tls << "global ptr null\n"
+                    << "define internal noalias ptr @tz.cellAlloc(i64 %size, %diag %msg) sanitize_address {\nentry:\n"
+                    << "  %slab = load i1, ptr @tz.cellSlab\n"
+                    << "  %up = add i64 %size, 7\n"
+                    << "  %cls = lshr i64 %up, 3\n"
+                    << "  %small = icmp ule i64 %cls, 32\n"
+                    << "  %use = and i1 %slab, %small\n"
+                    << "  br i1 %use, label %fast, label %plain\n"
+                    << "plain:\n"
+                    << "  %m = call noalias ptr @tz.malloc(i64 %size, %diag %msg)\n"
+                    << "  ret ptr %m\n"
+                    << "fast:\n"
+                    << "  %headp = getelementptr inbounds [33 x ptr], ptr @tz.cellHeads, i64 0, i64 %cls\n"
+                    << "  %head = load ptr, ptr %headp\n"
+                    << "  %has = icmp ne ptr %head, null\n"
+                    << "  br i1 %has, label %pop, label %bump\n"
+                    << "pop:\n"
+                    << "  %next = load ptr, ptr %head\n"
+                    << "  store ptr %next, ptr %headp\n"
+                    << "  ret ptr %head\n"
+                    << "bump:\n"
+                    << "  %bytes = shl i64 %cls, 3\n"
+                    << "  %cur = load ptr, ptr @tz.cellCur\n"
+                    << "  %end = load ptr, ptr @tz.cellEnd\n"
+                    << "  %curi = ptrtoint ptr %cur to i64\n"
+                    << "  %endi = ptrtoint ptr %end to i64\n"
+                    << "  %room = sub i64 %endi, %curi\n"
+                    << "  %fits = icmp uge i64 %room, %bytes\n"
+                    << "  br i1 %fits, label %take, label %refill\n"
+                    << "take:\n"
+                    << "  %nxt = getelementptr inbounds i8, ptr %cur, i64 %bytes\n"
+                    << "  store ptr %nxt, ptr @tz.cellCur\n"
+                    << "  ret ptr %cur\n"
+                    << "refill:\n"
+                    << "  %chunk = call noalias ptr @tz.malloc(i64 65536, %diag %msg)\n"
+                    << "  %cend = getelementptr inbounds i8, ptr %chunk, i64 65536\n"
+                    << "  %cnext = getelementptr inbounds i8, ptr %chunk, i64 %bytes\n"
+                    << "  store ptr %cnext, ptr @tz.cellCur\n"
+                    << "  store ptr %cend, ptr @tz.cellEnd\n"
+                    << "  ret ptr %chunk\n}\n"
+                    << "define internal void @tz.cellFree(ptr %p, i64 %size) sanitize_address {\nentry:\n"
+                    << "  %slab = load i1, ptr @tz.cellSlab\n"
+                    << "  %up = add i64 %size, 7\n"
+                    << "  %cls = lshr i64 %up, 3\n"
+                    << "  %small = icmp ule i64 %cls, 32\n"
+                    << "  %use = and i1 %slab, %small\n"
+                    << "  br i1 %use, label %fast, label %plain\n"
+                    << "plain:\n"
+                    << "  call void @free(ptr %p)\n"
+                    << "  ret void\n"
+                    << "fast:\n"
+                    << "  %headp = getelementptr inbounds [33 x ptr], ptr @tz.cellHeads, i64 0, i64 %cls\n"
+                    << "  %head = load ptr, ptr %headp\n"
+                    << "  store ptr %head, ptr %p\n"
+                    << "  store ptr %p, ptr %headp\n"
+                    << "  ret void\n}\n"
+                    // Región de celdas: bloques de 1 MiB encadenados que no se devuelven; salir de una
+                    // región es volver a poner el puntero donde estaba al entrar.
+                    << "define internal noalias ptr @tz.cellBumpSlow(i64 %bytes, %diag %msg) cold noinline sanitize_address {\nentry:\n"
+                    << "  %chunk = load ptr, ptr @tz.crChunk\n"
+                    << "  %none = icmp eq ptr %chunk, null\n"
+                    << "  br i1 %none, label %first, label %hasChunk\n"
+                    << "first:\n"
+                    << "  %f = load ptr, ptr @tz.crFirst\n"
+                    << "  %hasFirst = icmp ne ptr %f, null\n"
+                    << "  br i1 %hasFirst, label %use, label %fresh\n"
+                    << "hasChunk:\n"
+                    << "  %next = load ptr, ptr %chunk\n"
+                    << "  %hasNext = icmp ne ptr %next, null\n"
+                    << "  br i1 %hasNext, label %use, label %fresh\n"
+                    << "fresh:\n"
+                    << "  %c = call noalias ptr @tz.malloc(i64 1048576, %diag %msg)\n"
+                    << "  store ptr null, ptr %c\n"
+                    << "  br i1 %none, label %setFirst, label %link\n"
+                    << "setFirst:\n"
+                    << "  store ptr %c, ptr @tz.crFirst\n"
+                    << "  br label %use\n"
+                    << "link:\n"
+                    << "  store ptr %c, ptr %chunk\n"
+                    << "  br label %use\n"
+                    << "use:\n"
+                    << "  %u = phi ptr [ %f, %first ], [ %next, %hasChunk ], [ %c, %setFirst ], [ %c, %link ]\n"
+                    << "  store ptr %u, ptr @tz.crChunk\n"
+                    << "  %data = getelementptr inbounds i8, ptr %u, i64 16\n"
+                    << "  %uend = getelementptr inbounds i8, ptr %u, i64 1048576\n"
+                    << "  %after = getelementptr inbounds i8, ptr %data, i64 %bytes\n"
+                    << "  store ptr %after, ptr @tz.crCur\n"
+                    << "  store ptr %uend, ptr @tz.crEnd\n"
+                    << "  ret ptr %data\n}\n"
+                    << "define internal noalias ptr @tz.cellBump(i64 %bytes, %diag %msg) sanitize_address {\nentry:\n"
+                    << "  %cur = load ptr, ptr @tz.crCur\n"
+                    << "  %end = load ptr, ptr @tz.crEnd\n"
+                    << "  %curi = ptrtoint ptr %cur to i64\n"
+                    << "  %endi = ptrtoint ptr %end to i64\n"
+                    << "  %room = sub i64 %endi, %curi\n"
+                    << "  %fits = icmp uge i64 %room, %bytes\n"
+                    << "  br i1 %fits, label %take, label %slow\n"
+                    << "take:\n"
+                    << "  %nxt = getelementptr inbounds i8, ptr %cur, i64 %bytes\n"
+                    << "  store ptr %nxt, ptr @tz.crCur\n"
+                    << "  ret ptr %cur\n"
+                    << "slow:\n"
+                    << "  %p = call noalias ptr @tz.cellBumpSlow(i64 %bytes, %diag %msg)\n"
+                    << "  ret ptr %p\n}\n"
+                    // Dentro de una región la basura se reutiliza: lo que se libera va a una lista por
+                    // tamaño propia de la región y de ahí sale la siguiente reserva. Al salir de la región
+                    // esas listas se vacían (apuntan a memoria que se devuelve entera).
+                    << "define internal noalias ptr @tz.regionAlloc(i64 %size, %diag %msg) alwaysinline sanitize_address {\nentry:\n"
+                    << "  %up = add i64 %size, 7\n"
+                    << "  %cls = lshr i64 %up, 3\n"
+                    << "  %headp = getelementptr inbounds [33 x ptr], ptr @tz.crHeads, i64 0, i64 %cls\n"
+                    << "  %head = load ptr, ptr %headp\n"
+                    << "  %has = icmp ne ptr %head, null\n"
+                    << "  br i1 %has, label %pop, label %bump\n"
+                    << "pop:\n"
+                    << "  %next = load ptr, ptr %head\n"
+                    << "  store ptr %next, ptr %headp\n"
+                    << "  ret ptr %head\n"
+                    << "bump:\n"
+                    << "  %bytes = shl i64 %cls, 3\n"
+                    << "  %p = call noalias ptr @tz.cellBump(i64 %bytes, %diag %msg)\n"
+                    << "  ret ptr %p\n}\n"
+                    << "define internal void @tz.cellFreeR(ptr %p, i64 %size) alwaysinline sanitize_address {\nentry:\n"
+                    << "  %d = load i64, ptr @tz.crDepth\n"
+                    << "  %in = icmp ne i64 %d, 0\n"
+                    << "  br i1 %in, label %region, label %normal\n"
+                    << "normal:\n"
+                    << "  call void @tz.cellFree(ptr %p, i64 %size)\n"
+                    << "  ret void\n"
+                    << "region:\n"
+                    << "  %up = add i64 %size, 7\n"
+                    << "  %cls = lshr i64 %up, 3\n"
+                    << "  %headp = getelementptr inbounds [33 x ptr], ptr @tz.crHeads, i64 0, i64 %cls\n"
+                    << "  %head = load ptr, ptr %headp\n"
+                    << "  store ptr %head, ptr %p\n"
+                    << "  store ptr %p, ptr %headp\n"
+                    << "  %used = load i64, ptr @tz.crUsed\n"
+                    << "  %bit = shl i64 1, %cls\n"
+                    << "  %used1 = or i64 %used, %bit\n"
+                    << "  store i64 %used1, ptr @tz.crUsed\n"
+                    << "  ret void\n}\n"
+                    << "define internal i64 @tz.cellEnter(%diag %msg) sanitize_address {\nentry:\n"
+                    << "  %on = load i1, ptr @tz.cellSlab\n"
+                    << "  br i1 %on, label %go, label %off\n"
+                    << "off:\n"
+                    << "  ret i64 0\n"
+                    << "go:\n"
+                    << "  %chunk = load ptr, ptr @tz.crChunk\n"
+                    << "  %cur = load ptr, ptr @tz.crCur\n"
+                    << "  %end = load ptr, ptr @tz.crEnd\n"
+                    << "  %r = call noalias ptr @tz.cellBump(i64 296, %diag %msg)\n"
+                    << "  store ptr %chunk, ptr %r\n"
+                    << "  %r1 = getelementptr inbounds i8, ptr %r, i64 8\n"
+                    << "  store ptr %cur, ptr %r1\n"
+                    << "  %r2 = getelementptr inbounds i8, ptr %r, i64 16\n"
+                    << "  store ptr %end, ptr %r2\n"
+                    << "  %used = load i64, ptr @tz.crUsed\n"
+                    << "  %r3 = getelementptr inbounds i8, ptr %r, i64 24\n"
+                    << "  store i64 %used, ptr %r3\n"
+                    << "  %nested = icmp ne i64 %used, 0\n"
+                    << "  br i1 %nested, label %save, label %count\n"
+                    << "save:\n"
+                    << "  %r4 = getelementptr inbounds i8, ptr %r, i64 32\n"
+                    << "  call void @llvm.memcpy.p0.p0.i64(ptr %r4, ptr @tz.crHeads, i64 264, i1 false)\n"
+                    << "  store [33 x ptr] zeroinitializer, ptr @tz.crHeads\n"
+                    << "  store i64 0, ptr @tz.crUsed\n"
+                    << "  br label %count\n"
+                    << "count:\n"
+                    << "  %d = load i64, ptr @tz.crDepth\n"
+                    << "  %d1 = add i64 %d, 1\n"
+                    << "  store i64 %d1, ptr @tz.crDepth\n"
+                    << "  %ri = ptrtoint ptr %r to i64\n"
+                    << "  ret i64 %ri\n}\n"
+                    << "define internal void @tz.cellLeave(i64 %mark) sanitize_address {\nentry:\n"
+                    << "  %none = icmp eq i64 %mark, 0\n"
+                    << "  br i1 %none, label %done, label %go\n"
+                    << "go:\n"
+                    << "  %r = inttoptr i64 %mark to ptr\n"
+                    << "  %usedNow = load i64, ptr @tz.crUsed\n"
+                    << "  %dirty = icmp ne i64 %usedNow, 0\n"
+                    << "  br i1 %dirty, label %clear, label %restore\n"
+                    << "clear:\n"
+                    << "  store [33 x ptr] zeroinitializer, ptr @tz.crHeads\n"
+                    << "  br label %restore\n"
+                    << "restore:\n"
+                    << "  %r3 = getelementptr inbounds i8, ptr %r, i64 24\n"
+                    << "  %mask0 = load i64, ptr %r3\n"
+                    << "  store i64 %mask0, ptr @tz.crUsed\n"
+                    << "  %nested = icmp ne i64 %mask0, 0\n"
+                    << "  br i1 %nested, label %reload, label %tail\n"
+                    << "reload:\n"
+                    << "  %r4 = getelementptr inbounds i8, ptr %r, i64 32\n"
+                    << "  call void @llvm.memcpy.p0.p0.i64(ptr @tz.crHeads, ptr %r4, i64 264, i1 false)\n"
+                    << "  br label %tail\n"
+                    << "tail:\n"
+                    << "  %chunk = load ptr, ptr %r\n"
+                    << "  %r1 = getelementptr inbounds i8, ptr %r, i64 8\n"
+                    << "  %cur = load ptr, ptr %r1\n"
+                    << "  %r2 = getelementptr inbounds i8, ptr %r, i64 16\n"
+                    << "  %end = load ptr, ptr %r2\n"
+                    << "  store ptr %chunk, ptr @tz.crChunk\n"
+                    << "  store ptr %cur, ptr @tz.crCur\n"
+                    << "  store ptr %end, ptr @tz.crEnd\n"
+                    << "  %d = load i64, ptr @tz.crDepth\n"
+                    << "  %d1 = sub i64 %d, 1\n"
+                    << "  store i64 %d1, ptr @tz.crDepth\n"
+                    << "  br label %done\n"
+                    << "done:\n"
+                    << "  ret void\n}\n";
+            }
             if (usesDynRuntime && !doneDynRuntime) {
                 doneDynRuntime = true;
                 progress = true;
@@ -4640,14 +5232,58 @@ public:
                         << "  store i64 %next, ptr %p\n"
                         << "  br label %done\n"
                         << "freeIt:\n";
+                    const bool viaCells = zeroE || sizeAlignOf(et).second <= 8;
+                    if (viaCells) needCells = true;
+                    const char* freeFn = regionCell(t) ? "@tz.cellFreeR" : "@tz.cellFree";
+                    const auto freeCell = [&](const char* ptr) {
+                        if (viaCells)
+                            out << "  call void " << freeFn << "(ptr " << ptr << ", i64 ptrtoint (ptr getelementptr ("
+                                << cellTy << ", ptr null, i32 1) to i64))\n";
+                        else
+                            out << "  call void @free(ptr " << ptr << ")\n";
+                    };
                     if (!zeroE && needsDrop(et)) {
+                        // Soltar el contenido puede soltar más celdas de este mismo tipo (una lista, un
+                        // árbol). Hacerlo con llamadas anidadas desbordaría la pila en una lista larga,
+                        // así que la celda que muere mientras ya se está soltando otra se apunta en una
+                        // lista (enlazada por su propio contador, que ya no se usa) y el bucle de fuera
+                        // la procesa después. La profundidad de pila no depende del tamaño de los datos.
                         const std::string edrop = requestDrop(et);
-                        out << "  %vp = getelementptr inbounds " << cellTy << ", ptr %p, i32 0, i32 1\n"
+                        const std::string id = std::to_string(static_cast<int>(t));
+                        const char* tls = mayUseThreads() ? "thread_local " : "";
+                        out << "  %busy = load i1, ptr @tz.dropBusy.t" << id << "\n"
+                            << "  br i1 %busy, label %defer, label %run\n"
+                            << "defer:\n"
+                            << "  %head = load ptr, ptr @tz.dropList.t" << id << "\n"
+                            << "  store ptr %head, ptr %p\n"
+                            << "  store ptr %p, ptr @tz.dropList.t" << id << "\n"
+                            << "  br label %done\n"
+                            << "run:\n"
+                            << "  store i1 true, ptr @tz.dropBusy.t" << id << "\n"
+                            << "  br label %loop\n"
+                            << "loop:\n"
+                            << "  %cur = phi ptr [ %p, %run ], [ %pending, %more ]\n"
+                            << "  %vp = getelementptr inbounds " << cellTy << ", ptr %cur, i32 0, i32 1\n"
                             << "  call void " << edrop << "(ptr %vp)\n";
+                        freeCell("%cur");
+                        out << "  %pending = load ptr, ptr @tz.dropList.t" << id << "\n"
+                            << "  %empty = icmp eq ptr %pending, null\n"
+                            << "  br i1 %empty, label %finish, label %more\n"
+                            << "more:\n"
+                            << "  %link = load ptr, ptr %pending\n"
+                            << "  store ptr %link, ptr @tz.dropList.t" << id << "\n"
+                            << "  br label %loop\n"
+                            << "finish:\n"
+                            << "  store i1 false, ptr @tz.dropBusy.t" << id << "\n"
+                            << "  br label %done\n"
+                            << "done:\n  ret void\n}\n"
+                            << "@tz.dropBusy.t" << id << " = internal " << tls << "global i1 false\n"
+                            << "@tz.dropList.t" << id << " = internal " << tls << "global ptr null\n";
+                    } else {
+                        freeCell("%p");
+                        out << "  br label %done\n"
+                            << "done:\n  ret void\n}\n";
                     }
-                    out << "  call void @free(ptr %p)\n"
-                        << "  br label %done\n"
-                        << "done:\n  ret void\n}\n";
                 } else if (program.isFrozen(t)) {
                     const Type et = program.frozenElem(t);
                     const bool zeroE = isZeroSized(et);
@@ -5208,6 +5844,83 @@ public:
                     << "  %bad = icmp eq i8 %ok, 0\n"
                     << "  call void @tz.guard(i1 %bad, %diag %allocMsg)\n"
                     << "  ret void\n}\n";
+            }
+            // Drop de un valor que muere con su región: en un ejecutable no hace nada (la región se
+            // libera entera); en el IR de `emit-ir`, donde no hay regiones, es un Drop normal.
+            for (Type t : std::set<Type>(emitDropRes)) {
+                if (!doneDropRes.insert(t).second) continue;
+                progress = true;
+                needCells = true;
+                const std::string realDrop = requestDrop(t);
+                out << "define internal void @tz.dropRe.t" << static_cast<int>(t)
+                    << "(ptr %slot) alwaysinline sanitize_address {\nentry:\n"
+                    << "  %on = load i1, ptr @tz.cellSlab\n"
+                    << "  br i1 %on, label %skip, label %real\n"
+                    << "real:\n"
+                    << "  call void " << realDrop << "(ptr %slot)\n"
+                    << "  ret void\n"
+                    << "skip:\n"
+                    << "  store " << llvmType(t) << " zeroinitializer, ptr %slot\n"
+                    << "  ret void\n}\n";
+            }
+            // Celdas constantes compartidas: el contador lleva la marca de «nunca se libera».
+            for (Type t : emitZeroCells) {
+                if (!doneZeroCells.insert(t).second) continue;
+                progress = true;
+                const Type et = program.sharedElem(t);
+                const std::string cellTy = isZeroSized(et) ? "{ i64 }" : ("{ i64, " + llvmType(et) + " }");
+                out << "@tz.zeroCell.t" << static_cast<int>(t) << " = internal global " << cellTy
+                    << " { i64 4611686018427387905"
+                    << (isZeroSized(et) ? "" : ", " + llvmType(et) + " zeroinitializer") << " }\n";
+            }
+            // Adelanto de caché: solo merece la pena cuando la tabla ya no cabe en la caché más cercana.
+            for (const bool sliceKey : {true, false}) {
+                const auto wanted = sliceKey ? emitMapPrefetchStr : emitMapPrefetchInt;
+                auto& done = sliceKey ? doneMapPrefetchStr : doneMapPrefetchInt;
+                for (Type t : wanted) {
+                    if (!done.insert(t).second) continue;
+                    progress = true;
+                    const Type kt = program.mapKey(t), vt = program.mapVal(t);
+                    const std::string vs = isZeroSized(vt) ? "0" : strideExpr(vt);
+                    usedDecls.insert(sliceKey ? "tz_col_map_prefetch_str" : "tz_col_map_prefetch_int");
+                    out << "define internal void @tz.mapPrefetch" << (sliceKey ? "Str" : "Int") << ".t"
+                        << static_cast<int>(t) << "(%table %t, "
+                        << (sliceKey ? "%text %s, i64 %lo, i64 %hi" : "i64 %k")
+                        << ") alwaysinline sanitize_address {\nentry:\n"
+                        << "  %t.tmp = alloca %table\n";
+                    if (sliceKey) out << "  %s.tmp = alloca %text\n";
+                    out << "  %buckets = extractvalue %table %t, 2\n"
+                        << "  %big = icmp ugt i32 %buckets, 4096\n"
+                        << "  br i1 %big, label %go, label %done\n"
+                        << "go:\n"
+                        << "  store %table %t, ptr %t.tmp\n";
+                    if (sliceKey) {
+                        out << "  store %text %s, ptr %s.tmp\n"
+                            << "  call void @tz_col_map_prefetch_str(ptr %t.tmp, ptr %s.tmp, i64 %lo, i64 %hi, i64 "
+                            << keyStrideExpr(kt) << ", i64 " << vs << ")\n";
+                    } else {
+                        out << "  call void @tz_col_map_prefetch_int(ptr %t.tmp, i64 %k, i64 "
+                            << keyStrideExpr(kt) << ", i64 " << vs << ")\n";
+                    }
+                    out << "  br label %done\n"
+                        << "done:\n  ret void\n}\n";
+                }
+            }
+            const auto mapSlotsCopy = emitMapSlots;
+            for (Type t : mapSlotsCopy) {
+                if (!doneMapSlots.insert(t).second) continue;
+                progress = true;
+                const Type kt = program.mapKey(t), vt = program.mapVal(t);
+                usedDecls.insert("tz_col_map_slot");
+                out << "define internal ptr @tz.mapSlot.t" << static_cast<int>(t)
+                    << "(ptr %slot, " << llvmType(kt) << " %k, %diag %allocMsg) sanitize_address {\nentry:\n"
+                    << "  %k.tmp = alloca " << keyStorageLlvm(kt) << "\n";
+                emitStoreKey(out, kt, "%k", "%k.tmp", "%ks");
+                out << "  %p = call ptr @tz_col_map_slot(ptr %slot, ptr %k.tmp, i32 " << keyKindOf(kt)
+                    << ", i64 " << keyStrideExpr(kt) << ", i64 " << strideExpr(vt) << ")\n"
+                    << "  %bad = icmp eq ptr %p, null\n"
+                    << "  call void @tz.guard(i1 %bad, %diag %allocMsg)\n"
+                    << "  ret ptr %p\n}\n";
             }
             const auto mapSetsCopy = emitMapSets;
             for (Type t : mapSetsCopy) {
@@ -5786,11 +6499,33 @@ public:
                 const bool zeroE = isZeroSized(et);
                 const std::string eLlvm = llvmType(et);
                 const std::string cellTy = zeroE ? "{ i64 }" : ("{ i64, " + eLlvm + " }");
+                const bool cell = zeroE || sizeAlignOf(et).second <= 8;
+                if (cell) needCells = true;
+                const std::string cellBytes = "i64 ptrtoint (ptr getelementptr (" + cellTy + ", ptr null, i32 1) to i64)";
                 out << "define internal ptr @tz.rcNew.t" << static_cast<int>(t)
-                    << "(" << eLlvm << " %v, %diag %allocMsg) sanitize_address {\nentry:\n"
-                    << "  %p = call noalias ptr @tz.malloc(i64 ptrtoint (ptr getelementptr (" << cellTy
-                    << ", ptr null, i32 1) to i64), %diag %allocMsg)\n"
-                    << "  store i64 1, ptr %p\n";
+                    << "(" << eLlvm << " %v, %diag %allocMsg) sanitize_address {\nentry:\n";
+                if (regionCell(t)) {
+                    // Dentro de una región la celda sale de la memoria de la región (reutilizando lo que
+                    // ya se liberó dentro, o avanzando un puntero). Es una celda contada normal: lo que
+                    // muere dentro se reutiliza y lo que sigue vivo al salir se devuelve con la región.
+                    out << "  %rd = load i64, ptr @tz.crDepth\n"
+                        << "  %inRegion = icmp ne i64 %rd, 0\n"
+                        << "  br i1 %inRegion, label %reg, label %norm\n"
+                        << "reg:\n"
+                        << "  %rp = call noalias ptr @tz.regionAlloc(" << cellBytes << ", %diag %allocMsg)\n"
+                        << "  store i64 1, ptr %rp\n"
+                        << "  br label %fill\n"
+                        << "norm:\n"
+                        << "  %np = call noalias ptr @tz.cellAlloc(" << cellBytes << ", %diag %allocMsg)\n"
+                        << "  store i64 1, ptr %np\n"
+                        << "  br label %fill\n"
+                        << "fill:\n"
+                        << "  %p = phi ptr [ %rp, %reg ], [ %np, %norm ]\n";
+                } else {
+                    out << "  %p = call noalias ptr " << (cell ? "@tz.cellAlloc" : "@tz.malloc")
+                        << "(" << cellBytes << ", %diag %allocMsg)\n"
+                        << "  store i64 1, ptr %p\n";
+                }
                 if (!zeroE) {
                     out << "  %vp = getelementptr inbounds " << cellTy << ", ptr %p, i32 0, i32 1\n"
                         << "  store " << eLlvm << " %v, ptr %vp\n";
@@ -7751,7 +8486,11 @@ public:
 } // namespace veloz::native
 
 namespace veloz {
-std::string emitLLVM(const Program& p, RuntimeABI abi, bool auditCopies) {
+std::string emitLLVM(const Program& checkedProgram, RuntimeABI abi, bool auditCopies) {
+    // Copia de trabajo: la bajada añade variantes de funciones que no forman parte del programa
+    // comprobado (ni las ve el intérprete).
+    Program p = checkedProgram;
+    native::addCellVariants(p);
     const auto entry = std::find_if(p.functions.begin(), p.functions.end(),
         [&](const Function& f) { return !f.isTest && f.name == p.entryMain; });
     if (entry == p.functions.end() || !entry->params.empty() || entry->result != Type::Void) {

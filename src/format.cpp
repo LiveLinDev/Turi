@@ -23,7 +23,7 @@ bool binary(std::string_view text) {
     constexpr std::array operators = {"+"sv, "-"sv, "*"sv, "/"sv, "%"sv, "=="sv, "!="sv, "<"sv,
         "<="sv, ">"sv, ">="sv, "||"sv, "&&"sv, "&"sv, "|"sv, "^"sv, "<<"sv, ">>"sv, ">>>"sv,
         "="sv, "+="sv, "-="sv, "*="sv, "/="sv, "%="sv, "&="sv, "|="sv, "^="sv, "<<="sv, ">>="sv, ">>>="sv,
-        "->"sv, "=>"sv, ".."sv};
+        "->"sv, "=>"sv, ".."sv, "..="sv};
     return oneOf(text, operators);
 }
 
@@ -105,8 +105,8 @@ class Formatter {
     }
     bool needsSpace(std::string_view raw, bool genericOpen, bool genericClose, bool closureClose) const {
         if (prev.empty() || raw == "," || raw == ":" || raw == ")" || raw == "]" || raw == "." ||
-            raw == ".." || raw == "?" || genericClose || genericOpen || closureClose || closureJustOpened) return false;
-        if (prev == "(" || prev == "[" || prev == "." || prev == ".." || prev == "@" || prefix || (genericDepth > 0 && prev == "<")) return false;
+            raw == ".." || raw == "..=" || raw == "?" || genericClose || genericOpen || closureClose || closureJustOpened) return false;
+        if (prev == "(" || prev == "[" || prev == "." || prev == ".." || prev == "..=" || prev == "@" || prefix || (genericDepth > 0 && prev == "<")) return false;
         if (raw == "[") {
             constexpr std::array noSpaceBeforeIndex = {"return"sv, "in"sv, "assert"sv, "match"sv, "else"sv, "mut"sv, "requires"sv, "ensures"sv};
             const bool indexTarget = prev == ")" || prev == "]" || prev == "?" || prevKind == TokenKind::Quoted ||
@@ -116,7 +116,8 @@ class Formatter {
         }
         if (raw == "}") return prev != "{";
         if (raw == "(") {
-            constexpr std::array expressionWords = {"assert"sv, "return"sv, "if"sv, "while"sv, "in"sv, "match"sv, "requires"sv, "ensures"sv};
+            constexpr std::array expressionWords = {"assert"sv, "return"sv, "if"sv, "while"sv, "in"sv, "match"sv, "requires"sv, "ensures"sv,
+                                                    "let"sv, "var"sv, "for"sv, "else"sv};
             return oneOf(prev, expressionWords) ||
                 (prev != ">" && prev != ">>" && prev != ">>>" && prev != ")" && prev != "]" && prevKind != TokenKind::Word);
         }
@@ -129,7 +130,8 @@ public:
             const auto& token = tokens[i];
             if (token.kind == TokenKind::Newline) { inputLine(); continue; }
             if (token.kind == TokenKind::Comment) { appendComment(token); continue; }
-            auto raw = source.substr(token.span.start, token.span.end - token.span.start);
+            auto raw = token.rewritten ? std::string_view(token.text)
+                                       : source.substr(token.span.start, token.span.end - token.span.start);
             const bool genericOpen = raw == "<" &&
                 (beforePrev == "fn" || prev == "impl" || (prevKind == TokenKind::Word && pascal(prev)) ||
                  isGenericCallOpen(tokens, i));
@@ -212,7 +214,7 @@ public:
 
 std::string formatSource(std::string_view source) {
     parse(source);
-    auto tokens = syntax::lex(source, true);
+    auto tokens = syntax::tolerate(syntax::lex(source, true), true);
     return Formatter(source, tokens).format();
 }
 } // namespace veloz

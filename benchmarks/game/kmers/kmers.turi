@@ -1,0 +1,27 @@
+fn main() {
+    let n = if argsCount() > 1 { parseInt(argAt(1)) } else { 10000 }
+    let k = 8
+    let bases = "ACGT"
+    var sb = sbWithCap(n)
+    var seed = 42
+    for i in 0..n {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        sb.pushByte(bases[(seed / 65536) % 4])
+    }
+    let seq = sb.str()
+    var counts: Map<str, int> = mapNew()
+    for i in 0..n - k + 1 {
+        counts[seq[i..i + k]] += 1
+    }
+    var best = 0
+    var checksum = 0
+    for c in counts.values() {
+        if c > best {
+            best = c
+        }
+        checksum = (checksum + c * c) % 1000000007
+    }
+    print(counts.len())
+    print(best)
+    print(checksum)
+}

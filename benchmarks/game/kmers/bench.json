@@ -1,0 +1,1 @@
+{"args": [4000000], "about": "k-mer counting: string slices as keys of a hash map (strings, hashing, allocation)"}

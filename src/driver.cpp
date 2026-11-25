@@ -62,6 +62,34 @@ struct Stage {
     }
     ~Stage() { std::error_code ignored; fs::remove_all(dir, ignored); }
 };
+fs::path envPath(const char* asciiName);
+// VELOZ_KEEP_STAGE=DIR conserva program.ll y los runtimes C para inspeccionar o reproducir a mano.
+void keepStage(const Stage& stage) {
+    const auto keep = envPath("VELOZ_KEEP_STAGE");
+    if (keep.empty()) return;
+    std::error_code ignored;
+    fs::create_directories(keep, ignored);
+    for (const auto& entry : fs::directory_iterator(stage.dir, ignored)) {
+        if (!entry.is_regular_file(ignored)) continue;
+        const auto ext = entry.path().extension();
+        if (ext == ".ll" || ext == ".c" || ext == ".json")
+            fs::copy_file(entry.path(), keep / entry.path().filename(), fs::copy_options::overwrite_existing, ignored);
+    }
+}
+// VELOZ_CLANG_FLAGS="-a -b" añade opciones a la compilación del IR (experimentos de ajuste).
+std::vector<std::string> extraClangFlags() {
+    std::vector<std::string> out;
+    const std::string text = envPath("VELOZ_CLANG_FLAGS").string();
+    std::size_t i = 0;
+    while (i < text.size()) {
+        while (i < text.size() && text[i] == ' ') ++i;
+        std::size_t j = i;
+        while (j < text.size() && text[j] != ' ') ++j;
+        if (j > i) out.push_back(text.substr(i, j - i));
+        i = j;
+    }
+    return out;
+}
 void publish(const fs::path& from, const fs::path& to) {
 #ifdef _WIN32
     if (!MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
@@ -188,6 +216,16 @@ void replaceFile(const fs::path& file, std::string_view text) {
 }
 void buildBinary(const Program& program, const fs::path& destination, const BuildOptions& options) {
     auto ir = emitLLVM(program);
+    // `sanitize_address` solo sirve cuando se instrumenta el IR de `emit-ir` con -fsanitize=address.
+    // En un ejecutable normal impide a LLVM especular cargas (LICM, if-conversion, vectorización).
+    // El reservador de celdas pequeñas solo se activa en ejecutables: en el IR de `emit-ir` queda
+    // en malloc/free para que ASan y las auditorías vean cada celda.
+    constexpr std::string_view cellsOff = "@tz.cellSlab = internal constant i1 false";
+    if (auto at = ir.find(cellsOff); at != std::string::npos)
+        ir.replace(at, cellsOff.size(), "@tz.cellSlab = internal constant i1 true");
+    constexpr std::string_view sanitizeAttr = " sanitize_address";
+    for (auto at = ir.find(sanitizeAttr); at != std::string::npos; at = ir.find(sanitizeAttr, at))
+        ir.erase(at, sanitizeAttr.size());
     Stage stage(destination);
     auto source = stage.dir / "program.ll";
     writeFile(source, ir);
@@ -224,6 +262,8 @@ void buildBinary(const Program& program, const fs::path& destination, const Buil
         }
     };
     appendCpuFlags(args, options.cpu);
+    const auto tuningFlags = extraClangFlags();
+    for (const auto& flag : tuningFlags) args.push_back(pathFrom(flag));
     if (options.release) args.insert(args.end(), {"-flto", "-fuse-ld=lld"});
     if (options.hasPgoGen) {
         args.push_back(options.pgoGen.empty() ? fs::path("-fprofile-generate")
@@ -414,11 +454,13 @@ void buildBinary(const Program& program, const fs::path& destination, const Buil
             !fs::exists(exe)) {
             throw Diagnostic("E_EXTREME", "La optimización --extreme falló sin producir el ejecutable", {});
         }
-    } else if (options.release && !options.cpu.empty()) {
+    } else if (options.release && options.cpu == "avx10") {
+        // avx10 no es un nombre de CPU para el enlazador: se compila el IR a objeto con sus opciones.
         // Compile LLVM IR to native object first so lld LTO does not drop -march=<cpu> target features.
         auto irObj = stage.dir / "program.o";
         std::vector<fs::path> irArgs{clang, "-O3"};
         appendCpuFlags(irArgs, options.cpu);
+        for (const auto& flag : tuningFlags) irArgs.push_back(pathFrom(flag));
         if (options.hasPgoGen) {
             irArgs.push_back(options.pgoGen.empty() ? fs::path("-fprofile-generate")
                                                     : pathFrom("-fprofile-generate=" + options.pgoGen));
@@ -448,9 +490,19 @@ void buildBinary(const Program& program, const fs::path& destination, const Buil
         if (clangProcess(linkArgs))
             throw Diagnostic("E_CLANG", "Clang no pudo enlazar el ejecutable", {});
     } else {
+        if (options.release && !options.cpu.empty()) {
+            // Programa y runtime se optimizan juntos (LTO): las llamadas a mapas, cadenas y E/S se
+            // integran y se especializan. El enlazador recibe la CPU para generar código de -march.
+#ifdef _WIN32
+            args.push_back(pathFrom("-Wl,/mllvm:-mcpu=" + options.cpu));
+#else
+            args.push_back(pathFrom("-Wl,-mllvm,-mcpu=" + options.cpu));
+#endif
+        }
         if (clangProcess(args))
             throw Diagnostic("E_CLANG", "Clang no pudo producir el ejecutable", {});
     }
+    keepStage(stage);
     publish(exe, destination);
 }
 }

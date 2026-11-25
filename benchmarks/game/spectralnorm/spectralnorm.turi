@@ -1,0 +1,45 @@
+fn evalA(i: int, j: int) -> float {
+    return 1.0 / float((i + j) * (i + j + 1) / 2 + i + 1)
+}
+
+fn timesA(u: [float], out: mut [float]) requires out.len() == u.len() {
+    let n = u.len()
+    for i in 0..n {
+        var a = 0.0
+        for j in 0..n {
+            a += evalA(i, j) * u[j]
+        }
+        out[i] = a
+    }
+}
+
+fn timesAt(u: [float], out: mut [float]) requires out.len() == u.len() {
+    let n = u.len()
+    for i in 0..n {
+        var a = 0.0
+        for j in 0..n {
+            a += evalA(j, i) * u[j]
+        }
+        out[i] = a
+    }
+}
+
+fn main() {
+    let n = if argsCount() > 1 { parseInt(argAt(1)) } else { 100 }
+    var u = repeat(1.0, n)
+    var v = repeat(0.0, n)
+    var tmp = repeat(0.0, n)
+    for step in 0..10 {
+        timesA(u, mut tmp)
+        timesAt(tmp, mut v)
+        timesA(v, mut tmp)
+        timesAt(tmp, mut u)
+    }
+    var vBv = 0.0
+    var vv = 0.0
+    for i in 0..n {
+        vBv += u[i] * v[i]
+        vv += v[i] * v[i]
+    }
+    print((vBv / vv).sqrt())
+}

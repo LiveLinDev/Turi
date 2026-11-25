@@ -154,6 +154,7 @@ int dispatch(const std::vector<std::string>& args) {
         }
         if (cmd == "fix") {
             if (args.size() != 2) usage();
+            strictSyntax() = true; // fix reescribe a la forma canónica
             SourceOverrides overrides;
             for (unsigned edits = 0; ; ++edits) {
                 try {
@@ -333,5 +334,9 @@ int main(int argc, char** argv) {
 #else
     for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
 #endif
+    if (const auto strictFlag = std::find(args.begin(), args.end(), "--strict"); strictFlag != args.end()) {
+        args.erase(strictFlag);
+        veloz::strictSyntax() = true;
+    }
     return veloz::dispatch(args);
 }

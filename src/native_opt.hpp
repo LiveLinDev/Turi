@@ -174,7 +174,8 @@ inline void recognizeMinMaxAbs(FunctionIR& fn) {
 // Pass 1b: Small-function inliner (respecting safeDepths for R_DEPTH parity)
 // ---------------------------------------------------------------------------
 inline bool isScalarType(Type t) {
-    return t == Type::Int || t == Type::Bool || t == Type::Void;
+    // Escalares sin propiedad: se pueden copiar entre funciones al integrar (inline) sin liberar nada.
+    return t == Type::Int || t == Type::Bool || t == Type::Void || Program::isNumericType(t);
 }
 
 inline bool isInlineCandidate(const FunctionIR& fn, std::size_t idx,
@@ -193,10 +194,18 @@ inline bool isInlineCandidate(const FunctionIR& fn, std::size_t idx,
         ops += b.ops.size();
         for (const auto& op : b.ops) {
             switch (op.op) {
+            case Op::Builtin: {
+                // Conversiones y matemática escalar pura: no tocan memoria ni ranuras.
+                constexpr std::array pure = {"castNum", "bitcast", "enumInt", "sqrt", "floor", "ceil", "round",
+                                             "abs", "sin", "cos", "isNaN", "isInf"};
+                if (std::find(pure.begin(), pure.end(), std::string_view(op.data)) == pure.end() ||
+                    !op.mutArgSlots.empty())
+                    return false;
+                break;
+            }
             case Op::Call:
             case Op::ExternCall:
             case Op::FnPtr:
-            case Op::Builtin:
             case Op::BoxDyn:
             case Op::DynCall:
             case Op::MakeClosure:
@@ -1201,6 +1210,14 @@ class FunctionProver {
         return res;
     }
 
+    // `arr[i].campo = v` / `arr[i] op= v` sobre un arreglo que no es [int]: solo cambia un elemento.
+    // La cabecera (puntero y longitud) queda intacta, así que no cuenta como escritura de la ranura.
+    bool isElementOnlyPlaceSet(const Operation& op) const {
+        return op.op == Op::PlaceSet && !op.placeSteps.empty() && op.placeSteps[0].isIndex &&
+               op.slot < fn.slots.size() && fn.slots[op.slot] != Type::IntArray &&
+               programPtr && programPtr->isArray(fn.slots[op.slot]);
+    }
+
     void analyzeStructure() {
         const std::size_t nSlots = fn.slots.size();
         storeCount.assign(nSlots, 0);
@@ -1216,7 +1233,7 @@ class FunctionProver {
                     ++storeCount[op.slot];
                     singleSlotVal[op.slot] = op.inputs[0];
                 }
-                if (op.op == Op::FieldSet || op.op == Op::PlaceSet) {
+                if (op.op == Op::FieldSet || (op.op == Op::PlaceSet && !isElementOnlyPlaceSet(op))) {
                     ++storeCount[op.slot];
                 }
                 if (op.op == Op::Call || op.op == Op::ExternCall || op.op == Op::Builtin || op.op == Op::DynCall || op.op == Op::ClosureCall) {
@@ -1239,7 +1256,8 @@ class FunctionProver {
             const auto& lp = cfg.loops[li];
             for (unsigned b : lp.body) {
                 for (const auto& op : fn.blocks[b].ops) {
-                    if (op.op == Op::Store || op.op == Op::FieldSet || op.op == Op::PlaceSet) loopWritten[li].insert(op.slot);
+                    if (op.op == Op::Store || op.op == Op::FieldSet ||
+                        (op.op == Op::PlaceSet && !isElementOnlyPlaceSet(op))) loopWritten[li].insert(op.slot);
                     if (op.op == Op::Call || op.op == Op::ExternCall || op.op == Op::Builtin || op.op == Op::DynCall || op.op == Op::ClosureCall) {
                         for (unsigned ms : op.mutArgSlots) {
                             if (ms < nSlots) loopWritten[li].insert(ms);
@@ -4130,10 +4148,12 @@ public:
             Env root;
             root.slotEpoch.assign(fn.slots.size(), 0);
             for (std::size_t i = 0; i < fn.source.params.size() && i < initialParamRanges.size(); ++i) {
-                if (initialParamRanges[i]) {
-                    root.diffs.addLower({false, static_cast<unsigned>(i)}, initialParamRanges[i]->lower);
-                    root.diffs.addUpper({false, static_cast<unsigned>(i)}, initialParamRanges[i]->upper);
-                }
+                if (!initialParamRanges[i]) continue;
+                // Para un parámetro arreglo el rango inicial acota su longitud al entrar.
+                const bool isArrayParam = i < fn.slots.size() && isAnyArrayType(programPtr, fn.slots[i]);
+                const DiffKey key{isArrayParam, static_cast<unsigned>(i)};
+                root.diffs.addLower(key, initialParamRanges[i]->lower);
+                root.diffs.addUpper(key, initialParamRanges[i]->upper);
             }
             processBlockCollecting(0, std::move(root), visited);
             if (pass <= 3) updateGlobalElemRanges();
@@ -4732,8 +4752,15 @@ private:
                 }
                 break;
             }
-            case Op::FieldSet:
             case Op::PlaceSet:
+                if (!op.placeSteps.empty() && op.placeSteps[0].isIndex && !op.inputs.empty() &&
+                    op.slot < fn.slots.size() && !op.placeSteps[0].boundsProven &&
+                    proveInBounds(b, op.slot, op.inputs[0], env)) {
+                    op.placeSteps[0].boundsProven = true;
+                }
+                if (isElementOnlyPlaceSet(op)) break;
+                [[fallthrough]];
+            case Op::FieldSet:
                 if (op.slot < fn.slots.size()) invalidateSlot(env, op.slot);
                 break;
             case Op::Builtin:
@@ -9165,6 +9192,8 @@ inline void assignAliasGroupsAndStackArena(std::vector<FunctionIR>& functions,
     }
 }
 
+inline constexpr std::int64_t kFastIntParamMax = 1048575;      // 2^20 - 1
+inline constexpr std::int64_t kFastArrayLenMax = 1073741823;   // 2^30 - 1
 struct FastClone {
     std::string origName;
     std::string fastName;
@@ -14181,7 +14210,7 @@ inline void optimizeIR(std::vector<FunctionIR>& functions,
                     if ((op.op == Op::Index || op.op == Op::IndexSet) && !op.boundsProven) ++s.unchecked;
                     if (op.op == Op::PlaceSet) {
                         for (const auto& st : op.placeSteps)
-                            if (st.isIndex) { ++s.unchecked; break; }
+                            if (st.isIndex && !st.boundsProven) { ++s.unchecked; break; }
                     }
                     if (op.op == Op::Negate && op.result.type == Type::Int && !op.overflowProven) ++s.unchecked;
                     if (op.op == Op::AbsDiff && !op.overflowProven) ++s.unchecked;
@@ -14207,23 +14236,35 @@ inline void optimizeIR(std::vector<FunctionIR>& functions,
         for (std::size_t i = 0; i < functions.size(); ++i) {
             const FunctionIR& orig = functions[i];
             if (orig.source.isTest || orig.source.isExternC || orig.source.name == entryMain) continue;
-            if (orig.source.params.empty() || orig.source.params.size() > 3) continue;
-            bool allIntParams = true;
-            for (const auto& p : orig.source.params) {
-                if (p.byRef || p.type != Type::Int) { allIntParams = false; break; }
+            // Versión rápida con guarda: se supone al entrar que los enteros por valor caben en
+            // 0..2^20 y que los arreglos tienen menos de 2^30 elementos. El trampolín comprueba la
+            // suposición una vez por llamada; si no se cumple, se ejecuta la versión completa.
+            // Dentro, el probador elimina comprobaciones que con rangos desconocidos no puede quitar.
+            if (orig.source.params.empty() || orig.source.params.size() > 8) continue;
+            std::vector<std::optional<IntRange>> initParams(orig.source.params.size());
+            bool anyAssumption = false;
+            for (std::size_t pi = 0; pi < orig.source.params.size(); ++pi) {
+                const auto& p = orig.source.params[pi];
+                if (!p.byRef && p.type == Type::Int) {
+                    initParams[pi] = IntRange{0, kFastIntParamMax};
+                    anyAssumption = true;
+                } else if (detail::isAnyArrayType(programPtr, p.type)) {
+                    initParams[pi] = IntRange{0, kFastArrayLenMax};
+                    anyAssumption = true;
+                }
             }
-            if (!allIntParams) continue;
-            bool hasCall = false;
+            if (!anyAssumption) continue;
+            bool opaque = false;
             for (const auto& blk : orig.blocks) {
                 for (const auto& op : blk.ops) {
-                    if (op.op == Op::Call || op.op == Op::ExternCall || op.op == Op::FnPtr || op.op == Op::Builtin || op.op == Op::BoxDyn || op.op == Op::DynCall || op.op == Op::MakeClosure || op.op == Op::ClosureCall) { hasCall = true; break; }
+                    if (op.op == Op::ExternCall || op.op == Op::FnPtr || op.op == Op::BoxDyn || op.op == Op::DynCall ||
+                        op.op == Op::MakeClosure || op.op == Op::ClosureCall) { opaque = true; break; }
                 }
-                if (hasCall) break;
+                if (opaque) break;
             }
-            if (hasCall) continue;
+            if (opaque) continue;
 
             FunctionIR fast = orig;
-            std::vector<std::optional<IntRange>> initParams(orig.source.params.size(), IntRange{0, 1048575});
             detail::FunctionProver fastProver(fast, fnReturnRanges, std::move(initParams), programPtr);
             fastProver.run();
             fastProver.applyCompaction(true);

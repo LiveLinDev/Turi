@@ -1,0 +1,43 @@
+struct Node {
+    left: Node?
+    right: Node?
+}
+
+fn build(depth: int) -> Node {
+    if depth == 0 {
+        return Node { left: None, right: None }
+    }
+    Node { left: Some(build(depth - 1)), right: Some(build(depth - 1)) }
+}
+
+fn check(n: Node) -> int {
+    match n.left {
+        Some(l) => {
+            match n.right {
+                Some(r) => { return 1 + check(l) + check(r) }
+                None => { return 1 }
+            }
+        }
+        None => { return 1 }
+    }
+}
+
+fn main() {
+    let n = if argsCount() > 1 { parseInt(argAt(1)) } else { 10 }
+    let minDepth = 4
+    let maxDepth = if minDepth + 2 > n { minDepth + 2 } else { n }
+    let stretch = maxDepth + 1
+    print(check(build(stretch)))
+    let longTree = build(maxDepth)
+    var depth = minDepth
+    while depth <= maxDepth {
+        let iterations = 1 << (maxDepth - depth + minDepth)
+        var total = 0
+        for i in 0..iterations {
+            total += check(build(depth))
+        }
+        print(total)
+        depth += 2
+    }
+    print(check(longTree))
+}

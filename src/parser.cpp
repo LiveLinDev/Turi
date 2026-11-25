@@ -157,6 +157,23 @@ std::vector<Token> lex(std::string_view source, bool keepComments, std::size_t f
                 }
                 kind = isFloat ? TokenKind::Float : TokenKind::Digits;
             }
+        } else if (c == '\'' && cursor + 1 < source.size() && source[cursor] != '\\' && source[cursor] != '\'' &&
+                   source[cursor + 1] == '\'' && static_cast<unsigned char>(source[cursor]) < 0x80) {
+            // Literal de carácter 'a': el entero de su código ASCII, como en C, Rust, Go o Java.
+            // Una etiqueta ('nombre) nunca va seguida de otra comilla, así que no hay ambigüedad.
+            const int code = static_cast<unsigned char>(source[cursor]);
+            cursor += 2;
+            tokens.push_back({TokenKind::Digits, {start, cursor}, std::to_string(code)});
+            tokens.back().isChar = true;
+            continue;
+        } else if (c == '\'' && cursor + 2 < source.size() && source[cursor] == '\\' && source[cursor + 2] == '\'' &&
+                   std::string_view("nrt0\\'\"").find(source[cursor + 1]) != std::string_view::npos) {
+            const char esc = source[cursor + 1];
+            const int code = esc == 'n' ? 10 : esc == 'r' ? 13 : esc == 't' ? 9 : esc == '0' ? 0 : esc;
+            cursor += 3;
+            tokens.push_back({TokenKind::Digits, {start, cursor}, std::to_string(code)});
+            tokens.back().isChar = true;
+            continue;
         } else if (c == '\'') {
             if (cursor == source.size() || !lower(source[cursor]))
                 throw Diagnostic("E_CHAR", "Etiqueta inválida; usa 'nombre.", {start, cursor});
@@ -195,6 +212,106 @@ std::vector<Token> lex(std::string_view source, bool keepComments, std::size_t f
     tokens.push_back({TokenKind::End, {source.size(), source.size()}, {}});
     for (auto& token : tokens) token.span.file = file;
     return tokens;
+}
+// Front-end tolerante. Un modelo entrenado con otros lenguajes escribe por costumbre grafías que
+// Turi no usa (`;`, `elif`, `let mut`, `x++`, `println!`, `and`, `True`, `0..=n`). Cuando solo hay
+// una lectura posible se convierten aquí en su forma canónica en vez de devolver un error que
+// cuesta otra ronda de reparación. `veloz fmt` sigue escribiendo la forma canónica.
+std::vector<Token> tolerate(std::vector<Token> in, bool force) {
+    const bool strict = strictSyntax() && !force;
+    std::vector<Token> out;
+    out.reserve(in.size() + 8);
+    const auto sym = [](const Token* t, std::string_view text) {
+        return t && t->kind == TokenKind::Symbol && t->text == text;
+    };
+    const auto word = [](const Token* t, std::string_view text) {
+        return t && t->kind == TokenKind::Word && t->text == text;
+    };
+    const auto endsLine = [&](const Token* t) {
+        return !t || t->kind == TokenKind::Newline || t->kind == TokenKind::End || sym(t, "}") || sym(t, ";");
+    };
+    const auto endsOperand = [&](const Token* t) {
+        if (!t) return false;
+        if (t->kind == TokenKind::Digits || t->kind == TokenKind::Float || t->kind == TokenKind::Quoted ||
+            t->kind == TokenKind::Interp) return true;
+        if (t->kind == TokenKind::Symbol) return t->text == ")" || t->text == "]";
+        constexpr std::array opens = {"if", "while", "return", "in", "assert", "match", "let", "var", "else",
+                                      "and", "or", "not", "for", "requires", "ensures"};
+        return t->kind == TokenKind::Word && !contains(opens, std::string_view(t->text));
+    };
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        Token& t = in[i];
+        const Token* next = i + 1 < in.size() ? &in[i + 1] : nullptr;
+        const Token* after = i + 2 < in.size() ? &in[i + 2] : nullptr;
+        const Token* prev = out.empty() ? nullptr : &out.back();
+        if (sym(&t, "..") && sym(next, "=") && next->span.start == t.span.end) {
+            // Rango inclusivo `a..=b` (sintaxis oficial): el parser lo baja a `a..b + 1`.
+            out.push_back({TokenKind::Symbol, {t.span.start, next->span.end, t.span.file}, "..="});
+            ++i;
+            continue;
+        }
+        if (strict) {
+            out.push_back(std::move(t));
+            continue;
+        }
+        if (sym(&t, ";")) {
+            // `;` al final de una sentencia equivale al salto de línea.
+            if (!prev || prev->kind == TokenKind::Newline || sym(prev, "{")) continue;
+            if (next && (next->kind == TokenKind::Newline || next->kind == TokenKind::End || sym(next, "}"))) continue;
+            out.push_back({TokenKind::Newline, t.span, "\n", true});
+            continue;
+        }
+        if (word(&t, "elif")) {
+            out.push_back({TokenKind::Word, t.span, "else", true});
+            out.push_back({TokenKind::Word, t.span, "if", true});
+            continue;
+        }
+        if (word(&t, "let") && word(next, "mut")) {
+            out.push_back({TokenKind::Word, t.span, "var", true});
+            ++i;
+            continue;
+        }
+        if ((sym(&t, "+") || sym(&t, "-")) && next && next->kind == TokenKind::Symbol && next->text == t.text &&
+            next->span.start == t.span.end && endsOperand(prev) && endsLine(after)) {
+            // `x++` / `x--` como sentencia.
+            out.push_back({TokenKind::Symbol, {t.span.start, next->span.end, t.span.file}, t.text + "=", true});
+            out.push_back({TokenKind::Digits, next->span, "1", true});
+            ++i;
+            continue;
+        }
+        if ((word(&t, "println") || word(&t, "print") || word(&t, "eprintln") || word(&t, "eprint")) &&
+            (!prev || !sym(prev, "."))) {
+            const bool bang = sym(next, "!") && sym(after, "(");
+            if (bang || (t.text.ends_with("ln") && sym(next, "("))) {
+                out.push_back({TokenKind::Word, t.span, t.text.starts_with("e") ? "eprint" : "print", true});
+                if (bang) ++i;
+                continue;
+            }
+        }
+        if ((word(&t, "and") || word(&t, "or")) && endsOperand(prev) && next &&
+            !sym(next, "=") && !sym(next, ":") && !sym(next, ".") && !sym(next, "(") && !sym(next, ",") &&
+            !sym(next, ")") && next->kind != TokenKind::Newline) {
+            out.push_back({TokenKind::Symbol, t.span, t.text == "and" ? "&&" : "||", true});
+            continue;
+        }
+        if (word(&t, "not") && !endsOperand(prev) && next &&
+            (next->kind == TokenKind::Word || next->kind == TokenKind::Digits || sym(next, "("))) {
+            out.push_back({TokenKind::Symbol, t.span, "!", true});
+            continue;
+        }
+        if ((word(&t, "True") || word(&t, "False")) && !sym(next, ".") && !sym(next, "{") && !sym(next, "(") &&
+            !sym(next, "<") && !sym(prev, ".") && !sym(prev, ":") && !sym(prev, "->")) {
+            out.push_back({TokenKind::Word, t.span, t.text == "True" ? "true" : "false", true});
+            continue;
+        }
+        if ((word(&t, "null") || word(&t, "nil")) && !sym(next, ".") && !sym(next, "(") && !sym(prev, ".") &&
+            !word(prev, "let") && !word(prev, "var")) {
+            out.push_back({TokenKind::Word, t.span, "None", true});
+            continue;
+        }
+        out.push_back(std::move(t));
+    }
+    return out;
 }
 } // namespace veloz::syntax
 
@@ -243,6 +360,7 @@ struct Tree {
     Expr value;
     unsigned height;
 };
+
 
 struct ParsedAttrs {
     bool reprC = false;
@@ -385,8 +503,13 @@ class Parser {
             suggest("E_PRINTLN", "Usa print para imprimir una línea.", {current().span.start, tokens[pos+1].span.end},
                     "print", "print(42)");
         if (current().kind != TokenKind::Word || reserved(current().text)) expected("nombre");
-        if (!lower(current().text.front()) || current().text.find('_') != std::string::npos)
+        // camelCase es la forma canónica; snake_case se acepta porque es lo que escriben los modelos
+        // que vienen de Python, Rust o C. Los nombres de valores empiezan en minúscula o `_`.
+        const char head = current().text.front();
+        if (strictSyntax() && (!lower(head) || current().text.find('_') != std::string::npos))
             throw Diagnostic("E_NAME", "Los nombres de valores siguen camelCase ASCII.", current().span);
+        if (!(lower(head) || (head == '_' && current().text.size() > 1)) || current().text.starts_with("__"))
+            throw Diagnostic("E_NAME", "Los nombres de valores empiezan en minúscula (camelCase o snake_case).", current().span);
         return tokens[pos++];
     }
     Token bindingName() {
@@ -465,9 +588,22 @@ class Parser {
         if (name.find('.') == std::string::npos) name = qualifyType(name);
         return name;
     }
+    // Las lecturas especulativas retroceden con mark()/rewind(). Cerrar un genérico divide el token
+    // `>>` en el propio vector, así que cada división se anota para poder deshacerla.
+    struct Mark { std::size_t pos, edits; };
+    std::vector<std::pair<std::size_t, Token>> tokenEdits;
+    Mark mark() const { return {pos, tokenEdits.size()}; }
+    void rewind(const Mark& m) {
+        while (tokenEdits.size() > m.edits) {
+            tokens[tokenEdits.back().first] = std::move(tokenEdits.back().second);
+            tokenEdits.pop_back();
+        }
+        pos = m.pos;
+    }
     void consumeCloseAngle() {
         if (take(">")) return;
         auto split = [&](std::string_view rem) {
+            tokenEdits.emplace_back(pos, tokens[pos]);
             tokens[pos].text = std::string(rem);
             tokens[pos].span.start += 1;
         };
@@ -496,6 +632,25 @@ class Parser {
         return list;
     }
     Type baseType() {
+        if (take("(")) {
+            // (A, B) es una tupla: la estructura genérica Tuple2<A, B> de la biblioteca base.
+            newlines();
+            std::vector<Type> parts;
+            if (!at(")")) {
+                do {
+                    newlines();
+                    if (at(")")) break;
+                    parts.push_back(type());
+                    newlines();
+                } while (take(","));
+            }
+            const Span close = current().span;
+            need(")");
+            if (parts.size() == 1) return parts[0];
+            if (parts.size() < 2 || parts.size() > 4)
+                throw Diagnostic("E_TUPLE", "Una tupla tiene de 2 a 4 elementos; usa un struct para más.", close);
+            return typeApp("Tuple" + std::to_string(parts.size()), parts);
+        }
         if (take("fn")) {
             newlines();
             need("(");
@@ -1033,6 +1188,26 @@ class Parser {
             }
             Tree inside = expression(1, depth + 1);
             newlines();
+            if (at(",")) {
+                // (a, b) construye una tupla con tuple2(a, b) de la biblioteca base.
+                Expr tuple{ExprKind::Call, first.span, {}, {}};
+                unsigned height = inside.height;
+                tuple.args.push_back(std::move(inside.value));
+                while (take(",")) {
+                    newlines();
+                    if (at(")")) break;
+                    Tree element = expression(1, depth + 1);
+                    height = std::max(height, element.height);
+                    tuple.args.push_back(std::move(element.value));
+                    newlines();
+                }
+                need(")");
+                tuple.span = {first.span.start, previous().span.end, first.span.file};
+                if (tuple.args.size() < 2 || tuple.args.size() > 4)
+                    throw Diagnostic("E_TUPLE", "Una tupla tiene de 2 a 4 elementos; usa un struct para más.", tuple.span);
+                tuple.text = "tuple" + std::to_string(tuple.args.size());
+                return {std::move(tuple), height + 1};
+            }
             need(")");
             inside.value.span = {first.span.start, previous().span.end};
             return inside;
@@ -1066,7 +1241,10 @@ class Parser {
             auto kind = first.kind == TokenKind::Digits ? ExprKind::Integer :
                         first.kind == TokenKind::Float ? ExprKind::Float :
                         first.kind == TokenKind::Quoted ? ExprKind::String : ExprKind::Boolean;
-            return {{kind, first.span, first.text, {}}, 1};
+            Expr literal{kind, first.span, first.text, {}};
+            // Un literal de carácter recuerda su carácter: donde se espera un str vale como str.
+            if (first.isChar) literal.labels.push_back(std::string(1, static_cast<char>(std::stoi(first.text))));
+            return {std::move(literal), 1};
         }
         if (take("if")) {
             return parseIfExpr(depth, first.span.start);
@@ -1140,6 +1318,24 @@ class Parser {
         return {std::move(callExpr), height};
     }
 
+    // `a..=b` se baja a `a..b + 1`.
+    static Tree plusOne(Tree upper) {
+        const Span span = upper.value.span;
+        Expr sum{ExprKind::Binary, span, "+", {}};
+        sum.args.push_back(std::move(upper.value));
+        sum.args.push_back(Expr{ExprKind::Integer, {span.end, span.end, span.file}, "1", {}});
+        return {std::move(sum), upper.height + 1};
+    }
+    // Tras `?`, ¿empieza otro operando en la misma línea? Entonces es el ternario `c ? a : b` de
+    // C/JS/Java; el operador de propagación `x?` nunca va seguido de un operando.
+    bool ternaryFollows() const {
+        if (!at("?") || pos + 1 >= tokens.size()) return false;
+        const Token& n = tokens[pos + 1];
+        if (n.kind == TokenKind::Digits || n.kind == TokenKind::Float || n.kind == TokenKind::Quoted ||
+            n.kind == TokenKind::Interp) return true;
+        if (n.kind == TokenKind::Word) return n.text != "else" && n.text != "in";
+        return n.kind == TokenKind::Symbol && (n.text == "(" || n.text == "-" || n.text == "!" || n.text == "[");
+    }
     Tree expression(int minimum = 1, unsigned depth = 1) {
         guardDepth(depth, current().span);
         auto left = primary(depth);
@@ -1149,9 +1345,11 @@ class Parser {
                 newlines();
                 Tree index = expression(1, depth + 1);
                 newlines();
-                if (take("..")) {
+                if (take("..") || take("..=")) {
+                    const bool inclusive = previous().text == "..=";
                     newlines();
                     Tree hi = expression(1, depth + 1);
+                    if (inclusive) hi = plusOne(std::move(hi));
                     newlines();
                     need("]");
                     Expr sl{ExprKind::Slice, {left.value.span.start, previous().span.end}, {}, {}};
@@ -1166,6 +1364,15 @@ class Parser {
                 access.args.push_back(std::move(left.value));
                 access.args.push_back(std::move(index.value));
                 left = {std::move(access), 1 + std::max(left.height, index.height)};
+                continue;
+            }
+            if (at(".") && pos + 1 < tokens.size() && tokens[pos + 1].kind == TokenKind::Digits &&
+                !tokens[pos + 1].isChar) {
+                // t.0, t.1: elementos de una tupla.
+                pos += 2;
+                Expr field{ExprKind::Field, {left.value.span.start, previous().span.end}, "v" + previous().text, {}};
+                field.args.push_back(std::move(left.value));
+                left = {std::move(field), left.height + 1};
                 continue;
             }
             if (take(".")) {
@@ -1205,6 +1412,38 @@ class Parser {
                 left = {std::move(cc), std::max(left.height + 1, callHeight)};
                 continue;
             }
+            if (ternaryFollows()) {
+                // Lectura especulativa: solo es ternario si tras el operando aparece `:`.
+                const auto saved = mark();
+                std::optional<std::pair<Tree, Tree>> arms;
+                try {
+                    ++pos;
+                    Tree yes = expression(1, depth + 1);
+                    newlines();
+                    if (take(":")) {
+                        newlines();
+                        Tree no = expression(1, depth + 1);
+                        arms.emplace(std::move(yes), std::move(no));
+                    }
+                } catch (const Diagnostic&) {
+                    arms.reset();
+                }
+                if (arms && minimum > 1) {
+                    rewind(saved); // lo construye el nivel exterior, con la condición completa
+                    return left;
+                }
+                if (arms) {
+                    auto& [yes, no] = *arms;
+                    const Span span{left.value.span.start, no.value.span.end, left.value.span.file};
+                    const unsigned height = 1 + std::max(left.height, std::max(yes.height, no.height));
+                    IfPtr node(new IfExpr{std::move(left.value), {}, std::move(yes.value), {}, std::move(no.value)});
+                    Expr res{ExprKind::If, span, {}, {}};
+                    res.ifExpr = std::move(node);
+                    left = {std::move(res), height};
+                    continue;
+                }
+                rewind(saved);
+            }
             if (take("?")) {
                 Expr tr{ExprKind::Try, {left.value.span.start, previous().span.end}, {}, {}};
                 tr.args.push_back(std::move(left.value));
@@ -1230,13 +1469,21 @@ class Parser {
         }
     }
 
+    // `let (a, b) = e` se parte en varias sentencias: la primera la devuelve statement() y el resto
+    // espera aquí hasta que el bloque las añade.
+    std::vector<Stmt> pendingStmts;
+    void addStatement(std::vector<Stmt>& body, unsigned depth) {
+        body.push_back(statement(depth));
+        for (auto& extra : pendingStmts) body.push_back(std::move(extra));
+        pendingStmts.clear();
+    }
     std::vector<Stmt> block(unsigned depth) {
         guardDepth(depth, current().span);
         need("{");
         newlines();
         std::vector<Stmt> body;
         while (!take("}")) {
-            body.push_back(statement(depth));
+            addStatement(body, depth);
             if (!at("}") && !newlines()) expected("salto de línea o }");
         }
         return body;
@@ -1321,11 +1568,11 @@ class Parser {
         };
         while (!take("}")) {
             if (isKeywordStmtStart()) {
-                body.push_back(statement(depth));
+                addStatement(body, depth);
                 if (!at("}") && !newlines()) expected("salto de línea o }");
                 continue;
             }
-            const auto savedPos = pos;
+            const auto savedPos = mark();
             if (at("match") || at("if")) {
                 try {
                     Tree cand = expression(1, depth);
@@ -1336,20 +1583,20 @@ class Parser {
                         height = std::max(height, cand.height + 1);
                         return body;
                     }
-                    pos = savedPos;
+                    rewind(savedPos);
                     (void)afterExpr;
                 } catch (const Diagnostic&) {
-                    pos = savedPos;
+                    rewind(savedPos);
                 }
-                body.push_back(statement(depth));
+                addStatement(body, depth);
                 if (!at("}") && !newlines()) expected("salto de línea o }");
                 continue;
             }
             Tree cand = expression(1, depth);
             constexpr std::array assign = {"=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="};
             if (current().kind == TokenKind::Symbol && contains(assign, current().text)) {
-                pos = savedPos;
-                body.push_back(statement(depth));
+                rewind(savedPos);
+                addStatement(body, depth);
                 if (!at("}") && !newlines()) expected("salto de línea o }");
                 continue;
             }
@@ -1359,11 +1606,50 @@ class Parser {
                 height = std::max(height, cand.height + 1);
                 return body;
             }
-            pos = savedPos;
-            body.push_back(statement(depth));
+            rewind(savedPos);
+            addStatement(body, depth);
             if (!at("}") && !newlines()) expected("salto de línea o }");
         }
         return body;
+    }
+
+    // ¿La expresión produce un valor en todas sus ramas? (un `if`/`match` usado como sentencia no).
+    static bool yieldsValue(const Expr& e) {
+        if (e.kind == ExprKind::If) {
+            if (!e.ifExpr || !e.ifExpr->thenResult || !e.ifExpr->elseResult) return false;
+            return yieldsValue(*e.ifExpr->thenResult) && yieldsValue(*e.ifExpr->elseResult);
+        }
+        if (e.kind == ExprKind::Match) {
+            if (!e.matchExpr || e.matchExpr->arms.empty()) return false;
+            for (const auto& arm : e.matchExpr->arms)
+                if (!arm.resultExpr || !yieldsValue(*arm.resultExpr)) return false;
+            return true;
+        }
+        return true;
+    }
+    // Cuerpo de función. Si la función devuelve un valor y el cuerpo termina en una expresión suelta,
+    // esa expresión es el resultado (retorno implícito de Rust, Kotlin, Ruby...): equivale a `return expr`.
+    std::vector<Stmt> functionBody(bool returnsValue) {
+        if (returnsValue) {
+            const auto saved = mark();
+            try {
+                std::optional<Expr> tail;
+                unsigned height = 1;
+                auto body = exprBlock(1, tail, height);
+                if (tail && yieldsValue(*tail)) {
+                    Stmt ret{};
+                    ret.kind = StmtKind::Return;
+                    ret.span = tail->span;
+                    ret.exprs.push_back(std::move(*tail));
+                    body.push_back(std::move(ret));
+                    return body;
+                }
+                if (!tail) return body;
+            } catch (const Diagnostic&) {
+            }
+            rewind(saved);
+        }
+        return block(1);
     }
 
     std::vector<MatchArm> matchArms(unsigned depth) {
@@ -1375,7 +1661,7 @@ class Parser {
             MatchArm arm = matchArmHeader();
             newlines();
             if (at("{")) arm.body = block(depth);
-            else arm.body.push_back(statement(depth));
+            else addStatement(arm.body, depth);
             arm.span = {start.start, previous().span.end};
             arms.push_back(std::move(arm));
             const bool sepComma = take(",");
@@ -1391,10 +1677,13 @@ class Parser {
         stmt.name = bindingName().text;
         need("in");
         stmt.exprs.push_back(expression().value);
-        if (take("..")) {
+        if (take("..") || take("..=")) {
+            const bool inclusive = previous().text == "..=";
             stmt.kind = StmtKind::For;
             newlines();
-            stmt.exprs.push_back(expression().value);
+            Tree upper = expression();
+            if (inclusive) upper = plusOne(std::move(upper));
+            stmt.exprs.push_back(std::move(upper.value));
         } else {
             stmt.kind = StmtKind::ForEach;
         }
@@ -1429,6 +1718,40 @@ class Parser {
             if (stmt.kind == StmtKind::Let && at("mut"))
                 suggest("E_LET_MUT", "Declara una variable mutable con var.", {start, current().span.end},
                         "var", "var n = 1");
+            if (at("(")) {
+                // let (a, b) = e   ->   let tup = e; let a = tup.v0; let b = tup.v1
+                ++pos;
+                std::vector<Token> names;
+                do {
+                    newlines();
+                    if (at(")")) break;
+                    names.push_back(bindingName());
+                    newlines();
+                } while (take(","));
+                need(")");
+                if (names.size() < 2 || names.size() > 4)
+                    throw Diagnostic("E_TUPLE", "Una tupla tiene de 2 a 4 elementos; usa un struct para más.", previous().span);
+                need("=");
+                newlines();
+                const StmtKind kind = stmt.kind;
+                const std::string holder = "tup__" + std::to_string(start);
+                stmt.kind = StmtKind::Let;
+                stmt.name = holder;
+                stmt.exprs.push_back(expression().value);
+                stmt.span = {start, previous().span.end};
+                for (std::size_t k = 0; k < names.size(); ++k) {
+                    if (names[k].text == "_") continue;
+                    Stmt part{};
+                    part.kind = kind;
+                    part.span = names[k].span;
+                    part.name = names[k].text;
+                    Expr field{ExprKind::Field, names[k].span, "v" + std::to_string(k), {}};
+                    field.args.push_back(Expr{ExprKind::Name, names[k].span, holder, {}});
+                    part.exprs.push_back(std::move(field));
+                    pendingStmts.push_back(std::move(part));
+                }
+                return stmt;
+            }
             stmt.name = (stmt.kind == StmtKind::Let ? bindingName() : name()).text;
             if (take(":")) stmt.annotation = type();
             need("=");
@@ -1511,6 +1834,25 @@ class Parser {
                     outFields.assign(rev.rbegin(), rev.rend());
                     return node->text;
                 };
+                auto repeatableIndex = [](auto& self, const Expr& node) -> bool {
+                    switch (node.kind) {
+                    case ExprKind::Integer:
+                    case ExprKind::String:
+                    case ExprKind::Boolean:
+                    case ExprKind::Name:
+                        return true;
+                    case ExprKind::Unary:
+                    case ExprKind::Binary:
+                    case ExprKind::Field:
+                    case ExprKind::Index:
+                    case ExprKind::Slice:
+                        for (const auto& arg : node.args)
+                            if (!self(self, arg)) return false;
+                        return true;
+                    default:
+                        return false;
+                    }
+                };
                 auto extractPlaceChain = [](auto& self, const Expr* node, std::string& outRoot,
                                             std::vector<LValueStep>& outSteps, std::vector<Expr>& outIndices) -> bool {
                     if (node->kind == ExprKind::Name) {
@@ -1570,6 +1912,23 @@ class Parser {
                         stmt.exprs = std::move(idxExprs);
                         stmt.exprs.push_back(std::move(rhs.value));
                     }
+                } else if (std::vector<std::string> chain;
+                           lhs.value.kind == ExprKind::Index && op.size() >= 2 &&
+                           repeatableIndex(repeatableIndex, lhs.value.args[1]) &&
+                           extractFieldChain(&lhs.value.args[0], chain)) {
+                    // `a[i] op= v` con índice sin efectos es exactamente `a[i] = a[i] op v`. Se baja por
+                    // IndexSet/FieldSet para que las pruebas de rango y la vectorización lo cubran.
+                    guardDepth(std::max(lhs.height, rhs.height) + 1, lhs.value.span);
+                    std::string rootName = *extractFieldChain(&lhs.value.args[0], chain);
+                    Expr index = lhs.value.args[1];
+                    Expr binary{ExprKind::Binary, {start, rhs.value.span.end}, op.substr(0, op.size() - 1), {}};
+                    binary.args.push_back(std::move(lhs.value));
+                    binary.args.push_back(std::move(rhs.value));
+                    stmt.kind = chain.empty() ? StmtKind::IndexSet : StmtKind::FieldSet;
+                    stmt.name = std::move(rootName);
+                    if (!chain.empty()) stmt.labels = std::move(chain);
+                    stmt.exprs.push_back(std::move(index));
+                    stmt.exprs.push_back(std::move(binary));
                 } else {
                     std::vector<std::string> fields;
                     if (auto root = extractFieldChain(&lhs.value, fields); root && !fields.empty()) {
@@ -2002,10 +2361,10 @@ class Parser {
         }
         fn.bodyStart = current().span.end;
         if (withBody) {
-            fn.body = block(1);
+            fn.body = functionBody(fn.result != Type::Void);
         } else if (interfaceMethod && at("{")) {
             fn.hasDefaultBody = true;
-            fn.body = block(1);
+            fn.body = functionBody(fn.result != Type::Void);
         }
         fn.span = {start, previous().span.end};
         genericScope.resize(outerScopeSize);
@@ -2095,12 +2454,12 @@ class Parser {
         return declaration;
     }
 public:
-    explicit Parser(std::string_view input) : source(input), tokens(lex(input)) { collectExternSymbols(); }
+    explicit Parser(std::string_view input) : source(input), tokens(tolerate(lex(input))) { collectExternSymbols(); }
     Parser(std::string_view input, Program& sharedProgram, std::string_view moduleName, std::size_t file)
-        : source(input), tokens(lex(input, false, file)), shared(&sharedProgram), module(moduleName) { collectExternSymbols(); }
+        : source(input), tokens(tolerate(lex(input, false, file))), shared(&sharedProgram), module(moduleName) { collectExternSymbols(); }
     Parser(std::string_view input, Program* sharedProgram, std::string_view moduleName,
            std::size_t file, std::vector<std::string> generics)
-        : source(input), tokens(lex(input, false, file)), shared(sharedProgram),
+        : source(input), tokens(tolerate(lex(input, false, file))), shared(sharedProgram),
           module(moduleName), genericScope(std::move(generics)) { collectExternSymbols(); }
     Tree parseSubExpr(unsigned depth) {
         newlines();

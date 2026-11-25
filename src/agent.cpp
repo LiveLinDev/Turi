@@ -418,7 +418,7 @@ std::map<std::string, IrEffects> analyzeProgramEffects(const Program& checked) {
                     break;
                 case native::Op::PlaceSet:
                     for (const auto& st : op.placeSteps) {
-                        if (st.isIndex) {
+                        if (st.isIndex && !st.boundsProven) {
                             noteTrap(op.span, "acceso por índice en lugar asignable (R_BOUNDS)");
                             break;
                         }
@@ -1135,10 +1135,13 @@ std::vector<CheckSite> collectCheckSites(const Program& checked, std::string_vie
                     break;
                 case native::Op::PlaceSet:
                     for (const auto& st : op.placeSteps) {
-                        if (st.isIndex) {
+                        if (!st.isIndex) continue;
+                        if (st.boundsProven) {
+                            emit("bounds", "eliminated", op.span,
+                                 "Índice del lugar asignable en rango probado estáticamente.");
+                        } else {
                             emit("bounds", "kept", op.span,
                                  "Índice en lugar asignable compuesto; se conserva guarda R_BOUNDS.");
-                            break;
                         }
                     }
                     break;

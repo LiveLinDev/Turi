@@ -141,7 +141,18 @@ def extract_llvm_fn(ir_text: str, fn_name: str) -> str:
     start = ir_text.rfind("define ", 0, pos)
     end = ir_text.find("\n}\n", pos)
     assert start >= 0 and end >= 0
-    return ir_text[start:end + 3]
+    body = ir_text[start:end + 3]
+    # Una función con versión rápida protegida por guarda es un trampolín: el cuerpo real está en
+    # sus variantes .fast y .slow.
+    for variant in ("fast", "slow"):
+        vpos = ir_text.find(f'@"turi.{fn_name}.{variant}"(')
+        while vpos >= 0:
+            vstart = ir_text.rfind("\n", 0, vpos) + 1
+            if ir_text.startswith("define ", vstart):
+                body += ir_text[vstart:ir_text.find("\n}\n", vpos) + 3]
+                break
+            vpos = ir_text.find(f'@"turi.{fn_name}.{variant}"(', vpos + 1)
+    return body
 
 
 def test_move_elision_and_audit(cli: Path, workdir: Path):

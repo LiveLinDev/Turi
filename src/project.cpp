@@ -1,9 +1,11 @@
 #include "project.hpp"
+#include "prelude.hpp"
 
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
 #include <optional>
+#include <map>
 #include <set>
 #include <system_error>
 #ifdef _WIN32
@@ -395,7 +397,148 @@ public:
 };
 
 }
+namespace {
+// Nombres de función que aparecen en llamadas; los de método se anotan aparte para los alias.
+struct CallNames {
+    std::set<std::string> calls, methods;
+    void expr(const Expr& e) {
+        if (e.kind == ExprKind::Call || e.kind == ExprKind::Name) calls.insert(e.text);
+        if (e.kind == ExprKind::MethodCall) { calls.insert(e.text); methods.insert(e.text); }
+        for (const auto& a : e.args) expr(a);
+        if (e.closure) stmts(e.closure->body);
+        if (e.matchExpr) {
+            expr(e.matchExpr->scrutinee);
+            for (const auto& arm : e.matchExpr->arms) {
+                stmts(arm.body);
+                if (arm.resultExpr) expr(*arm.resultExpr);
+            }
+        }
+        if (e.ifExpr) {
+            expr(e.ifExpr->condition);
+            stmts(e.ifExpr->thenBody);
+            stmts(e.ifExpr->elseBody);
+            if (e.ifExpr->thenResult) expr(*e.ifExpr->thenResult);
+            if (e.ifExpr->elseResult) expr(*e.ifExpr->elseResult);
+        }
+    }
+    void stmts(const std::vector<Stmt>& body) {
+        for (const auto& s : body) {
+            for (const auto& e : s.exprs) expr(e);
+            stmts(s.body);
+            stmts(s.otherwise);
+            for (const auto& arm : s.arms) {
+                stmts(arm.body);
+                if (arm.resultExpr) expr(*arm.resultExpr);
+            }
+        }
+    }
+    void function(const Function& fn) {
+        stmts(fn.body);
+        for (const auto& e : fn.requiresClauses) expr(e);
+        for (const auto& e : fn.ensuresClauses) expr(e);
+    }
+};
+
+// Método escrito por costumbre de otros lenguajes -> funciones de la biblioteca que lo implementan.
+const std::vector<std::pair<std::string, std::vector<std::string>>>& preludeMethodAliases() {
+    static const std::vector<std::pair<std::string, std::vector<std::string>>> aliases = {
+        {"repeat", {"strRepeat"}}, {"reverse", {"strReverse", "reversed"}},
+        {"max", {"arrayMax"}}, {"min", {"arrayMin"}}, {"sum", {"sum", "sumFloat"}},
+        {"indexOf", {"indexOfInt", "indexOfStr"}}, {"contains", {"indexOfInt", "indexOfStr"}},
+        {"includes", {"indexOfInt", "indexOfStr"}},
+        {"toUpperCase", {"upper"}}, {"toUpper", {"upper"}}, {"to_uppercase", {"upper"}}, {"toUppercase", {"upper"}},
+        {"toLowerCase", {"lower"}}, {"toLower", {"lower"}}, {"to_lowercase", {"lower"}}, {"toLowercase", {"lower"}},
+        {"strip", {"trim"}}, {"count", {"countOf", "countIf"}},
+    };
+    return aliases;
+}
+
+// Añade al programa las funciones de la biblioteca base que nombra (y las que estas usan).
+// Si no nombra ninguna, el programa queda exactamente como estaba.
+void injectPrelude(Program& program) {
+    if (strictSyntax()) return;
+    CallNames used;
+    for (const auto& fn : program.functions) used.function(fn);
+    for (const auto& impl : program.impls)
+        for (const auto& fn : impl.methods) used.function(fn);
+    for (const auto& iface : program.interfaces)
+        for (const auto& fn : iface.methods) used.function(fn);
+    for (const auto& c : program.consts) used.expr(c.init);
+    for (const auto& [method, targets] : preludeMethodAliases())
+        if (used.methods.contains(method)) used.calls.insert(targets.begin(), targets.end());
+
+    // Las tuplas son estructuras de la biblioteca: se conservan solo si el programa las nombra.
+    bool usesTuples = used.calls.contains("tuple2") || used.calls.contains("tuple3") || used.calls.contains("tuple4");
+    for (const auto& app : program.typeApps)
+        if (app.baseName == "Tuple2" || app.baseName == "Tuple3" || app.baseName == "Tuple4") usesTuples = true;
+
+    Program scratch = program;
+    const std::size_t before = scratch.functions.size();
+    const std::size_t dataBefore = scratch.data.size();
+    scratch.files.push_back({"<biblioteca base>", turiPreludeSource()});
+    parseInto(scratch, scratch.files.back().text, "", scratch.files.size() - 1);
+
+    // Tipos recursivos: por cada tipo guardado en celda, dos funciones que pasan de `T?` al campo
+    // en celda y al revés. El comprobador las llama solo donde los dos tipos se encuentran
+    // (`insert(n.left, k)` con un parámetro `Tree?`); el programador no las ve.
+    std::vector<std::string> cellHelpers;
+    {
+        std::string text;
+        for (const auto& name : recursiveTypeNames(program)) {
+            const bool plain = !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+                return std::isalnum(ch) != 0;
+            });
+            if (!plain) continue;
+            text += "fn tzCellGet" + name + "(o: Shared<" + name + ">?) -> " + name + "? {\n"
+                    "    match o {\n        Some(c) => { return Some(sharedGet(c)) }\n        None => { return None }\n    }\n}\n"
+                    "fn tzCellNew" + name + "(o: " + name + "?) -> Shared<" + name + ">? {\n"
+                    "    match o {\n        Some(v) => { return Some(sharedNew(v)) }\n        None => { return None }\n    }\n}\n";
+            cellHelpers.push_back("tzCellGet" + name);
+            cellHelpers.push_back("tzCellNew" + name);
+        }
+        if (!text.empty()) {
+            scratch.files.push_back({"<celdas>", std::move(text)});
+            parseInto(scratch, scratch.files.back().text, "", scratch.files.size() - 1);
+        }
+    }
+
+    std::set<std::string> userNames;
+    for (std::size_t i = 0; i < before; ++i) userNames.insert(scratch.functions[i].sourceName);
+    std::map<std::string, std::size_t> library;
+    for (std::size_t i = before; i < scratch.functions.size(); ++i)
+        if (!userNames.contains(scratch.functions[i].sourceName)) library.emplace(scratch.functions[i].sourceName, i);
+
+    std::set<std::string> needed;
+    std::vector<std::string> pending;
+    for (const auto& name : used.calls)
+        if (library.contains(name) && needed.insert(name).second) pending.push_back(name);
+    for (const auto& name : cellHelpers)
+        if (library.contains(name)) needed.insert(name);
+    if (pending.empty() && !usesTuples && cellHelpers.empty()) return;
+    while (!pending.empty()) {
+        const std::string name = std::move(pending.back());
+        pending.pop_back();
+        CallNames inner;
+        inner.function(scratch.functions[library.at(name)]);
+        for (const auto& [method, targets] : preludeMethodAliases())
+            if (inner.methods.contains(method)) inner.calls.insert(targets.begin(), targets.end());
+        for (const auto& callee : inner.calls)
+            if (library.contains(callee) && needed.insert(callee).second) pending.push_back(callee);
+    }
+    std::vector<Function> kept;
+    kept.reserve(before + needed.size());
+    for (std::size_t i = 0; i < scratch.functions.size(); ++i) {
+        if (i < before || needed.contains(scratch.functions[i].sourceName)) kept.push_back(std::move(scratch.functions[i]));
+    }
+    scratch.functions = std::move(kept);
+    if (!usesTuples) scratch.data.resize(dataBefore);
+    program = std::move(scratch);
+}
+} // namespace
+
 Program loadProject(const fs::path& entry, const SourceOverrides& overrides) {
-    return Loader(entry, overrides).load();
+    Program program = Loader(entry, overrides).load();
+    injectPrelude(program);
+    return program;
 }
 }

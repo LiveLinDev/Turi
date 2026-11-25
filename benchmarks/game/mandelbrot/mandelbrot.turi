@@ -1,0 +1,40 @@
+fn main() {
+    let n = if argsCount() > 1 { parseInt(argAt(1)) } else { 200 }
+    let inv = 2.0 / float(n)
+    var cr = repeat(0.0, 8)
+    var zr = repeat(0.0, 8)
+    var zi = repeat(0.0, 8)
+    var inside = 0
+    var checksum = 0
+    for y in 0..n {
+        let ci = float(y) * inv - 1.0
+        var x = 0
+        while x < n {
+            for k in 0..8 {
+                cr[k] = float(x + k) * inv - 1.5
+                zr[k] = 0.0
+                zi[k] = 0.0
+            }
+            for iter in 0..50 {
+                for k in 0..8 {
+                    let r = zr[k]
+                    let i = zi[k]
+                    zr[k] = r * r - i * i + cr[k]
+                    zi[k] = 2.0 * r * i + ci
+                }
+            }
+            var byte = 0
+            for k in 0..8 {
+                byte = byte * 2
+                if x + k < n && zr[k] * zr[k] + zi[k] * zi[k] <= 4.0 {
+                    byte += 1
+                    inside += 1
+                }
+            }
+            checksum = (checksum * 31 + byte) % 1000000007
+            x += 8
+        }
+    }
+    print(inside)
+    print(checksum)
+}

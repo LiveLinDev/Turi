@@ -60,6 +60,15 @@ enum {
     TZ_KEY_U16 = 4
 };
 
+/* El hash, la comparación de claves y la búsqueda por grupo se integran siempre en quien las llama:
+   con el tipo de clave fijo en cada punto de llamada, el compilador elimina el reparto por tipo y,
+   si la longitud de la cadena se conoce, también el reparto por longitud. */
+#if defined(__GNUC__) || defined(__clang__)
+#define TZ_HOT_INLINE inline __attribute__((always_inline))
+#else
+#define TZ_HOT_INLINE inline
+#endif
+
 #define TZ_CTRL_EMPTY 0xFFu
 #define TZ_CTRL_DELETED 0x80u
 #define TZ_MAX_BUCKETS (1u << 24)
@@ -67,11 +76,11 @@ enum {
 #define TZ_FOLDHASH_MULT UINT64_C(0x2D358DCCAA6C78A5)
 #define TZ_FOLDHASH_MULT2 UINT64_C(0x8BB84B93962EACC9)
 
-static inline uint32_t tz_gstr_len(const tz_gstr* s) {
+static TZ_HOT_INLINE uint32_t tz_gstr_len(const tz_gstr* s) {
     return s->hdr & 0x7FFFFFFFu;
 }
 
-static inline const uint8_t* tz_gstr_bytes(const tz_gstr* s) {
+static TZ_HOT_INLINE const uint8_t* tz_gstr_bytes(const tz_gstr* s) {
     return tz_gstr_len(s) <= 12u ? ((const uint8_t*)s + 4) : (const uint8_t*)s->tail;
 }
 
@@ -82,7 +91,7 @@ static inline uint32_t tz_bswap32(uint32_t x) {
            ((x & 0xFF000000u) >> 24);
 }
 
-static inline uint64_t tz_folded_mul(uint64_t a, uint64_t b) {
+static TZ_HOT_INLINE uint64_t tz_folded_mul(uint64_t a, uint64_t b) {
 #if defined(__SIZEOF_INT128__)
     __uint128_t prod = (__uint128_t)a * (__uint128_t)b;
     return (uint64_t)prod ^ (uint64_t)(prod >> 64);
@@ -106,11 +115,11 @@ static inline uint64_t tz_folded_mul(uint64_t a, uint64_t b) {
 #endif
 }
 
-static inline uint64_t tz_hash_u64(uint64_t x, uint64_t seed) {
+static TZ_HOT_INLINE uint64_t tz_hash_u64(uint64_t x, uint64_t seed) {
     return tz_folded_mul(x ^ seed, TZ_FOLDHASH_MULT);
 }
 
-static inline uint64_t tz_hash_bytes(const uint8_t* p, size_t n, uint64_t seed) {
+static TZ_HOT_INLINE uint64_t tz_hash_bytes(const uint8_t* p, size_t n, uint64_t seed) {
     uint64_t h = tz_folded_mul(seed ^ (uint64_t)n, TZ_FOLDHASH_MULT2);
     if (n == 0) return h;
     while (n >= 16u) {
@@ -221,7 +230,35 @@ void tz_col_table_init_secure(tz_table* t) {
     t->seed = tz_random_seed();
 }
 
-static inline uint64_t tz_hash_key(const tz_table* t, const void* key_ptr, int32_t kk) {
+/* Mismo valor que tz_hash_bytes para una cadena en línea (hasta 12 bytes), calculado con los tres
+   campos de la cadena (longitud, prefijo de 4 bytes y cola de 8) en vez de leer sus bytes de memoria.
+   La clave llega recién escrita en tres trozos de 4, 4 y 8 bytes; una lectura de 8 bytes a caballo
+   entre dos de ellos no se puede reenviar desde las escrituras pendientes y obliga al procesador a
+   esperar a que se retiren, lo que encadena cada búsqueda con la anterior. Leyendo por campos no hay
+   lectura de memoria y las búsquedas de vueltas distintas se solapan. */
+static TZ_HOT_INLINE uint64_t tz_hash_inline_str(uint32_t n, uint32_t pref, uint64_t tail, uint64_t seed) {
+    uint64_t h = tz_folded_mul(seed ^ (uint64_t)n, TZ_FOLDHASH_MULT2);
+    if (n == 0u) return h;
+    if (n >= 8u) {
+        const uint32_t sh = 8u * (n - 8u); /* 0..32 */
+        const uint64_t a = (uint64_t)pref | (tail << 32);
+        const uint64_t b = ((uint64_t)pref >> sh) | (tail << (32u - sh));
+        return tz_folded_mul(a ^ h, b ^ TZ_FOLDHASH_MULT2);
+    }
+    if (n >= 4u) {
+        const uint32_t sh = 8u * (n - 4u); /* 0..24 */
+        const uint32_t b = (uint32_t)(((uint64_t)pref >> sh) | (tail << (32u - sh)));
+        return tz_folded_mul(((uint64_t)pref) ^ h, ((uint64_t)b) ^ TZ_FOLDHASH_MULT2);
+    }
+    {
+        const uint64_t bytes = ((uint64_t)(pref & 0xFFu)) |
+                               ((uint64_t)((pref >> (8u * (n >> 1))) & 0xFFu) << 8) |
+                               ((uint64_t)((pref >> (8u * (n - 1u))) & 0xFFu) << 16);
+        return tz_folded_mul(bytes ^ h, TZ_FOLDHASH_MULT);
+    }
+}
+
+static TZ_HOT_INLINE uint64_t tz_hash_key(const tz_table* t, const void* key_ptr, int32_t kk) {
     const uint32_t secure = t->flags & 1u;
     const uint64_t seed = secure ? t->seed : TZ_FOLDHASH_SEED;
     if (kk == TZ_KEY_STR) {
@@ -229,6 +266,7 @@ static inline uint64_t tz_hash_key(const tz_table* t, const void* key_ptr, int32
         uint32_t len = tz_gstr_len(s);
         const uint8_t* p = tz_gstr_bytes(s);
         if (secure) return tz_siphash13(p, (size_t)len, seed, tz_folded_mul(seed, TZ_FOLDHASH_MULT));
+        if (len <= 12u) return tz_hash_inline_str(len, s->pref, (uint64_t)s->tail, seed);
         return tz_hash_bytes(p, (size_t)len, seed);
     }
     uint64_t k = 0;
@@ -253,11 +291,11 @@ static inline uint64_t tz_hash_key(const tz_table* t, const void* key_ptr, int32
     return tz_hash_u64(k, seed);
 }
 
-static inline uint8_t tz_h2(uint64_t h) {
+static TZ_HOT_INLINE uint8_t tz_h2(uint64_t h) {
     return (uint8_t)((h >> 57) & 0x7Fu);
 }
 
-static inline uint8_t tz_gstr_eq(const tz_gstr* a, const tz_gstr* b) {
+static TZ_HOT_INLINE uint8_t tz_gstr_eq(const tz_gstr* a, const tz_gstr* b) {
     uint32_t la = tz_gstr_len(a);
     uint32_t lb = tz_gstr_len(b);
     if (la != lb) return 0u;
@@ -305,7 +343,7 @@ static inline void tz_gstr_drop(tz_gstr* s) {
     memset(s, 0, sizeof(*s));
 }
 
-static inline uint8_t tz_key_eq(const void* a, const void* b, int32_t kk) {
+static TZ_HOT_INLINE uint8_t tz_key_eq(const void* a, const void* b, int32_t kk) {
     if (kk == TZ_KEY_STR) return tz_gstr_eq((const tz_gstr*)a, (const tz_gstr*)b);
     if (kk == TZ_KEY_I64) {
         int64_t va = 0, vb = 0;
@@ -328,7 +366,7 @@ static inline uint8_t tz_key_eq(const void* a, const void* b, int32_t kk) {
     return *(const uint8_t*)a == *(const uint8_t*)b;
 }
 
-static inline uint16_t tz_match_byte(const uint8_t* ctrl_group, uint8_t target) {
+static TZ_HOT_INLINE uint16_t tz_match_byte(const uint8_t* ctrl_group, uint8_t target) {
 #if defined(__SSE2__)
     __m128i g = _mm_loadu_si128((const __m128i*)ctrl_group);
     return (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(g, _mm_set1_epi8((char)target)));
@@ -348,7 +386,7 @@ static inline uint16_t tz_match_byte(const uint8_t* ctrl_group, uint8_t target) 
 #endif
 }
 
-static inline uint32_t tz_ctz16(uint16_t m) {
+static TZ_HOT_INLINE uint32_t tz_ctz16(uint16_t m) {
 #if defined(__clang__) || defined(__GNUC__)
     return (uint32_t)__builtin_ctz((unsigned)m);
 #else
@@ -641,6 +679,110 @@ uint8_t tz_col_map_set(tz_table* t, const void* key_ptr, const void* val_ptr,
     t->len += 1u;
     if (first_del == UINT32_MAX) t->growth_left -= 1u;
     return 1u;
+}
+
+/* Adelanto de caché para bucles de mapa. El compilador llama aquí con la clave que usará una vuelta
+   posterior del bucle; solo se calcula su hash y se piden las líneas de caché donde vivirá. No lee
+   ni escribe la tabla, y una clave imposible (corte fuera de rango) se descarta sin fallar: la vuelta
+   adelantada puede no llegar a ejecutarse nunca. */
+static TZ_HOT_INLINE void tz_prefetch_home(const tz_table* t, uint64_t h, int64_t ks, int64_t vs) {
+#if defined(__GNUC__) || defined(__clang__)
+    const uint32_t pos = (uint32_t)h & (t->buckets - 1u);
+    const uint8_t* ctrl = t->data;
+    const uint8_t* keys = ctrl + t->buckets + 16u;
+    __builtin_prefetch(ctrl + pos);
+    __builtin_prefetch(keys + (size_t)pos * (size_t)ks);
+    if (vs > 0) __builtin_prefetch(keys + (size_t)t->buckets * (size_t)ks + (size_t)pos * (size_t)vs, 1);
+#else
+    (void)t; (void)h; (void)ks; (void)vs;
+#endif
+}
+
+void tz_col_map_prefetch_str(const tz_table* t, const tz_gstr* s, int64_t lo, int64_t hi, int64_t ks, int64_t vs) {
+    if (!t->data || t->buckets == 0u || (t->flags & 1u)) return;
+    const int64_t len = (int64_t)tz_gstr_len(s);
+    if (lo < 0 || hi < lo || hi > len) return;
+    tz_prefetch_home(t, tz_hash_bytes(tz_gstr_bytes(s) + lo, (size_t)(hi - lo), TZ_FOLDHASH_SEED), ks, vs);
+}
+
+void tz_col_map_prefetch_int(const tz_table* t, int64_t key, int64_t ks, int64_t vs) {
+    if (!t->data || t->buckets == 0u || (t->flags & 1u)) return;
+    tz_prefetch_home(t, tz_hash_key(t, &key, TZ_KEY_I64), ks, vs);
+}
+
+/* Devuelve la dirección del valor de `key`. Si la clave no existe la inserta con el valor a cero.
+   Una sola búsqueda para `m[k] op= v`. NULL solo si no hay memoria. */
+void* tz_col_map_slot(tz_table* t, const void* key_ptr, int32_t kk, int64_t ks, int64_t vs) {
+    if (!t->data || t->buckets == 0u) {
+        if (!tz_col_table_reserve(t, 1, ks, vs, kk)) return NULL;
+    }
+    uint8_t* ctrl = t->data;
+    uint8_t* keys = t->data + t->buckets + 16u;
+    uint8_t* vals = keys + (size_t)t->buckets * (size_t)ks;
+    uint32_t mask = t->buckets - 1u;
+    uint64_t h = tz_hash_key(t, key_ptr, kk);
+    uint8_t h2 = tz_h2(h);
+    uint32_t pos = (uint32_t)h & mask;
+    uint32_t step = 0;
+    uint32_t first_del = UINT32_MAX;
+    uint32_t empty_idx = UINT32_MAX;
+
+    for (;;) {
+        uint16_t m = tz_match_byte(ctrl + pos, h2);
+        while (m != 0u) {
+            uint32_t idx = (pos + tz_ctz16(m)) & mask;
+            if (tz_key_eq(keys + (size_t)idx * (size_t)ks, key_ptr, kk))
+                return vals + (size_t)idx * (size_t)vs;
+            m &= (uint16_t)(m - 1u);
+        }
+        if (first_del == UINT32_MAX) {
+            uint16_t dm = tz_match_byte(ctrl + pos, TZ_CTRL_DELETED);
+            if (dm != 0u) first_del = (pos + tz_ctz16(dm)) & mask;
+        }
+        uint16_t em = tz_match_byte(ctrl + pos, TZ_CTRL_EMPTY);
+        if (em != 0u) {
+            empty_idx = (pos + tz_ctz16(em)) & mask;
+            break;
+        }
+        step += 16u;
+        pos = (pos + step) & mask;
+    }
+
+    uint32_t target = first_del;
+    if (target == UINT32_MAX) {
+        if (t->growth_left == 0u) {
+            uint32_t new_b = (t->len * 2u < t->buckets) ? t->buckets : (t->buckets * 2u);
+            if (new_b > TZ_MAX_BUCKETS || !tz_rehash(t, new_b, ks, vs, kk)) return NULL;
+            ctrl = t->data;
+            keys = t->data + t->buckets + 16u;
+            vals = keys + (size_t)t->buckets * (size_t)ks;
+            mask = t->buckets - 1u;
+            pos = (uint32_t)h & mask;
+            step = 0;
+            for (;;) {
+                uint16_t em = tz_match_byte(ctrl + pos, TZ_CTRL_EMPTY);
+                if (em != 0u) {
+                    empty_idx = (pos + tz_ctz16(em)) & mask;
+                    break;
+                }
+                step += 16u;
+                pos = (pos + step) & mask;
+            }
+        }
+        target = empty_idx;
+    }
+
+    if (kk == TZ_KEY_STR) {
+        if (!tz_gstr_clone_into((tz_gstr*)(keys + (size_t)target * (size_t)ks), (const tz_gstr*)key_ptr))
+            return NULL;
+    } else {
+        memcpy(keys + (size_t)target * (size_t)ks, key_ptr, (size_t)ks);
+    }
+    if (vs > 0) memset(vals + (size_t)target * (size_t)vs, 0, (size_t)vs);
+    tz_set_ctrl(ctrl, t->buckets, target, h2);
+    t->len += 1u;
+    if (first_del == UINT32_MAX) t->growth_left -= 1u;
+    return vals + (size_t)target * (size_t)vs;
 }
 
 uint8_t tz_col_map_del(tz_table* t, const void* key_ptr, int32_t kk, int64_t ks, int64_t vs, tz_drop_fn val_drop) {

@@ -2580,7 +2580,62 @@ struct Checker {
         }
     }
 
+    // Envuelve una expresión ya tipada en una llamada integrada de un argumento, sin volver a tiparla.
+    Type wrapTyped(Expr& e, const char* builtin) {
+        Expr inner = std::move(e);
+        Expr call{ExprKind::Call, inner.span, builtin, {}};
+        call.args.push_back(std::move(inner));
+        e = std::move(call);
+        Expr* const outer = preTypedArg0;
+        preTypedArg0 = &e.args[0];
+        const Type t = typeOf(e);
+        preTypedArg0 = outer;
+        return t;
+    }
+    // Un valor en celda (el campo que cierra un tipo recursivo) se lee como el valor que contiene.
+    Type derefCell(Expr& e, Type t) {
+        if (strictSyntax() || !types.program.isShared(t)) return t;
+        const Type inner = types.program.sharedElem(t);
+        types.ensureInstantiated(inner, e.span);
+        if (!types.hasDecl(inner)) return t;
+        return wrapTyped(e, "sharedGet");
+    }
+
     void coerceIfDyn(Expr& expr, Type& actual, Type expected, std::optional<Span> related = {}) {
+        // Celdas automáticas de los tipos recursivos: T entra en Shared<T> y sale de él sin escribirlo.
+        if (!strictSyntax() && expected != Type::Unknown && actual != Type::Unknown && actual != expected) {
+            if (types.program.isShared(expected) && types.program.sharedElem(expected) == actual) {
+                actual = wrapTyped(expr, "sharedNew");
+                return;
+            }
+            if (types.program.isShared(actual) && types.program.sharedElem(actual) == expected) {
+                actual = wrapTyped(expr, "sharedGet");
+                return;
+            }
+            // Lo mismo dentro de un opcional: `T?` y el campo `T?` guardado en celda.
+            if (types.program.isOption(expected) && types.program.isOption(actual)) {
+                const Type want = types.program.optionInner(expected);
+                const Type have = types.program.optionInner(actual);
+                const auto helper = [&](const std::string& name) {
+                    return std::any_of(types.program.functions.begin(), types.program.functions.end(),
+                                       [&](const Function& f) { return f.sourceName == name; });
+                };
+                if (types.program.isShared(have) && types.program.sharedElem(have) == want) {
+                    const std::string name = "tzCellGet" + types.program.nameOf(want);
+                    if (helper(name)) {
+                        actual = wrapTyped(expr, name.c_str());
+                        return;
+                    }
+                }
+                if (types.program.isShared(want) && types.program.sharedElem(want) == have) {
+                    const std::string name = "tzCellNew" + types.program.nameOf(have);
+                    if (helper(name)) {
+                        actual = wrapTyped(expr, name.c_str());
+                        return;
+                    }
+                }
+            }
+        }
         if (expected == Type::Unknown || !types.program.isDyn(expected) ||
             actual == expected || types.program.isDyn(actual))
             return;
@@ -2779,6 +2834,10 @@ struct Checker {
             d.actual = types.program.nameOf(arg.type);
             throw d;
         }
+        // Queda anotado qué celdas se modifican en su sitio: las demás se pueden leer prestadas.
+        const Type elem = types.program.sharedElem(arg.type);
+        if (isOpaqueType(types.program, elem)) types.program.anyCellMutated = true;
+        else if (!types.program.cellMutated(elem)) types.program.mutatedCells.push_back(elem);
         return arg.type;
     }
 
@@ -3528,6 +3587,11 @@ mapSet(mut m, "a", 1))");
             checkCallArity(expr, 1); rejectMutArgs();
             const Type expArg = numericLiteralHint(*targetNum, expr.args[0]);
             const auto t = typeOf(expr.args[0], ArrayUse::Ordinary, expArg);
+            if (t == Type::Str && !strictSyntax() && (expr.text == "int" || expr.text == "float")) {
+                // int("12") y float("1.5") convierten el texto, como en Python y JavaScript.
+                expr.text = expr.text == "int" ? "parseInt" : "parseFloat";
+                return inferBuiltinCall(expr, expected);
+            }
             if (Program::isFloatType(*targetNum)) {
                 if (Program::isNumericType(t)) return *targetNum;
                 Diagnostic d("E_TYPE", expr.text + "(...) admite tipos numéricos", expr.args[0].span);
@@ -4782,6 +4846,13 @@ mapSet(mut m, "a", 1))");
     }
 
     Type inferCall(Expr& expr, Type expected = Type::Unknown) {
+        if (expr.text == "ord" && expr.args.size() == 1 && !strictSyntax() && !expr.args[0].isMutArg &&
+            !isCharLiteral(expr.args[0]) && probeExprType(expr.args[0], {}) == Type::Int) {
+            // `ord(s[i])`: `s[i]` ya es el código del byte, así que ord no tiene nada que convertir.
+            Expr code = std::move(expr.args[0]);
+            expr = std::move(code);
+            return typeOf(expr, ArrayUse::Ordinary, expected);
+        }
         if (expr.text == "readByte") {
             if (!expr.typeArgs.empty())
                 fail("E_GENERIC", "readByte no acepta argumentos de tipo <...>", expr.span, "readByte()");
@@ -4843,8 +4914,16 @@ mapSet(mut m, "a", 1))");
             }
         }
         const auto sourceName = expr.text;
-        const auto reference = expr.text.find('.') == std::string::npos && !current.module.empty()
+        auto reference = expr.text.find('.') == std::string::npos && !current.module.empty()
             ? current.module + "." + expr.text : expr.text;
+        // La biblioteca base vive en el módulo global y se ve desde cualquier módulo.
+        if (reference != sourceName && !generics.contains(reference) && !functions.contains(reference)) {
+            if (generics.contains(sourceName)) {
+                if (generics.templateOf(sourceName).module.empty()) reference = sourceName;
+            } else if (auto global = functions.find(sourceName); global != functions.end() && global->second->module.empty()) {
+                reference = sourceName;
+            }
+        }
         if (generics.contains(reference)) {
             visible(reference, expr.span);
             expr.text = reference;
@@ -5079,7 +5158,7 @@ mapSet(mut m, "a", 1))");
         if (!expr.typeArgs.empty())
             fail("E_GENERIC", "El método " + expr.text + " no acepta argumentos de tipo <...>",
                  expr.span, expr.text + "(...)");
-        const Type recvType = typeOf(expr.args[0], ArrayUse::Ordinary);
+        const Type recvType = derefCell(expr.args[0], typeOf(expr.args[0], ArrayUse::Ordinary));
         requireValue(recvType, expr.args[0].span);
 
         // 3a. Dynamic dispatch receiver: dyn Interfaz
@@ -5283,6 +5362,69 @@ mapSet(mut m, "a", 1))");
             }
         }
 
+        // 3e. UFCS general: `x.f(args)` es `f(x, args)` cuando existe una función libre `f`, propia o
+        // de la biblioteca base. Antes se traducen los nombres que el modelo trae de otros lenguajes.
+        if (!strictSyntax()) {
+            const bool isStr = recvType == Type::Str;
+            const bool isArr = types.program.isArray(recvType);
+            const Type elemT = isArr ? types.program.elemOf(recvType) : Type::Unknown;
+            std::string target = expr.text;
+            bool wrapContains = false;
+            if (isStr || isArr) {
+                if (target == "length" || target == "size") target = "len";
+                else if (target == "toUpperCase" || target == "toUpper" || target == "to_uppercase" || target == "toUppercase") target = "upper";
+                else if (target == "toLowerCase" || target == "toLower" || target == "to_lowercase" || target == "toLowercase") target = "lower";
+                else if (target == "strip") target = "trim";
+            }
+            if (isStr) {
+                if (target == "repeat") target = "strRepeat";
+                else if (target == "reverse") target = "strReverse";
+                else if (target == "count") target = "countOf";
+            } else if (isArr) {
+                if (target == "append" || target == "add") target = "push";
+                else if (target == "reverse") target = "reversed";
+                else if (target == "max") target = "arrayMax";
+                else if (target == "min") target = "arrayMin";
+                else if (target == "count") target = "countIf";
+                else if (target == "sum" && Program::isFloatType(elemT)) target = "sumFloat";
+                else if (target == "indexOf" || target == "contains" || target == "includes") {
+                    wrapContains = target != "indexOf";
+                    target = elemT == Type::Str ? "indexOfStr" : "indexOfInt";
+                }
+            }
+            const std::string qualified = canonicalUnqualified(current.module, target);
+            auto fit = functions.find(qualified);
+            if (fit == functions.end()) fit = functions.find(target);
+            const bool generic = generics.contains(qualified) || generics.contains(target);
+            const bool builtin = target == "len" || target == "push";
+            if (builtin || generic || (fit != functions.end() && !fit->second->params.empty() && !fit->second->isImpl)) {
+                // El receptor ya tiene tipo: no se vuelve a inferir al tratarlo como primer argumento.
+                struct ReceiverTyped {
+                    Expr*& slot; Expr* prev;
+                    ReceiverTyped(Expr*& s, Expr* v) : slot(s), prev(s) { slot = v; }
+                    ~ReceiverTyped() { slot = prev; }
+                };
+                const bool byRef = target == "push" ||
+                    (fit != functions.end() && !fit->second->params.empty() && fit->second->params[0].byRef);
+                expr.kind = ExprKind::Call;
+                expr.text = target;
+                if (byRef) expr.args[0].isMutArg = true;
+                if (wrapContains) {
+                    // a.contains(x)  ->  indexOf(a, x) >= 0
+                    Expr call = std::move(expr);
+                    const Span span = call.span;
+                    Expr test{ExprKind::Binary, span, ">=", {}};
+                    test.args.push_back(std::move(call));
+                    test.args.push_back(Expr{ExprKind::Integer, span, "0", {}});
+                    expr = std::move(test);
+                    ReceiverTyped receiverTyped(preTypedArg0, &expr.args[0].args[0]);
+                    return typeOf(expr, ArrayUse::Ordinary, expected);
+                }
+                ReceiverTyped receiverTyped(preTypedArg0, &expr.args[0]);
+                return inferCall(expr, expected);
+            }
+        }
+
         // Helpful false-friend diagnostics on built-in collections and str
         Diagnostic d("E_METHOD_UNKNOWN", "El tipo " + types.program.nameOf(recvType) +
                      " no tiene el método " + expr.text, expr.span);
@@ -5344,6 +5486,15 @@ mapSet(mut m, "a", 1))");
         throw d;
     }
 
+    // Literal del valor cero de un tipo escalar o str; vacío para los demás tipos.
+    static std::optional<Expr> zeroLiteral(Type t, Span span) {
+        if (Program::isFloatType(t)) return Expr{ExprKind::Float, span, "0.0", {}};
+        if (Program::isNumericType(t)) return Expr{ExprKind::Integer, span, "0", {}};
+        if (t == Type::Bool) return Expr{ExprKind::Boolean, span, "false", {}};
+        if (t == Type::Str) return Expr{ExprKind::String, span, "", {}};
+        return {};
+    }
+
     static bool isLiteralHintCandidate(const Expr& e) {
         return e.kind == ExprKind::Integer || e.kind == ExprKind::Float ||
                (e.kind == ExprKind::Unary && e.text == "-" && !e.args.empty() &&
@@ -5379,7 +5530,20 @@ mapSet(mut m, "a", 1))");
             const Type rt = probeConcreteNumericType(right);
             if (Program::isNumericType(rt)) expLeft = rt;
         }
-        const auto leftType = typeOf(left, ArrayUse::Ordinary, expLeft);
+        if ((isRelOrEq || expr.text == "+") && isCharLiteral(left) && !isCharLiteral(right) &&
+            probeExprType(right, {}) == Type::Str)
+            charToStr(left);
+        const bool isArith = expr.text == "-" || expr.text == "*" || expr.text == "/" || expr.text == "%";
+        if (isArith && !strictSyntax() && isCharLiteral(left) && !isCharLiteral(right) &&
+            probeExprType(right, {}) == Type::Str)
+            right = charCodeOf(std::move(right));
+        auto leftType = typeOf(left, ArrayUse::Ordinary, expLeft);
+        if ((isRelOrEq || expr.text == "+") && leftType == Type::Str && isCharLiteral(right)) charToStr(right);
+        if (isArith && !strictSyntax() && leftType == Type::Str && isCharLiteral(right)) {
+            // `c - 'a'` con `c` un str de un carácter: aritmética sobre el código del carácter.
+            left = charCodeOf(std::move(left));
+            leftType = typeOf(left, ArrayUse::Ordinary, expLeft);
+        }
         if (expr.text == "==" || expr.text == "!=") {
             requireValue(leftType, left.span);
             if ((leftType >= Type::NamedBase && !types.program.isArray(leftType) &&
@@ -5416,8 +5580,28 @@ mapSet(mut m, "a", 1))");
             return Type::Bool;
         }
         // +, -, *, /
+        if (expr.text == "+" && (right.kind == ExprKind::String || right.kind == ExprKind::Interp) &&
+            (Program::isNumericType(leftType) || leftType == Type::Bool)) {
+            // `n + " elementos"`: el escalar se convierte con str(), como en JS, Java o Kotlin.
+            Expr inner = std::move(left);
+            Expr call{ExprKind::Call, inner.span, "str", {}};
+            call.args.push_back(std::move(inner));
+            left = std::move(call);
+            (void)typeOf(left);
+            (void)typeOf(right);
+            return Type::Str;
+        }
         if (expr.text == "+" && leftType == Type::Str) {
             const Type rightType = typeOf(right);
+            if (Program::isNumericType(rightType) || rightType == Type::Bool) {
+                // `"n=" + n`: el escalar se convierte con str(), como en JS, Java o Kotlin.
+                Expr inner = std::move(right);
+                Expr call{ExprKind::Call, inner.span, "str", {}};
+                call.args.push_back(std::move(inner));
+                right = std::move(call);
+                (void)typeOf(right);
+                return Type::Str;
+            }
             if (rightType != Type::Str) {
                 Diagnostic d("E_TYPE", "No se puede concatenar str con " + types.program.nameOf(rightType) + "; usa interpolación o str(x)", right.span);
                 d.expected = "str";
@@ -5685,7 +5869,7 @@ mapSet(mut m, "a", 1))");
                      expr.span, "|x| " + qname + "(x)");
             if (functions.contains(qname)) return synthesizeFnRef(expr, qname);
         }
-        const auto type = typeOf(base);
+        const auto type = derefCell(base, typeOf(base));
         types.ensureInstantiated(type, expr.span);
         if ((type == Type::Str || types.program.isArray(type) || type == Type::StringBuilder ||
              types.program.isMap(type) || types.program.isSet(type) || types.program.isPool(type)) && expr.text == "length") {
@@ -5711,7 +5895,26 @@ mapSet(mut m, "a", 1))");
         return ft;
     }
 
+    // 'a' es el int 97, pero junto a un str vale como el str "a" (así `c == 'a'` funciona tanto si
+    // `c` es un byte de `s[i]` como si es un carácter de `s.chars()` o de `for c in s`).
+    static bool isCharLiteral(const Expr& e) {
+        return e.kind == ExprKind::Integer && e.labels.size() == 1 && e.labels[0].size() == 1;
+    }
+    static void charToStr(Expr& e) {
+        Expr text{ExprKind::String, e.span, e.labels[0], {}};
+        e = std::move(text);
+    }
+    // El código del primer byte de un str: `s[0]`.
+    static Expr charCodeOf(Expr text) {
+        const Span span = text.span;
+        Expr index{ExprKind::Index, span, {}, {}};
+        index.args.push_back(std::move(text));
+        index.args.push_back(Expr{ExprKind::Integer, span, "0", {}});
+        return index;
+    }
+
     Type typeOf(Expr& expr, ArrayUse use = ArrayUse::Ordinary, Type expected = Type::Unknown) {
+        if (expected == Type::Str && isCharLiteral(expr)) charToStr(expr);
         if (&expr == preTypedArg0) {
             preTypedArg0 = nullptr;
             if (use == ArrayUse::Copy && types.program.isResource(expr.type)) {
@@ -5846,6 +6049,28 @@ mapSet(mut m, "a", 1))");
                     requireType(typeOf(expr.args[1]), Type::Int, expr.args[1].span);
                     expr.type = Type::Int;
                     break;
+                }
+                if (const auto* tupleApp = types.program.typeAppOf(baseT);
+                    tupleApp && tupleApp->baseName.starts_with("Tuple") && expr.args[1].kind == ExprKind::Integer) {
+                    // t[0] sobre una tupla es su primer elemento (como en Python).
+                    Expr field{ExprKind::Field, expr.span, "v" + expr.args[1].text, {}};
+                    field.args.push_back(std::move(expr.args[0]));
+                    expr = std::move(field);
+                    return typeOf(expr, use, expected);
+                }
+                if (types.program.isMap(baseT) && !strictSyntax()) {
+                    // `m[k]` es el valor de la clave o el valor cero de V si no está (como en Go).
+                    // `m.get(k)` sigue devolviendo V? cuando hace falta distinguir.
+                    if (auto zero = zeroLiteral(types.program.mapVal(baseT), expr.span)) {
+                        Expr get{ExprKind::Call, expr.span, "mapGet", {}};
+                        get.args.push_back(std::move(expr.args[0]));
+                        get.args.push_back(std::move(expr.args[1]));
+                        Expr value{ExprKind::Call, expr.span, "unwrapOr", {}};
+                        value.args.push_back(std::move(get));
+                        value.args.push_back(std::move(*zero));
+                        expr = std::move(value);
+                        return typeOf(expr, use, expected);
+                    }
                 }
                 if (types.program.isMap(baseT) || types.program.isPool(baseT)) {
                     const bool isP = types.program.isPool(baseT);
@@ -6522,7 +6747,7 @@ mapSet(mut m, "a", 1))");
 
     bool matchImpl(Expr& scrutinee, std::vector<MatchArm>& arms, Span matchSpan,
                    bool isExpr, Type expected, Type* outType = nullptr) {
-        const auto type = typeOf(scrutinee);
+        const auto type = derefCell(scrutinee, typeOf(scrutinee));
         types.ensureInstantiated(type, scrutinee.span);
         if (!types.hasDecl(type) || !types.decl(type).isEnum)
             fail("E_MATCH_TYPE", "match requiere un enum", scrutinee.span, "enum State { Ready }");
@@ -6806,6 +7031,20 @@ mapSet(mut m, "a", 1))");
             }
             case StmtKind::IndexSet: {
                 auto& var = lookup(s.name, s.span);
+                if (types.program.isMap(var.type) && !strictSyntax()) {
+                    // `m[k] = v` es mapSet(mut m, k, v). `m[k] += d` llega aquí como `m[k] = m[k] + d`.
+                    Expr target{ExprKind::Name, s.span, s.name, {}};
+                    target.isMutArg = true;
+                    Expr call{ExprKind::Call, s.span, "mapSet", {}};
+                    call.args.push_back(std::move(target));
+                    call.args.push_back(std::move(s.exprs[0]));
+                    call.args.push_back(std::move(s.exprs[1]));
+                    s.kind = StmtKind::Call;
+                    s.exprs.clear();
+                    s.exprs.push_back(std::move(call));
+                    typeOf(s.exprs[0]);
+                    break;
+                }
                 if (var.moved)
                     failUseAfterMove(s.name, var.type, s.span, var.movedAt, var.movedTo, var.declared);
                 if (var.isCaptured)
@@ -7036,6 +7275,34 @@ mapSet(mut m, "a", 1))");
             }
             case StmtKind::ForEach: {
                 const Type collT = typeOf(s.exprs[0], ArrayUse::Inspect);
+                if (collT == Type::Str && !strictSyntax() && s.exprs[0].kind == ExprKind::Name && s.name != "_") {
+                    // `for c in s` recorre los caracteres de un str (cada `c` es un str de un carácter):
+                    //   for c__i in 0..len(s) { let c = s[c__i..c__i + 1]; ... }
+                    const Span span = s.exprs[0].span;
+                    const std::string index = s.name + "__i";
+                    Expr text = s.exprs[0];
+                    Expr length{ExprKind::Call, span, "len", {}};
+                    length.args.push_back(text);
+                    Expr upper{ExprKind::Binary, span, "+", {}};
+                    upper.args.push_back(Expr{ExprKind::Name, span, index, {}});
+                    upper.args.push_back(Expr{ExprKind::Integer, span, "1", {}});
+                    Expr slice{ExprKind::Slice, span, {}, {}};
+                    slice.args.push_back(std::move(text));
+                    slice.args.push_back(Expr{ExprKind::Name, span, index, {}});
+                    slice.args.push_back(std::move(upper));
+                    Stmt bind{};
+                    bind.kind = StmtKind::Let;
+                    bind.span = span;
+                    bind.name = s.name;
+                    bind.exprs.push_back(std::move(slice));
+                    s.kind = StmtKind::For;
+                    s.name = index;
+                    s.exprs.clear();
+                    s.exprs.push_back(Expr{ExprKind::Integer, span, "0", {}});
+                    s.exprs.push_back(std::move(length));
+                    s.body.insert(s.body.begin(), std::move(bind));
+                    return checkStatement(s, initHint);
+                }
                 if (!types.program.isArray(collT)) {
                     Diagnostic d("E_TYPE", "for x in ... requiere un array", s.exprs[0].span);
                     d.expected = "[T]";
@@ -7136,9 +7403,250 @@ mapSet(mut m, "a", 1))");
     }
 };
 
+// --- Mutabilidad inferida -------------------------------------------------------------------
+// `let` frente a `var` y los parámetros de solo lectura son la segunda causa de error de los modelos
+// (JS/TS reasignan `let`; casi todos los lenguajes dejan reasignar un parámetro). El compilador
+// puede deducirlo: si el programa modifica un `let` o un parámetro por valor, esa declaración pasa
+// a ser `var` (copia local mutable, la semántica de valor de siempre) y se vuelve a comprobar.
+bool sameSpan(const Span& a, const Span& b) {
+    return a.start == b.start && a.end == b.end && a.file == b.file;
+}
+bool promoteInStmts(std::vector<Stmt>& stmts, const Span& declared);
+bool promoteParams(std::vector<Param>& params, const Span& declared) {
+    for (auto& p : params) {
+        if (sameSpan(p.span, declared) && !p.byRef && !p.writable && p.name != "self") {
+            p.writable = true;
+            return true;
+        }
+    }
+    return false;
+}
+bool promoteInExpr(Expr& e, const Span& declared) {
+    for (auto& a : e.args)
+        if (promoteInExpr(a, declared)) return true;
+    if (e.closure) {
+        if (promoteParams(e.closure->params, declared)) return true;
+        if (promoteInStmts(e.closure->body, declared)) return true;
+    }
+    if (e.matchExpr) {
+        if (promoteInExpr(e.matchExpr->scrutinee, declared)) return true;
+        for (auto& arm : e.matchExpr->arms) {
+            if (promoteInStmts(arm.body, declared)) return true;
+            if (arm.resultExpr && promoteInExpr(*arm.resultExpr, declared)) return true;
+        }
+    }
+    if (e.ifExpr) {
+        if (promoteInExpr(e.ifExpr->condition, declared)) return true;
+        if (promoteInStmts(e.ifExpr->thenBody, declared) || promoteInStmts(e.ifExpr->elseBody, declared)) return true;
+        if (e.ifExpr->thenResult && promoteInExpr(*e.ifExpr->thenResult, declared)) return true;
+        if (e.ifExpr->elseResult && promoteInExpr(*e.ifExpr->elseResult, declared)) return true;
+    }
+    return false;
+}
+bool promoteInStmts(std::vector<Stmt>& stmts, const Span& declared) {
+    for (auto& st : stmts) {
+        if (st.kind == StmtKind::Let && st.name != "_" && sameSpan(st.span, declared)) {
+            st.kind = StmtKind::Var;
+            return true;
+        }
+        for (auto& e : st.exprs)
+            if (promoteInExpr(e, declared)) return true;
+        if (promoteInStmts(st.body, declared) || promoteInStmts(st.otherwise, declared)) return true;
+        for (auto& arm : st.arms) {
+            if (promoteInStmts(arm.body, declared)) return true;
+            if (arm.resultExpr && promoteInExpr(*arm.resultExpr, declared)) return true;
+        }
+    }
+    return false;
+}
+void renameInStmts(std::vector<Stmt>& stmts, const std::string& from, const std::string& to);
+void renameInExpr(Expr& e, const std::string& from, const std::string& to) {
+    if (e.kind == ExprKind::Name && e.text == from) e.text = to;
+    for (auto& a : e.args) renameInExpr(a, from, to);
+    if (e.matchExpr) {
+        renameInExpr(e.matchExpr->scrutinee, from, to);
+        for (auto& arm : e.matchExpr->arms) {
+            renameInStmts(arm.body, from, to);
+            if (arm.resultExpr) renameInExpr(*arm.resultExpr, from, to);
+        }
+    }
+    if (e.ifExpr) {
+        renameInExpr(e.ifExpr->condition, from, to);
+        renameInStmts(e.ifExpr->thenBody, from, to);
+        renameInStmts(e.ifExpr->elseBody, from, to);
+        if (e.ifExpr->thenResult) renameInExpr(*e.ifExpr->thenResult, from, to);
+        if (e.ifExpr->elseResult) renameInExpr(*e.ifExpr->elseResult, from, to);
+    }
+}
+void renameInStmts(std::vector<Stmt>& stmts, const std::string& from, const std::string& to) {
+    for (auto& st : stmts) {
+        for (auto& e : st.exprs) renameInExpr(e, from, to);
+        renameInStmts(st.body, from, to);
+        renameInStmts(st.otherwise, from, to);
+        for (auto& arm : st.arms) {
+            renameInStmts(arm.body, from, to);
+            if (arm.resultExpr) renameInExpr(*arm.resultExpr, from, to);
+        }
+    }
+}
+constexpr std::string_view kParamCopySuffix = "__in";
+bool promoteInFunction(Function& fn, const Span& declared) {
+    if (fn.isExternDecl) return false;
+    for (auto& p : fn.params) {
+        if (!sameSpan(p.span, declared) || p.byRef || p.writable || p.name.ends_with(kParamCopySuffix)) continue;
+        if (p.name == "self") {
+            // Un método que modifica `self` quiere modificar al receptor: equivale a `mut self`.
+            p.writable = true;
+            p.byRef = true;
+            return true;
+        }
+        if (Program::isNumericType(p.type) || p.type == Type::Bool) {
+            p.writable = true;
+            return true;
+        }
+        // Agregado por valor (arreglo, str, struct...): copia local mutable con el mismo nombre.
+        // La semántica de valor se conserva: el argumento de quien llama no cambia.
+        const std::string outer = p.name;
+        const std::string inner = outer + std::string(kParamCopySuffix);
+        for (auto& clause : fn.requiresClauses) renameInExpr(clause, outer, inner);
+        Stmt copy{};
+        copy.kind = StmtKind::Var;
+        copy.span = p.span;
+        copy.name = outer;
+        copy.exprs.push_back(Expr{ExprKind::Name, p.span, inner, {}});
+        p.name = inner;
+        fn.body.insert(fn.body.begin(), std::move(copy));
+        return true;
+    }
+    return promoteInStmts(fn.body, declared);
+}
+bool promoteToMutable(Program& program, const Span& declared) {
+    for (auto& fn : program.functions)
+        if (promoteInFunction(fn, declared)) return true;
+    for (auto& impl : program.impls)
+        for (auto& fn : impl.methods)
+            if (promoteInFunction(fn, declared)) return true;
+    for (auto& iface : program.interfaces)
+        for (auto& fn : iface.methods)
+            if (promoteInFunction(fn, declared)) return true;
+    return false;
+}
+
+void checkOnce(Program& program);
+std::size_t boxRecursiveFields(Program& program, std::vector<std::string>* targets = nullptr);
+
 } // namespace
 
+std::vector<std::string> recursiveTypeNames(const Program& program) {
+    std::vector<std::string> names;
+    if (strictSyntax()) return names;
+    Program copy = program;
+    (void)boxRecursiveFields(copy, &names);
+    return names;
+}
+
 void check(Program& program) {
+    program.cellRegionCache.reset(); // el análisis de regiones se recalcula sobre el programa comprobado
+    if (strictSyntax()) {
+        checkOnce(program);
+        return;
+    }
+    for (unsigned round = 0;; ++round) {
+        Program attempt = program;
+        // El diagnóstico se captura y se vuelve a lanzar por copia (como en el resto del compilador):
+        // un `throw;` desde el `catch` falla con ASan en Windows.
+        auto failure = captureDiagnostic([&] { checkOnce(attempt); });
+        if (!failure) {
+            program = std::move(attempt);
+            return;
+        }
+        if (round >= 1024 || failure->id != "E_IMMUTABLE" || failure->related.empty() ||
+            !promoteToMutable(program, failure->related.front()))
+            throw *failure;
+    }
+}
+
+namespace {
+// Tipos recursivos directos. `struct Node { left: Node?, right: Node? }` o
+// `enum Expr { Num(v: int), Add(l: Expr, r: Expr) }` tendrían tamaño infinito por valor. El campo que
+// cierra el ciclo se guarda en una celda del montón (Shared<T>): el programador escribe `Node` y el
+// compilador mete y saca el valor de la celda en cada uso. La semántica sigue siendo de valor.
+std::size_t boxRecursiveFields(Program& program, std::vector<std::string>* targets) {
+    std::size_t boxed = 0;
+    const std::size_t n = program.data.size();
+    std::map<std::string, std::size_t> byName;
+    for (std::size_t i = 0; i < n; ++i) byName.emplace(program.nameOf(program.data[i].type), i);
+    const auto targetOf = [&](Type fieldType) -> std::optional<std::size_t> {
+        Type t = fieldType;
+        if (program.isOption(t)) t = program.optionInner(t);
+        std::string name;
+        if (const auto* app = program.typeAppOf(t)) {
+            if (app->baseName.starts_with("@")) return std::nullopt;
+            name = app->baseName;
+        } else {
+            name = program.nameOf(t);
+        }
+        if (auto it = byName.find(name); it != byName.end()) return it->second;
+        return std::nullopt;
+    };
+    std::vector<std::vector<std::size_t>> edges(n);
+    for (std::size_t i = 0; i < n; ++i)
+        for (const auto& v : program.data[i].variants)
+            for (const auto& f : v.fields)
+                if (auto to = targetOf(f.type)) edges[i].push_back(*to);
+    const auto reaches = [&](std::size_t from, std::size_t goal) {
+        std::vector<bool> seen(n, false);
+        std::vector<std::size_t> stack{from};
+        while (!stack.empty()) {
+            const std::size_t at = stack.back();
+            stack.pop_back();
+            if (at == goal) return true;
+            if (seen[at]) continue;
+            seen[at] = true;
+            for (std::size_t next : edges[at]) stack.push_back(next);
+        }
+        return false;
+    };
+    // Un tipo que se contiene a sí mismo sin salida (`struct Loop { next: Loop }`) no se puede
+    // construir nunca: ese sigue siendo un error (E_TYPE_CYCLE), no se mete en celda. Un tipo se
+    // puede construir si alguna variante tiene todos sus campos construibles; `T?` siempre lo es.
+    std::vector<bool> buildable(n, false);
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (buildable[i]) continue;
+            for (const auto& v : program.data[i].variants) {
+                bool ok = true;
+                for (const auto& f : v.fields) {
+                    if (program.isOption(f.type)) continue;
+                    const auto to = targetOf(f.type);
+                    if (to && !buildable[*to]) { ok = false; break; }
+                }
+                if (ok) { buildable[i] = true; changed = true; break; }
+            }
+        }
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!buildable[i]) continue;
+        for (auto& v : program.data[i].variants) {
+            for (auto& f : v.fields) {
+                const auto to = targetOf(f.type);
+                if (!to || !reaches(*to, i)) continue;
+                if (program.isOption(f.type)) f.type = program.optionOf(program.sharedOf(program.optionInner(f.type)));
+                else f.type = program.sharedOf(f.type);
+                ++boxed;
+                if (targets && program.data[*to].generics.empty()) {
+                    const std::string name = program.nameOf(program.data[*to].type);
+                    if (std::find(targets->begin(), targets->end(), name) == targets->end()) targets->push_back(name);
+                }
+            }
+        }
+    }
+    return boxed;
+}
+
+void checkOnce(Program& program) {
+    if (!strictSyntax()) (void)boxRecursiveFields(program);
     for (const auto& f : program.functions) {
         if (!f.isTest && (f.sourceName == "repeat" || f.sourceName == "readByte"))
             fail("E_RESERVED", "Nombre reservado: " + f.name, f.span, "fn count() -> int { return 3 }");
@@ -7669,8 +8177,6 @@ void check(Program& program) {
     }
 }
 
-namespace {
-
 // Independent, stack-based evaluation. Calls, loops and returns never use the
 // host call stack. Only the bounded syntax tree is visited recursively.
 struct Aggregate;
@@ -7948,6 +8454,26 @@ struct PoolObject {
 };
 struct SharedObject {
     Value payload;
+    SharedObject() = default;
+    explicit SharedObject(Value v) : payload(std::move(v)) {}
+    SharedObject(const SharedObject&) = default;
+    SharedObject(SharedObject&&) = default;
+    SharedObject& operator=(const SharedObject&) = default;
+    // Soltar una lista o un árbol largo con destructores anidados desbordaría la pila del
+    // intérprete. El contenido de cada celda que muere se aparta y se suelta en un bucle, así la
+    // profundidad de pila no depende del tamaño de los datos.
+    ~SharedObject() {
+        static thread_local std::vector<Value>* pending = new std::vector<Value>();
+        static thread_local bool draining = false;
+        pending->push_back(std::move(payload));
+        if (draining) return;
+        draining = true;
+        while (!pending->empty()) {
+            Value dying = std::move(pending->back());
+            pending->pop_back();
+        }
+        draining = false;
+    }
 };
 enum class TableKeyKind { I64, ExactInt, Bool, Enum, Str, Handle };
 struct SwissTableBuf {
