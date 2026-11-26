@@ -101,7 +101,7 @@ class ModuleWriter {
     std::set<std::pair<std::int64_t, std::int64_t>> usedDigitSumLuts;
     std::vector<Type> curSlotTypes;
     std::vector<bool> curSlotByRef;
-    std::set<Type> emitDrops, emitDropUnaligned, emitClones, emitRepeats, emitSlices, emitAts, emitPushes, emitPops, emitClears;
+    std::set<Type> emitDrops, emitDropUnaligned, emitClones, emitRepeats, emitSlices, emitAts, emitPushes, emitPops, emitClears, emitTruncates;
     std::set<Type> emitVClones, emitMapSets, emitMapHas, emitMapDels, emitMapKeys, emitMapVals;
     std::set<Type> emitMapSlots, doneMapSlots;
     std::set<Type> emitMapPrefetchStr, emitMapPrefetchInt, doneMapPrefetchStr, doneMapPrefetchInt;
@@ -326,6 +326,10 @@ class ModuleWriter {
     std::string requestClear(Type arrT) {
         emitClears.insert(arrT);
         return "@tz.clear.t" + std::to_string(static_cast<int>(arrT));
+    }
+    std::string requestTruncate(Type arrT) {
+        emitTruncates.insert(arrT);
+        return "@tz.truncate.t" + std::to_string(static_cast<int>(arrT));
     }
     std::string requestTblWithCap(Type tblT) {
         emitTblWithCaps.insert(tblT);
@@ -737,7 +741,7 @@ class ModuleWriter {
     void planFusedMultiplies(const FunctionIR& ir) {
         fusedMul.clear();
         fusedInto.clear();
-        if (envEnabled("VELOZ_NO_FMA_PLAN")) return;
+        if (envEnabled("VELOZ_NO_FMA_PLAN") || envEnabled("VELOZ_STRICT_FLOAT")) return;
         std::unordered_map<unsigned, unsigned> uses;
         for (const auto& blk : ir.blocks) {
             for (const auto& op : blk.ops)
@@ -811,7 +815,12 @@ class ModuleWriter {
                 {"+", "fadd contract"}, {"-", "fsub contract"}, {"*", "fmul contract"}, {"/", "fdiv"}};
             if (auto it = fOps.find(token); it != fOps.end()) {
                 std::string opcode = it->second;
-                if (op.reassoc && token != "/") opcode.insert(opcode.find(' ') + 1, "reassoc ");
+                // VELOZ_STRICT_FLOAT=1: cada operación se redondea por separado y en el orden escrito
+                // (IEEE-754 estricto, sin FMA ni reagrupación). Lo usa el motor de Python para dar
+                // exactamente los mismos bits que CPython.
+                static const bool strictFloat = envEnabled("VELOZ_STRICT_FLOAT");
+                if (strictFloat) opcode = opcode.substr(0, opcode.find(' '));
+                else if (op.reassoc && token != "/") opcode.insert(opcode.find(' ') + 1, "reassoc ");
                 bodies << "  " << result << " = " << opcode << " " << operand(left) << ", " << reg(right) << "\n";
                 return;
             }
@@ -1574,6 +1583,13 @@ class ModuleWriter {
                    << "(ptr " << sp << ", " << diagnostic("R_BOUNDS", op.span) << ")\n";
             return;
         }
+        if (name == "truncate") {
+            const Type arrT = op.inputs.at(0).type;
+            const std::string keep = reg(op.inputs.at(1));
+            const std::string sp = mutArgPtr(op, 0, result);
+            bodies << "  call void " << requestTruncate(arrT) << "(ptr " << sp << ", i64 " << keep << ")\n";
+            return;
+        }
         if (name == "clear") {
             const Type colT = op.inputs.at(0).type;
             const std::string sp = mutArgPtr(op, 0, result);
@@ -1771,7 +1787,8 @@ class ModuleWriter {
                    << "  " << result << ".old = load " << vty << ", ptr " << result << ".p\n";
             if (Program::isFloatType(vt)) {
                 const char* fop = token == "+" ? "fadd" : token == "-" ? "fsub" : "fmul";
-                bodies << "  " << result << ".new = " << fop << " contract " << vty << " " << result << ".old, "
+                bodies << "  " << result << ".new = " << fop << (envEnabled("VELOZ_STRICT_FLOAT") ? " " : " contract ")
+                       << vty << " " << result << ".old, "
                        << reg(op.inputs.at(2)) << "\n";
             } else {
                 const char* fn = token == "+" ? "add" : token == "-" ? "sub" : "mul";
@@ -2864,7 +2881,7 @@ class ModuleWriter {
             const std::string dropFn = (!zeroE && needsDrop(et)) ? requestDropUnaligned(et) : "null";
             const std::string capReg = reg(op.inputs.at(0));
             bodies << "  " << result << ".le0 = icmp sle i64 " << capReg << ", 0\n"
-                   << "  " << result << ".big = icmp sgt i64 " << capReg << ", " << maxArrayLength << "\n"
+                   << "  " << result << ".big = icmp sgt i64 " << capReg << ", " << maxRingCapacity << "\n"
                    << "  " << result << ".badcap = or i1 " << result << ".le0, " << result << ".big\n"
                    << "  call void @tz.guard(i1 " << result << ".badcap, " << diagnostic("R_ARRAY_SIZE", op.span) << ")\n"
                    << "  " << result << " = call ptr @tz_conc_ring_new(i64 " << capReg << ", i64 " << es
@@ -4648,7 +4665,7 @@ public:
         }
     }
     void writeTypedHelpers(std::ostream& out) {
-        std::set<Type> doneDrops, doneDropUnaligned, doneClones, doneVClones, doneRepeats, doneSlices, doneAts, donePushes, donePops, doneClears;
+        std::set<Type> doneDrops, doneDropUnaligned, doneClones, doneVClones, doneRepeats, doneSlices, doneAts, donePushes, donePops, doneClears, doneTruncates;
         std::set<Type> doneTblWithCaps, doneTblClears, doneTblReserves;
         std::set<Type> doneMapSets, doneMapGets, doneMapHas, doneMapDels, doneMapKeys, emitDoneMapVals;
         std::set<Type> doneSetAdds, doneSetHas, doneSetDels, doneSetItems;
@@ -5669,6 +5686,43 @@ public:
                     << "  %a1 = insertvalue %array %a0, i32 %cnt32, 1\n"
                     << "  %a = insertvalue %array %a1, i32 %cnt32, 2\n"
                     << "  ret %array %a\n}\n";
+            }
+            const auto truncatesCopy = emitTruncates;
+            for (Type t : truncatesCopy) {
+                if (!doneTruncates.insert(t).second) continue;
+                progress = true;
+                const Type elemT = elemOf(t);
+                const std::string fnName = "@tz.truncate.t" + std::to_string(static_cast<int>(t));
+                // Se queda con min(max(n, 0), len) elementos; sin nada que soltar es una sola escritura.
+                out << "define internal void " << fnName << "(ptr %slot, i64 %n) alwaysinline sanitize_address {\nentry:\n"
+                    << "  %arr = load %array, ptr %slot\n"
+                    << "  %len32 = extractvalue %array %arr, 1\n"
+                    << "  %len = zext i32 %len32 to i64\n"
+                    << "  %pos = icmp sgt i64 %n, 0\n"
+                    << "  %keep = select i1 %pos, i64 %n, i64 0\n"
+                    << "  %cut = icmp ult i64 %keep, %len\n"
+                    << "  br i1 %cut, label %drop, label %done\n"
+                    << "drop:\n";
+                if (needsDrop(elemT)) {
+                    const std::string elemLlvm = llvmType(elemT);
+                    const std::string elemDrop = requestDrop(elemT);
+                    out << "  %buf = extractvalue %array %arr, 0\n"
+                        << "  br label %loop\n"
+                        << "loop:\n"
+                        << "  %rem = phi i64 [ %len, %drop ], [ %idx, %loop ]\n"
+                        << "  %idx = sub i64 %rem, 1\n"
+                        << "  %ep = getelementptr inbounds " << elemLlvm << ", ptr %buf, i64 %idx\n"
+                        << "  call void " << elemDrop << "(ptr %ep)\n"
+                        << "  %more = icmp ugt i64 %idx, %keep\n"
+                        << "  br i1 %more, label %loop, label %set\n"
+                        << "set:\n";
+                }
+                out << "  %keep32 = trunc i64 %keep to i32\n"
+                    << "  %lp = getelementptr inbounds %array, ptr %slot, i32 0, i32 1\n"
+                    << "  store i32 %keep32, ptr %lp\n"
+                    << "  br label %done\n"
+                    << "done:\n"
+                    << "  ret void\n}\n";
             }
             const auto clearsCopy = emitClears;
             for (Type t : clearsCopy) {
@@ -8491,6 +8545,7 @@ std::string emitLLVM(const Program& checkedProgram, RuntimeABI abi, bool auditCo
     // Copia de trabajo: la bajada añade variantes de funciones que no forman parte del programa
     // comprobado (ni las ve el intérprete).
     Program p = checkedProgram;
+    native::shareRepeatedPureCalls(p);
     native::addCellVariants(p);
     const auto entry = std::find_if(p.functions.begin(), p.functions.end(),
         [&](const Function& f) { return !f.isTest && f.name == p.entryMain; });

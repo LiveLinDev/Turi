@@ -68,7 +68,7 @@ void walk(const std::vector<Stmt>& body, Statement& visit, Expression& seeExpr) 
 struct Effects { bool io = false, alloc = false, trap = false; std::set<std::string> calls; };
 bool isBuiltinFn(const std::string& n) {
     static constexpr std::array builtins = {
-        "len", "cap", "push", "pop", "clear", "reserve",
+        "len", "cap", "push", "pop", "clear", "truncate", "reserve",
         "repeat", "readByte", "writeByte", "write", "ewrite", "eprint", "flush",
         "readFile", "writeFile", "appendFile", "tryReadFile", "tryWriteFile", "fileExists", "removeFile", "makeDir",
         "fileOpen", "fileRead", "fileReadAll", "fileReadLine", "fileWrite", "fileFlush", "fileClose", "fileIsOpen",

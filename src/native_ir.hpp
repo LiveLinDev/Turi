@@ -138,7 +138,7 @@ inline bool cellRegionBuiltin(const std::string& name) {
     static const std::unordered_set<std::string> ok{
         "Some", "None", "Ok", "Err", "abs", "argAt", "argsCount", "bswap", "cap", "ceil", "clear", "clockNs",
         "clz", "cos", "ctz", "float", "floor", "int", "isErr", "isInf", "isNaN", "isNone", "isOk", "isSome",
-        "len", "mapDel", "mapGet", "mapHas", "mapKeys", "mapNew", "mapSet", "mapValues", "mapWithCap", "max",
+        "len", "mapDel", "mapGet", "mapHas", "mapKeys", "mapNew", "mapSet", "mapValues", "mapWithCap", "max", "truncate",
         "min", "ord", "parseFloat", "parseInt", "pop", "popcnt", "pow", "push", "repeat", "reserve", "rotl",
         "rotr", "round", "saturatingAdd", "saturatingMul", "saturatingSub", "sbClear", "sbNew", "sbPush",
         "sbPushByte", "sbPushFloat", "sbPushInt", "sbStr", "sbTake", "sbWithCap", "setAdd", "setDel",
@@ -348,6 +348,281 @@ inline void addCellVariants(Program& program) {
         e = std::move(call);
     };
     for (auto& f : program.functions) rewriteExprs(f.body, redirect);
+}
+
+// ---- Llamadas puras repetidas ---------------------------------------------------------------
+// `Node { left: Some(build(d - 1)), right: Some(build(d - 1)) }` llama dos veces a la misma función
+// con los mismos argumentos. Si la función es pura (su resultado depende solo de sus argumentos y
+// no hace nada observable), las dos llamadas dan el mismo valor: se llama una vez y el valor se usa
+// dos. Un compilador de C no puede hacerlo cuando la función reserva memoria, porque dos punteros
+// distintos se distinguen; en Turi un valor no tiene identidad y, mientras nadie modifique esas
+// celdas en sitio, compartirlas es invisible para el programa.
+inline bool pureBuiltin(const std::string& name) {
+    static const std::unordered_set<std::string> ok{
+        "Some", "None", "Ok", "Err", "abs", "bswap", "cap", "ceil", "clear", "clz", "cos", "ctz", "float", "floor",
+        "int", "isErr", "isInf", "isNaN", "isNone", "isOk", "isSome", "len", "mapDel", "mapGet", "mapHas", "mapKeys",
+        "mapNew", "mapSet", "mapValues", "mapWithCap", "max", "min", "ord", "parseFloat", "parseInt", "pop",
+        "popcnt", "pow", "push", "repeat", "reserve", "truncate", "rotl", "rotr", "round", "saturatingAdd", "saturatingMul",
+        "saturatingSub", "sbClear", "sbNew", "sbPush", "sbPushByte", "sbPushFloat", "sbPushInt", "sbStr", "sbTake",
+        "sbWithCap", "setAdd", "setDel", "setHas", "setItems", "setNew", "setWithCap", "sharedGet", "sharedNew",
+        "sin", "sort", "sortStable", "sqrt", "str", "strContains", "strEndsWith", "strFromByte", "strIndexOf",
+        "strStartsWith", "tryParseFloat", "tryParseInt", "unwrapOr", "wrappingAdd", "wrappingMul", "wrappingSub",
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"};
+    return ok.contains(name);
+}
+
+// Funciones del usuario cuyo resultado depende solo de sus argumentos y que no hacen nada observable
+// salvo, como cualquier otra, detenerse con un error. Las operaciones que modifican una colección
+// (`push`, `mapSet`...) solo pueden tocar variables de la propia función, porque no se admiten
+// parámetros por referencia.
+inline std::unordered_set<std::string> pureFunctions(const Program& program) {
+    std::unordered_map<std::string, const Function*> byName;
+    for (const auto& f : program.functions)
+        if (!f.isTest) byName.emplace(f.name, &f);
+    std::unordered_set<std::string> pure;
+    std::unordered_map<std::string, std::vector<std::string>> calls;
+    for (const auto& [name, f] : byName) {
+        if (f->isExternC || f->isExternDecl || f->isImpl || f->safety != SafetyTier::Verified || name == "main")
+            continue;
+        bool blocked = false;
+        for (const auto& p : f->params)
+            if (p.byRef || p.writable || p.owned) blocked = true;
+        std::vector<std::string> callees;
+        auto onExpr = [&](const Expr& e) {
+            // `push(mut xs, v)` sobre una variable local es parte del cálculo: un argumento `mut` no
+            // estorba. Entregar un recurso (un archivo, un hilo), sí.
+            if (e.isResourceMove) blocked = true;
+            switch (e.kind) {
+            case ExprKind::Call:
+                if (byName.contains(e.text)) callees.push_back(e.text);
+                else if (!pureBuiltin(e.text)) blocked = true;
+                break;
+            case ExprKind::MethodCall: case ExprKind::AssocCall: case ExprKind::DynCall: case ExprKind::BoxDyn:
+            case ExprKind::Closure: case ExprKind::ClosureCall:
+                blocked = true;
+                break;
+            default:
+                break;
+            }
+        };
+        auto onStmt = [&](const Stmt& s) {
+            if (s.kind == StmtKind::SafetyBlock || s.kind == StmtKind::Print) blocked = true;
+        };
+        walkAst(f->body, onExpr, onStmt);
+        if (blocked) continue;
+        pure.insert(name);
+        calls.emplace(name, std::move(callees));
+    }
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (const auto& [name, callees] : calls) {
+            if (!pure.contains(name)) continue;
+            for (const auto& callee : callees) {
+                if (!pure.contains(callee)) { pure.erase(name); changed = true; break; }
+            }
+        }
+    }
+    return pure;
+}
+
+inline bool sameExpr(const Expr& a, const Expr& b) {
+    if (a.kind != b.kind || a.text != b.text || a.type != b.type || a.args.size() != b.args.size() ||
+        a.labels != b.labels || a.typeArgs != b.typeArgs || a.isEnumConstruct != b.isEnumConstruct)
+        return false;
+    for (std::size_t i = 0; i < a.args.size(); ++i)
+        if (!sameExpr(a.args[i], b.args[i])) return false;
+    return true;
+}
+
+inline void shareRepeatedPureCalls(Program& program) {
+    if (envEnabled("VELOZ_NO_PURE_SHARE")) return;
+    const auto pure = pureFunctions(program);
+    if (pure.empty()) return;
+    std::unordered_set<std::string> userNames;
+    for (const auto& f : program.functions)
+        if (!f.isTest) userNames.insert(f.name);
+    // Una expresión que se puede calcular una vez y usar dos: datos, operaciones y llamadas puras.
+    auto repeatable = [&](auto& self, const Expr& e) -> bool {
+        if (e.isMutArg || e.isResourceMove) return false;
+        switch (e.kind) {
+        case ExprKind::Integer: case ExprKind::Float: case ExprKind::Boolean: case ExprKind::String: case ExprKind::Name:
+            return true;
+        case ExprKind::Unary: case ExprKind::Field: case ExprKind::Construct:
+            break;
+        case ExprKind::Binary:
+            if (e.text == "&&" || e.text == "||") return false;
+            break;
+        case ExprKind::Call:
+            if (userNames.contains(e.text)) {
+                if (!pure.contains(e.text)) return false;
+            } else if (e.text == "sharedNew") {
+                // Dos celdas iguales que nadie modifica en sitio pueden ser la misma.
+                if (e.args.size() != 1 || !program.isShared(e.type) ||
+                    program.cellMutated(program.sharedElem(e.type)))
+                    return false;
+            } else if (e.text != "Some" && e.text != "Ok" && e.text != "Err" && e.text != "abs" && e.text != "min" &&
+                       e.text != "max" && e.text != "float" && e.text != "int" && e.text != "len") {
+                return false;
+            }
+            break;
+        default:
+            return false;
+        }
+        for (const auto& a : e.args)
+            if (!self(self, a)) return false;
+        return true;
+    };
+    auto isCandidate = [&](const Expr& e) {
+        return e.kind == ExprKind::Call && (pure.contains(e.text) || e.text == "sharedNew") &&
+               (userNames.contains(e.text) || e.text == "sharedNew") && repeatable(repeatable, e);
+    };
+    struct Found { Expr* node; bool clean; std::size_t size; };
+    auto sizeOf = [](auto& self, const Expr& e) -> std::size_t {
+        std::size_t n = 1;
+        for (const auto& a : e.args) n += self(self, a);
+        return n;
+    };
+    // Recorre lo que la expresión evalúa siempre, en su orden. `dirty` dice si ya se ha evaluado algo
+    // que puede detener el programa o hacer algo observable: adelantar una llamada por delante de eso
+    // cambiaría qué ocurre primero.
+    auto scan = [&](auto& self, Expr& e, bool& dirty, bool& mutates, std::vector<Found>& out) -> void {
+        if (e.isMutArg) mutates = true;
+        const bool dirtyAtEntry = dirty;
+        switch (e.kind) {
+        case ExprKind::Integer: case ExprKind::Float: case ExprKind::Boolean: case ExprKind::String: case ExprKind::Name:
+            return;
+        case ExprKind::If:
+            if (e.ifExpr) self(self, e.ifExpr->condition, dirty, mutates, out);
+            dirty = true;
+            mutates = true; // lo que hagan las ramas no se mira: se da por hecho lo peor
+            return;
+        case ExprKind::Match:
+            if (e.matchExpr) self(self, e.matchExpr->scrutinee, dirty, mutates, out);
+            dirty = true;
+            mutates = true;
+            return;
+        case ExprKind::Closure:
+            mutates = true;
+            return;
+        case ExprKind::Binary:
+            if (e.text == "&&" || e.text == "||") {
+                self(self, e.args.at(0), dirty, mutates, out);
+                dirty = true;
+                mutates = true;
+                return;
+            }
+            for (auto& a : e.args) self(self, a, dirty, mutates, out);
+            dirty = true;
+            return;
+        case ExprKind::Construct: case ExprKind::ArrayLit: case ExprKind::Field:
+            for (auto& a : e.args) self(self, a, dirty, mutates, out);
+            return;
+        case ExprKind::Call: {
+            for (auto& a : e.args) self(self, a, dirty, mutates, out);
+            if (isCandidate(e)) out.push_back({&e, !dirtyAtEntry, sizeOf(sizeOf, e)});
+            if (e.text != "Some" && e.text != "Ok" && e.text != "Err") dirty = true;
+            if (!userNames.contains(e.text) && !pureBuiltin(e.text)) mutates = true;
+            if (userNames.contains(e.text) && !pure.contains(e.text)) mutates = true;
+            return;
+        }
+        case ExprKind::Unary: case ExprKind::Index: case ExprKind::Slice: case ExprKind::Try: case ExprKind::Interp:
+            for (auto& a : e.args) self(self, a, dirty, mutates, out);
+            dirty = true;
+            return;
+        default:
+            for (auto& a : e.args) self(self, a, dirty, mutates, out);
+            dirty = true;
+            mutates = true;
+            return;
+        }
+    };
+    unsigned counter = 0;
+    // Saca de `e` las llamadas repetidas y devuelve las ligaduras que hay que poner justo antes.
+    auto share = [&](Expr& e) {
+        std::vector<Stmt> bindings;
+        for (;;) {
+            std::vector<Found> found;
+            bool dirty = false, mutates = false;
+            scan(scan, e, dirty, mutates, found);
+            if (mutates || found.size() < 2) break;
+            // La expresión repetida más grande cuya primera aparición no tiene nada delante.
+            std::size_t bestSize = 0;
+            std::vector<Expr*> twins;
+            for (std::size_t i = 0; i < found.size(); ++i) {
+                if (!found[i].clean || found[i].size <= bestSize) continue;
+                std::vector<Expr*> same{found[i].node};
+                for (std::size_t j = i + 1; j < found.size(); ++j)
+                    if (sameExpr(*found[i].node, *found[j].node)) same.push_back(found[j].node);
+                if (same.size() < 2) continue;
+                bestSize = found[i].size;
+                twins = std::move(same);
+            }
+            if (twins.empty()) break;
+            Stmt binding{StmtKind::Let, twins[0]->span, "tz.share" + std::to_string(++counter), Type::Unknown,
+                         {}, {}, {}, {}};
+            Expr name{ExprKind::Name, twins[0]->span, binding.name, {}};
+            name.type = twins[0]->type;
+            binding.exprs.push_back(*twins[0]);
+            // Una gemela puede estar dentro de otra expresión que también se sustituye: se va de la
+            // última a la primera para no tocar memoria ya reemplazada.
+            for (auto it = twins.rbegin(); it != twins.rend(); ++it) **it = name;
+            bindings.push_back(std::move(binding));
+        }
+        return bindings;
+    };
+    auto rewriteBody = [&](auto& self, auto& inExpr, std::vector<Stmt>& body) -> void {
+        std::vector<Stmt> result;
+        result.reserve(body.size());
+        for (auto& s : body) {
+            self(self, inExpr, s.body);
+            self(self, inExpr, s.otherwise);
+            for (auto& arm : s.arms) {
+                self(self, inExpr, arm.body);
+                if (arm.resultExpr) inExpr(inExpr, self, *arm.resultExpr);
+            }
+            for (auto& e : s.exprs) inExpr(inExpr, self, e);
+            // Sentencias que evalúan su expresión una sola vez (la condición de un `while` no: se repite).
+            const bool simple = (s.kind == StmtKind::Let || s.kind == StmtKind::Var || s.kind == StmtKind::Assign ||
+                                 s.kind == StmtKind::Return || s.kind == StmtKind::Call || s.kind == StmtKind::Print ||
+                                 s.kind == StmtKind::Assert || s.kind == StmtKind::If || s.kind == StmtKind::Match) &&
+                                s.exprs.size() == 1;
+            if (simple)
+                for (auto& binding : share(s.exprs[0])) result.push_back(std::move(binding));
+            result.push_back(std::move(s));
+        }
+        body = std::move(result);
+    };
+    // Los bloques que viven dentro de una expresión (`if` y `match` con valor, cierres): su valor final
+    // es una expresión, y lo que se saque de ella se liga al final del bloque que la precede.
+    auto inExpr = [&](auto& self, auto& onBody, Expr& e) -> void {
+        for (auto& a : e.args) self(self, onBody, a);
+        if (e.ifExpr) {
+            self(self, onBody, e.ifExpr->condition);
+            onBody(onBody, self, e.ifExpr->thenBody);
+            onBody(onBody, self, e.ifExpr->elseBody);
+            if (e.ifExpr->thenResult) {
+                self(self, onBody, *e.ifExpr->thenResult);
+                for (auto& binding : share(*e.ifExpr->thenResult)) e.ifExpr->thenBody.push_back(std::move(binding));
+            }
+            if (e.ifExpr->elseResult) {
+                self(self, onBody, *e.ifExpr->elseResult);
+                for (auto& binding : share(*e.ifExpr->elseResult)) e.ifExpr->elseBody.push_back(std::move(binding));
+            }
+        }
+        if (e.matchExpr) {
+            self(self, onBody, e.matchExpr->scrutinee);
+            for (auto& arm : e.matchExpr->arms) {
+                onBody(onBody, self, arm.body);
+                if (arm.resultExpr) {
+                    self(self, onBody, *arm.resultExpr);
+                    for (auto& binding : share(*arm.resultExpr)) arm.body.push_back(std::move(binding));
+                }
+            }
+        }
+        if (e.closure) onBody(onBody, self, e.closure->body);
+    };
+    for (auto& f : program.functions)
+        if (!f.isTest && !f.isExternDecl) rewriteBody(rewriteBody, inExpr, f.body);
 }
 
 struct Value {
@@ -601,7 +876,7 @@ class Lowerer {
                 const auto proof = repetitionSizes.find(entry.second);
                 if (proof != repetitionSizes.end() && proof->second.squareSlot &&
                     *proof->second.squareSlot == *slot) {
-                    constexpr std::int64_t root = 4096;
+                    constexpr std::int64_t root = 32768;
                     static_assert(root * root == maxArrayLength);
                     return IntRange{-root, root};
                 }
@@ -1334,7 +1609,7 @@ class Lowerer {
                 }
                 return res;
             }
-            if (e.text == "push" || e.text == "pop" || e.text == "clear" || e.text == "reserve" ||
+            if (e.text == "push" || e.text == "pop" || e.text == "clear" || e.text == "reserve" || e.text == "truncate" ||
                 e.text == "sbPush" || e.text == "sbPushByte" || e.text == "sbPushInt" ||
                 e.text == "sbPushFloat" || e.text == "sbClear" || e.text == "sbTake" ||
                 e.text == "mapSet" || e.text == "mapDel" || e.text == "setAdd" ||

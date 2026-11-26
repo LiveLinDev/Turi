@@ -5,6 +5,8 @@ Rules that keep it honest:
   * All implementations of a benchmark use the same algorithm and must print the same output.
   * C is built the way an expert builds it: -O3 -march=native -flto (and PGO with --pgo).
   * Reported time is the minimum of N runs of the whole process; memory is the peak resident set.
+  * The runs are interleaved: each round runs every language once, so all of them see the same machine
+    noise. Measuring one language after another made whichever ran during a busy moment look slower.
   * No benchmark-specific compiler passes: `veloz build --release --cpu native`, nothing else.
 
 Usage:
@@ -121,6 +123,7 @@ def main():
             continue
         config = json.loads((bench_dir / "bench.json").read_text(encoding="utf-8"))
         reference = None
+        built = []
         for lang in wanted:
             ext, command = build[lang]
             src = bench_dir / (name + ext)
@@ -132,19 +135,27 @@ def main():
                 rows.append({"bench": name, "lang": lang, "error": "build: " + (proc.stderr or proc.stdout).strip()[:300]})
                 print(f"{name:14s} {lang:5s} BUILD FAILED: {(proc.stderr or proc.stdout).strip()[:200]}", flush=True)
                 continue
-            times, peaks, output, failed = [], [], None, None
-            for _ in range(args.runs):
+            built.append((lang, src, exe))
+        samples = {lang: {"times": [], "peaks": [], "output": None, "failed": None} for lang, _, _ in built}
+        for _ in range(args.runs):
+            for lang, _, exe in built:
+                sample = samples[lang]
+                if sample["failed"]:
+                    continue
                 code, out, err, seconds, peak = run_once([str(exe), *map(str, config["args"])])
                 if code != 0:
-                    failed = f"exit {code}: {err.strip()[:200]}"
-                    break
-                times.append(seconds)
-                peaks.append(peak)
-                output = out
-            if failed:
-                rows.append({"bench": name, "lang": lang, "error": failed})
-                print(f"{name:14s} {lang:5s} RUN FAILED: {failed}", flush=True)
+                    sample["failed"] = f"exit {code}: {err.strip()[:200]}"
+                    continue
+                sample["times"].append(seconds)
+                sample["peaks"].append(peak)
+                sample["output"] = out
+        for lang, src, _ in built:
+            sample = samples[lang]
+            if sample["failed"]:
+                rows.append({"bench": name, "lang": lang, "error": sample["failed"]})
+                print(f"{name:14s} {lang:5s} RUN FAILED: {sample['failed']}", flush=True)
                 continue
+            times, peaks, output = sample["times"], sample["peaks"], sample["output"]
             if reference is None:
                 reference = output
             row = {"bench": name, "lang": lang, "min_s": min(times), "median_s": statistics.median(times),
@@ -185,7 +196,8 @@ def main():
     print(table)
     print()
     print(summary)
-    machine = f"{platform.processor() or platform.machine()} · {platform.system()} {platform.release()} · {args.runs} runs, minimum"
+    machine = (f"{platform.processor() or platform.machine()} · {platform.system()} {platform.release()} · "
+               f"{args.runs} interleaved runs, minimum")
     if args.markdown:
         Path(args.markdown).write_text(f"# Benchmark results\n\n{machine}\n\n{summary}\n\n{table}\n", encoding="utf-8", newline="\n")
     if args.json:

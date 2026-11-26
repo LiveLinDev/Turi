@@ -215,7 +215,20 @@ Escrita en Turi e importada sin declarar nada. Nombres iguales a los de Python y
 
 **Estado (25 de noviembre de 2026):** medido con un traductor de prueba (`tools/pyfront/py2turi.py`, adaptador `turipy` del banco). Resultado: 59 de 60 a la primera con 37 tokens por solución y 131 de encargo, frente a 59, 68 y 1.133 con la sintaxis propia. Ver `DECISIONES.md`, Turi 0.9.2.
 
-Trabajo para llevarlo al compilador:
+**El plan completo para que todo Python corra en nativo y gane a C está en [PLAN-PYTHON-TOTAL.md](PLAN-PYTHON-TOTAL.md)**; sustituye a la lista corta de abajo.
+
+**Estado (25 de noviembre de 2026, más tarde): motor híbrido funcionando** (`tools/pyfront/turipy.py`, `DECISIONES.md` Turi 0.9.3). Cualquier programa Python se ejecuta; lo compilable corre en nativo y lo demás en CPython. Por orden de lo que más cobertura o velocidad da, falta:
+
+1. **`print` dentro de funciones nativas.** Hoy un `print` deja en Python a esa función y a todas las que la llaman. Solución prevista: la versión nativa anota en un bloque lo que imprimiría (valores, no texto) y Python lo imprime al volver, con su propio formato; si la función se detiene, el bloque se descarta.
+2. **Llamar desde nativo a una función que se quedó en Python** (el compilador ya tiene `extern "C" fn` para la vuelta).
+3. **Diccionarios con orden de inserción** (mapa de entradas densas de M2): permite recorrerlos y pasarlos por la frontera.
+4. **Resultados opcionales** (`return None` en un camino y un valor en otro) y clases de campos fijos como estructuras.
+5. **Ejecutable independiente** para programas que se traducen enteros: sin CPython no hay 70 ms de arranque y un programa corto gana también en tiempo de proceso.
+6. **Empates que quedan en Python** (`nbody` y `mandelbrot`, 1,0 veces C): intercalar vueltas independientes del bucle exterior (V5b).
+7. **Copia en la frontera** con la API de C de Python (unas diez veces más rápida que por `array`), funciones de otros módulos del programa y bucles de nivel superior.
+8. **Linux y macOS.**
+
+Trabajo para llevar la sintaxis al propio compilador (deja de hacer falta CPython para lo traducible):
 
 1. **Lector de Python en `src/parser.cpp`**: `def`, `:` y sangría, `elif`, `for x in`, `range`, comprensiones, cortes, `in`, `not`, cadenas f, tuplas. Produce el mismo árbol que la sintaxis actual; se elige por extensión de archivo o por detección.
 2. **Declaración por primera asignación** y ámbito de función (hoy lo hace el traductor): en el comprobador, con deducción de tipos para `[]`, `{}` y `set()` a partir del primer uso.

@@ -587,9 +587,9 @@ def main():
         module = verify(cli, source, executable, SQUARE_INDEX_UNSAFE, b"", "R_BOUNDS")
         assert "@tz.at" in function_ir(module, "main")
 
-        valid_limit = str(sum(i % 1009 for i in range(4096))).encode() + b"\n"
-        for argument, expected, trap in (("4096", valid_limit, None),
-                                         ("4097", b"", "R_ALLOC"),
+        above_old_limit = str(sum(i % 1009 for i in range(4097))).encode() + b"\n"
+        for argument, expected, trap in (("4097", above_old_limit, None),
+                                         ("32769", b"", "R_ALLOC"),
                                          ("9223372036854775807", b"", "R_OVERFLOW")):
             text = SQUARE_LIMIT.replace("INPUT", argument)
             module = verify(cli, source, executable, text, expected, trap)

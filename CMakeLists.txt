@@ -103,6 +103,8 @@ if(BUILD_TESTING)
     add_test(NAME core_lib COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/core_lib.py" "$<TARGET_FILE:veloz>")
     add_test(NAME recursive_types COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/recursive_types.py" "$<TARGET_FILE:veloz>")
     add_test(NAME map_lookahead COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/map_lookahead.py" "$<TARGET_FILE:veloz>")
+    add_test(NAME pure_share COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/pure_share.py" "$<TARGET_FILE:veloz>")
+    add_test(NAME turipy_hybrid COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/turipy_hybrid.py" "$<TARGET_FILE:veloz>")
     # Estas dos inspeccionan el IR de la reserva en heap de `repeat`; `stack_arrays` cubre la pila.
     set_tests_properties(first_write ranges PROPERTIES ENVIRONMENT "VELOZ_NO_STACK_ARRAYS=1")
   endif()

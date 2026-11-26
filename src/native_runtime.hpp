@@ -77,6 +77,11 @@ define internal ptr @tz.stream(i1 %error) sanitize_address {
             << "  %ref = select i1 %error, ptr " << stderrName << ", ptr " << stdoutName
             << "\n  %stream = load ptr, ptr %ref\n  ret ptr %stream\n}\n";
     }
+    // VELOZ_EMBED=1: la salida no va a los flujos del proceso sino al anfitrión, que la guarda y la
+    // escribe por su cuenta (con sus redirecciones) cuando la llamada termina bien. Si la llamada se
+    // detiene, el anfitrión la descarta y repite la llamada.
+    const bool embeddedOutput = envEnabled("VELOZ_EMBED");
+    if (embeddedOutput) out << "declare void @turi_embed_write(ptr, i64, i1)\n";
     out << R"ll(
 define internal ptr @tz.textPtr(ptr %slot) sanitize_address {
 entry:
@@ -92,7 +97,15 @@ out:
   %p = load ptr, ptr %pf
   ret ptr %p
 }
-define internal void @tz.writeRaw(ptr %p, i64 %n, i1 %error) sanitize_address {
+)ll";
+    if (embeddedOutput) {
+        out << R"ll(define internal void @tz.writeRaw(ptr %p, i64 %n, i1 %error) sanitize_address {
+  call void @turi_embed_write(ptr %p, i64 %n, i1 %error)
+  ret void
+}
+)ll";
+    } else {
+        out << R"ll(define internal void @tz.writeRaw(ptr %p, i64 %n, i1 %error) sanitize_address {
   %empty = icmp eq i64 %n, 0
   br i1 %empty, label %done, label %out
 out:
@@ -102,7 +115,9 @@ out:
 done:
   ret void
 }
-define internal void @tz.write(%text %s, i1 %error) sanitize_address {
+)ll";
+    }
+    out << R"ll(define internal void @tz.write(%text %s, i1 %error) sanitize_address {
   %slot = alloca %text
   store %text %s, ptr %slot
   %hdr = extractvalue %text %s, 0
@@ -113,7 +128,13 @@ define internal void @tz.write(%text %s, i1 %error) sanitize_address {
   ret void
 }
 )ll";
+    // VELOZ_EMBED=1: el código se carga dentro de otro programa (por ejemplo CPython). Antes de
+    // escribir el diagnóstico y terminar el proceso se avisa al anfitrión, que puede recuperar el
+    // control (saltando fuera con longjmp) y seguir por su cuenta. Si vuelve, se aborta como siempre.
+    const bool embedded = envEnabled("VELOZ_EMBED");
+    if (embedded) out << "declare void @turi_embed_abort()\n";
     out << "define internal void @tz.abort(%diag %diagnostic) cold noinline noreturn sanitize_address {\n"
+        << (embedded ? "  call void @turi_embed_abort()\n" : "")
         << "  %code = extractvalue %diag %diagnostic, 0\n"
         << "  %file = extractvalue %diag %diagnostic, 1\n"
         << "  %start = extractvalue %diag %diagnostic, 2\n"

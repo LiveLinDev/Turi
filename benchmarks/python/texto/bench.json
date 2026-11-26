@@ -1,0 +1,1 @@
+{"args": ["{entrada}"], "input": ["generar.py", 400000], "about": "lee un archivo de texto línea a línea, cuenta palabras con un diccionario y ordena"}

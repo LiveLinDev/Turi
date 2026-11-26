@@ -62,9 +62,13 @@ enum class Type {
     I8, I16, I32, U8, U16, U32, U64, F32,
     NamedBase = 32
 };
-inline constexpr std::int64_t maxArrayLength = 1LL << 24;
-inline constexpr std::int64_t maxTableCap = (maxArrayLength * 7) / 8;
-inline constexpr std::int64_t maxPoolCap = maxTableCap;
+// 2^30: lo mismo que supone la vía rápida (kFastArrayLenMax + 1); el producto de dos longitudes
+// sigue cabiendo en 64 bits, y la longitud en los 32 bits de %array.
+inline constexpr std::int64_t maxArrayLength = 1LL << 30;
+inline constexpr std::uint64_t maxTableBuckets = 1ULL << 24;
+inline constexpr std::int64_t maxTableCap = (maxTableBuckets * 7) / 8;
+inline constexpr std::int64_t maxPoolCap = 14'680'064;
+inline constexpr std::int64_t maxRingCapacity = 1LL << 24;
 inline constexpr std::int64_t maxStringLength = 0x3FFFFFFFLL;
 enum class ArrayAllocation { None, Region, Owner };
 inline std::string typeName(Type t) {

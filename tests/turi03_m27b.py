@@ -485,6 +485,16 @@ fn main() {
     assert tid == "R_ARRAY_SIZE"
 
 
+def test_ring_capacity_limit(cli: Path, workdir: Path):
+    src = """fn main() {
+    let q = ringNew<int>(16777217)
+    print(ringCap(q))
+}
+"""
+    trap, _ = run_both(cli, src, workdir, expect_trap=True)
+    assert trap == "R_ARRAY_SIZE", trap
+
+
 def test_native_tcp_echo_concurrency(cli: Path, workdir: Path):
     src = r"""
 fn serveOnce(l: mut TcpListener) -> Result<str, str> {
@@ -857,6 +867,7 @@ def main():
         test_nested_recursive_work_stealing(cli, workdir)
         test_unjoined_tasks_and_scope_lifetime(cli, workdir)
         test_parallel_map_and_freeze(cli, workdir)
+        test_ring_capacity_limit(cli, workdir)
         test_native_tcp_echo_concurrency(cli, workdir)
         test_native_malloc_audit_conc(cli, clang, workdir)
         test_tooling_and_diagnostics(cli, workdir)

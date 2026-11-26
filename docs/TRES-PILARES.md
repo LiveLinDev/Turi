@@ -12,8 +12,8 @@ Los tres pilares son los del proyecto y no se mezclan:
 
 | Pilar | Medición nueva (reproducible) | Estado |
 |---|---|---|
-| Velocidad | `python benchmarks/run.py`: Turi frente a C experto en programas clásicos con tamaño de problema dado en ejecución | **Cumplido en 3 de 6, empate en 2.** Media 1,13× frente a C portable experto (0,49× al empezar). Pierde solo `binarytrees` (0,75×). Falta la comparación con C con intrínsecos. |
-| IA: errores | `python tools/aibench/run.py`: 60 tareas × 6 lenguajes con el mismo enunciado y pruebas ocultas, modelo de la DGX Spark | **Cumplido frente a C, C++, Rust y Go** (59 de 60 a la primera, igual que Rust y Go y por delante de C y C++; 60 de 60 compilan a la primera). Falta Python (60 de 60). |
+| Velocidad | `python benchmarks/run.py`: Turi frente a C experto en programas clásicos con tamaño de problema dado en ejecución | **5 victorias, 1 empate y ninguna derrota.** Media 1,29× frente a C portable experto (0,49× al empezar). `binarytrees` gana desde que las llamadas puras repetidas se comparten (sin eso, el asignador sigue por detrás de la arena del C). Programas escritos en Python con el motor híbrido, en tiempo de cálculo: 2 victorias y 2 empates. Falta la comparación con C con intrínsecos. |
+| IA: errores | `python tools/aibench/run.py`: 60 tareas × 6 lenguajes con el mismo enunciado y pruebas ocultas, modelo de la DGX Spark | **Cumplido frente a C, C++, Rust y Go** (59 de 60 a la primera, igual que Rust y Go y por delante de C y C++; 60 de 60 compilan a la primera). Con el motor híbrido (`tools/pyfront/run.py`) el modelo escribe Python tal cual y nada se rechaza: sus 60 respuestas dan lo mismo que CPython y 58 corren en nativo. |
 | IA: tokens | Misma herramienta, tokens de la solución correcta con el tokenizador del modelo | **Cumplido frente a C, C++, Rust y Go** (66 a 68 tokens frente a 70 a 120). Con sintaxis de Python compilada por Turi (prototipo): 37 tokens, como Python (36), y el encargo baja de 1.133 a 131 tokens. |
 | Memoria | `benchmarks/run.py` (tiempo y memoria pico) más el recuento de marcas de memoria que escribe el programador | **En parte.** Árboles y listas ya se escriben sin nada de memoria (0 marcas) y van 10 veces más rápido que en C++ y Rust; frente a C con arena, 0,75×. En cadenas y mapas (`kmers`, 0 marcas) Turi va 3 veces más rápido que C++ y Rust y queda a 0,84× del C con tabla propia; usa más memoria pico que los cuatro. |
 
@@ -141,6 +141,19 @@ Los estudios publicados coinciden en que un modelo rinde mejor cuanto más ha vi
 | Turi con su sintaxis | 59/60 | 68 | 1.133 |
 
 Mismos errores que hoy, la mitad de tokens en la solución y casi nueve veces menos en el encargo, sin perder velocidad (`spectralnorm` en Python traducido: 95 ms, igual que en Turi; C experto: 231 ms). El único fallo fue un `import re`. Esto contesta la pregunta de diseño: la cara del lenguaje para la IA debe ser la sintaxis de Python, con el compilador y la memoria de Turi debajo. Falta llevarlo al compilador y decidir las diferencias de comportamiento (enteros de 64 bits, orden de los diccionarios, copia en `b = a`, sin excepciones). Detalle en `DECISIONES.md` (Turi 0.9.2).
+
+### Todo Python, sin rechazar nada (motor híbrido, 25 de noviembre)
+
+El traductor de prueba solo aceptaba un subconjunto con anotaciones. `tools/pyfront/run.py` ejecuta cualquier programa Python: CPython lo corre entero y las funciones que Turi puede compilar con el mismo resultado pasan a nativo la primera vez que se llaman, con los tipos reales de esa llamada. Si la versión nativa se topa con algo que no puede igualar, la llamada se repite en Python. Así el modelo escribe el Python que ya domina, sin tarjeta ni anotaciones, y no existe el «esto no compila».
+
+| Programa (Python) | Entrada | Proceso entero (ms) | Cálculo (ms) | C experto (ms) | Turi a mano (ms) | Cálculo frente a C |
+|---|---:|---:|---:|---:|---:|---:|
+| fannkuch | 10 | 215 | 146 | 167.0 | 157.7 | 1.15x |
+| mandelbrot | 4000 | 263 | 187 | 186.6 | 184.5 | 1.00x |
+| nbody | 20000000 | 787 | 700 | 543.8 | 501.9 | 0.78x |
+| spectralnorm | 3000 | 154 | 86 | 242.7 | 95.4 | 2.84x |
+
+Tiempo de cálculo frente al C experto: gana en 2 de 4, empata en 1 y pierde en 1 (nbody). Las 60 respuestas en Python del modelo (ronda v6) dan lo mismo que CPython por este motor, y 58 corren en nativo. El proceso entero incluye unos 70 ms de arranque de CPython. Detalle, garantías y límites en `tools/pyfront/LEEME.md` y `DECISIONES.md` (Turi 0.9.3).
 
 ### Qué se cambió en el lenguaje
 

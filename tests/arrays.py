@@ -71,7 +71,7 @@ RETURN_OUTPUT = b"27\n71\n83\n105\n"
 TRAPS = [
     ("let a = repeat(1, -1)", "R_ARRAY_SIZE"),
     ("let a = repeat(1, 9223372036854775807)", "R_ALLOC"),
-    ("let a = repeat(1, 16777217)", "R_ALLOC"),
+    ("let a = repeat(1, 1073741825)", "R_ALLOC"),
     ("let a = repeat(1, 0)\nprint(a[0])", "R_BOUNDS"),
     ("let a = repeat(1, 2)\nprint(a[-1])", "R_BOUNDS"),
     ("var a = repeat(1, 4)\na[4] = noisy()", "R_BOUNDS"),

@@ -227,7 +227,7 @@ fn testReverseStruct(p: str) -> Result<str, str> {
     return Ok(out)
 }
 
-fn testReverseArrayAndClear(p: str) -> Result<str, str> {
+fn testReverseArrayMutations(p: str) -> Result<str, str> {
     let rm0 = removeFile(p)
     if true {
         var a = fileOpen(p, "a")?
@@ -254,7 +254,23 @@ fn testReverseArrayAndClear(p: str) -> Result<str, str> {
     }
     let out2 = readFile(p)
     assert removeFile(p)
-    return Ok(out1 + "|" + out2)
+    var first = fileOpen(p, "a")?
+    var second = fileOpen(p, "a")?
+    var third = fileOpen(p, "a")?
+    assert (fileWrite(mut first, "FIRST,")?) == 6
+    assert (fileWrite(mut second, "SECOND,")?) == 7
+    assert (fileWrite(mut third, "THIRD,")?) == 6
+    var files = [first, second, third]
+    truncate(mut files, 4)
+    assert len(files) == 3
+    files.truncate(1)
+    assert len(files) == 1
+    assert readFile(p) == "THIRD,SECOND,"
+    truncate(mut files, -1)
+    assert len(files) == 0
+    let out3 = readFile(p)
+    assert removeFile(p)
+    return Ok(out1 + "|" + out2 + "|" + out3)
 }
 
 fn main() {
@@ -431,7 +447,7 @@ fn main() {
         Ok(s) => print(s)
         Err(err) => assert false
     }
-    match testReverseArrayAndClear("m26b_rev_arr.txt") {
+    match testReverseArrayMutations("m26b_rev_arr.txt") {
         Ok(s) => print(s)
         Err(err) => assert false
     }
@@ -439,7 +455,7 @@ fn main() {
 """
     out, _ = run_both(cli, src, workdir)
     lines = out.strip().splitlines()
-    assert lines == ["SECOND,FIRST,", "SECOND,FIRST,", "SECOND,FIRST,|TWO,ONE,"], lines
+    assert lines == ["SECOND,FIRST,", "SECOND,FIRST,", "SECOND,FIRST,|TWO,ONE,|THIRD,SECOND,FIRST,"], lines
 
     # Negative count trap R_ARRAY_SIZE parity
     trap_src = """

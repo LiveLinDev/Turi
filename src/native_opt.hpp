@@ -4731,8 +4731,8 @@ private:
                             const unsigned ns = sqIt->second.first;
                             const std::int64_t wOff = sqIt->second.second;
                             if (!slotWritable[ns]) {
-                                if (auto lo = checkedSub64(-4096, wOff)) env.diffs.addLower({false, ns}, *lo);
-                                if (auto hi = checkedSub64(4096, wOff)) env.diffs.addUpper({false, ns}, *hi);
+                                if (auto lo = checkedSub64(-32768, wOff)) env.diffs.addLower({false, ns}, *lo);
+                                if (auto hi = checkedSub64(32768, wOff)) env.diffs.addUpper({false, ns}, *hi);
                             }
                         }
                     } else if (dit != defOp.end() && dit->second->op == Op::Load) {

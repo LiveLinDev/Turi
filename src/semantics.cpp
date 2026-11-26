@@ -3819,6 +3819,13 @@ mapSet(mut m, "a", 1))");
             checkMutCollectionBuiltin(expr);
             return Type::Void;
         }
+        if (expr.text == "truncate") {
+            checkCallArity(expr, 2);
+            checkMutArrayBuiltin(expr);
+            if (expr.args[1].isMutArg) fail("E_MUT_ARG", "truncate solo admite mut en el array", expr.args[1].span, "truncate(mut a, 4)");
+            requireType(typeOf(expr.args[1]), Type::Int, expr.args[1].span);
+            return Type::Void;
+        }
         if (expr.text == "reserve") {
             checkCallArity(expr, 2);
             checkMutCollectionBuiltin(expr);
@@ -5277,7 +5284,7 @@ mapSet(mut m, "a", 1))");
             if (types.program.isArray(recvType)) {
                 if (mName == "len" || mName == "cap") ufcsTarget = mName;
                 else if (mName == "isEmpty") { ufcsTarget = "len"; ufcsIsEmpty = true; }
-                else if (mName == "push" || mName == "pop" || mName == "clear" ||
+                else if (mName == "push" || mName == "pop" || mName == "clear" || mName == "truncate" ||
                          mName == "reserve" || mName == "sort" || mName == "sortStable") {
                     ufcsTarget = mName; ufcsMut = true;
                 }
@@ -8577,7 +8584,7 @@ struct EvaluationOrder {
             case ExprKind::Call: {
                 const bool isBuiltin = !userFunctions.contains(e.text);
                 const std::size_t skipArg = isBuiltin ? (
-                    (e.text == "push" || e.text == "pop" || e.text == "clear" || e.text == "reserve" ||
+                    (e.text == "push" || e.text == "pop" || e.text == "clear" || e.text == "reserve" || e.text == "truncate" ||
                      e.text == "sbPush" || e.text == "sbPushByte" || e.text == "sbPushInt" ||
                      e.text == "sbPushFloat" || e.text == "sbClear" || e.text == "sbTake" ||
                      e.text == "mapSet" || e.text == "mapDel" || e.text == "setAdd" ||
@@ -9531,7 +9538,7 @@ struct Interpreter {
         if (minCap == 0) return;
         std::uint64_t b = 16;
         while (((b * 7ULL) >> 3) < static_cast<std::uint64_t>(minCap)) {
-            if (b >= (1ULL << 24)) allocationFailed(span);
+            if (b >= maxTableBuckets) allocationFailed(span);
             b <<= 1;
         }
         const auto needBuckets = static_cast<std::uint32_t>(b);
@@ -10691,6 +10698,20 @@ struct Interpreter {
                                 }
                                 for (std::size_t k = arr->items.size(); k > 0; --k) dropValue(arr->items[k - 1]);
                                 arr->items.clear();
+                            }
+                        });
+                        operands.emplace_back(Value{});
+                    } else if (fnName == "truncate") {
+                        const Integer keep = std::get<Integer>(pop());
+                        mutateTarget(frame, i.expr->args[0], [&](Value& target) {
+                            auto& arr = std::get<ArrayPtr>(target);
+                            const auto n = static_cast<std::size_t>(
+                                std::clamp(keep, Integer{0}, static_cast<Integer>(arr->items.size())));
+                            if (n < arr->items.size()) {
+                                try { if (arr.use_count() > 1) arr = std::make_shared<ArrayBuffer>(*arr); }
+                                catch (const std::bad_alloc&) { allocationFailed(i.span); }
+                                for (std::size_t k = arr->items.size(); k > n; --k) dropValue(arr->items[k - 1]);
+                                arr->items.resize(n);
                             }
                         });
                         operands.emplace_back(Value{});
@@ -12470,7 +12491,7 @@ struct Interpreter {
                         operands.emplace_back(Value{});
                     } else if (fnName == "ringNew") {
                         const Integer cap = std::get<Integer>(pop());
-                        if (cap <= 0 || cap > maxArrayLength)
+                        if (cap <= 0 || cap > maxRingCapacity)
                             fail("R_ARRAY_SIZE", "Capacidad fuera de rango en ringNew", i.span, "let q = ringNew<int>(16)");
                         std::size_t realCap = 2u;
                         while (realCap < static_cast<std::size_t>(cap)) realCap <<= 1u;

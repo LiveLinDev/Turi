@@ -16,15 +16,99 @@ import json
 import sys
 
 INT, FLOAT, BOOL, STR = "int", "float", "bool", "str"
+RANDOM = ("random",)  # un objeto random.Random (o el del módulo): en nativo, un número que lo identifica
 
 
 class Unsupported(Exception):
     pass
 
 
+def refine(a, b):
+    """Une dos tipos deducidos para el mismo valor. Devuelve (tipo, coinciden)."""
+    if a is None:
+        return b, True
+    if b is None:
+        return a, True
+    if is_obj(a) and is_obj(b):
+        if a[1] is None or b[1] is None or a[1] == b[1]:
+            return (a if a[1] is not None else b), True
+        return a, False
+    if is_obj(a) and b == "none":
+        return a, True
+    if is_obj(b) and a == "none":
+        return b, True
+    if isinstance(a, tuple) and isinstance(b, tuple) and a[0] == b[0]:
+        if a[0] == "tuple":
+            if len(a[1]) != len(b[1]):
+                return a, False
+            parts = [refine(x, y) for x, y in zip(a[1], b[1])]
+            return ("tuple", tuple(part for part, _ in parts)), all(ok for _, ok in parts)
+        parts = [refine(x, y) for x, y in zip(a[1:], b[1:])]
+        return (a[0],) + tuple(part for part, _ in parts), all(ok for _, ok in parts)
+    return a, a == b
+
+
+def complete(t):
+    """El tipo está deducido del todo (sin huecos)."""
+    if t is None:
+        return False
+    if isinstance(t, tuple):
+        parts = t[1] if t[0] == "tuple" else t[1:]
+        return all(complete(x) for x in parts)
+    return True
+
+
+def is_mutable(t):
+    return isinstance(t, tuple) and t[0] in ("list", "dict", "set")
+
+
+def holds_mutable(t):
+    return is_mutable(t) or (isinstance(t, tuple) and t[0] == "tuple" and any(holds_mutable(x) for x in t[1]))
+
+
+def subscript_base(node):
+    depth = 0
+    while isinstance(node, ast.Subscript):
+        node = node.value
+        depth += 1
+    return (node.id if isinstance(node, ast.Name) else None), depth
+
+
+def is_obj(t):
+    """Referencia a un objeto de una clase traducida: su posición en el almacén de la clase, -1 si es
+    None. `("obj", None)`: un campo que solo ha valido None."""
+    return isinstance(t, tuple) and t[0] == "obj"
+
+
+def is_opt(t):
+    """Valor o None: el resultado de una función que a veces devuelve None."""
+    return isinstance(t, tuple) and t[0] == "opt"
+
+
+def holds_obj(t):
+    """El valor puede llevar referencias a objetos de los almacenes (o no se sabe qué lleva)."""
+    if t is None or is_obj(t):
+        return True
+    if is_opt(t):
+        return holds_obj(t[1])
+    if isinstance(t, tuple):
+        return any(holds_obj(x) for x in (t[1] if t[0] == "tuple" else t[1:]))
+    return False
+
+
+# Métodos y funciones que guardan su argumento dentro de una colección que ya existe (para el
+# recorte de almacenes; MUTATORS, más abajo, es otra cosa: lo que cambia una lista en sitio).
+STORERS = {"append", "extend", "insert", "add", "update", "setdefault", "appendleft", "extendleft",
+            "heappush", "heapreplace", "heappushpop", "heapify", "insort", "insort_left", "insort_right"}
+
+
 def turi_type(t):
     if t in (INT, FLOAT, BOOL, STR):
         return t
+    if t == RANDOM or is_obj(t):
+        return "int"
+    if is_opt(t):
+        return turi_type(t[1]) + "?"
     if isinstance(t, tuple):
         if t[0] == "list" and t[1] is not None:
             return "[" + turi_type(t[1]) + "]"
@@ -38,8 +122,12 @@ def turi_type(t):
 
 
 def zero_of(t):
-    if t == INT:
+    if t == INT or t == RANDOM:
         return "0"
+    if is_obj(t):
+        return "-1"
+    if is_opt(t):
+        return "None"
     if t == FLOAT:
         return "0.0"
     if t == BOOL:
@@ -95,6 +183,7 @@ HELPERS = {
     return q
 }""",
     "pyPow": """fn pyPow(base: int, exp: int) -> int {
+    assert exp >= 0
     var result = 1
     var b = base
     var e = exp
@@ -124,6 +213,7 @@ HELPERS = {
     return if i < 0 { i + n } else { i }
 }""",
     "pyRangeLen": """fn pyRangeLen(a: int, b: int, step: int) -> int {
+    assert step != 0
     if step > 0 && a < b {
         return (b - a + step - 1) / step
     }
@@ -151,6 +241,12 @@ HELPERS = {
     return out
 }""",
     "pySortedFloat": """fn pySortedFloat(a: [float]) -> [float] {
+    var out = a
+    out.sort()
+    return out
+}""",
+    "pySortedFloatExact": """fn pySortedFloatExact(a: [float]) -> [float] {
+    assert pySortable(a)
     var out = a
     out.sort()
     return out
@@ -327,7 +423,187 @@ HELPERS["pyBin"] = """fn pyBin(n: int) -> str {
 HELPERS["pyHex"] = """fn pyHex(n: int) -> str {
     return if n < 0 { "-0x" + pyHexDigits(0 - n) } else { "0x" + pyHexDigits(n) }
 }"""
+HELPERS["pyNeed"] = """fn pyNeed<T>(ok: bool, v: T) -> T {
+    assert ok
+    return v
+}"""
+HELPERS["pyFDiv"] = """fn pyFDiv(a: float, b: float) -> float {
+    assert b != 0.0
+    return a / b
+}"""
+HELPERS["pyTrueDiv"] = """fn pyTrueDiv(a: int, b: int) -> float {
+    assert b != 0
+    assert a > -9007199254740992 && a < 9007199254740992
+    assert b > -9007199254740992 && b < 9007199254740992
+    return float(a) / float(b)
+}"""
+HELPERS["pyFPow"] = """fn pyFPow(a: float, b: float) -> float {
+    assert !(a < 0.0 && floor(b) != b)
+    assert !(a == 0.0 && b < 0.0)
+    let r = pow(a, b)
+    assert !isInf(r) || isInf(a) || isInf(b)
+    return r
+}"""
+HELPERS["pySqrt"] = """fn pySqrt(a: float) -> float {
+    assert a >= 0.0
+    return sqrt(a)
+}"""
+HELPERS["pyShl"] = """fn pyShl(a: int, b: int) -> int {
+    assert b >= 0 && b < 63
+    let r = a << b
+    assert (r >> b) == a
+    return r
+}"""
+HELPERS["pyShr"] = """fn pyShr(a: int, b: int) -> int {
+    assert b >= 0
+    return if b > 63 { (if a < 0 { -1 } else { 0 }) } else { a >> b }
+}"""
+HELPERS["pyOrd"] = """fn pyOrd(s: str) -> int {
+    assert s.len() == 1
+    return s[0]
+}"""
+HELPERS["pyChr"] = """fn pyChr(n: int) -> str {
+    assert n == 9 || n == 10 || n == 13 || (n >= 32 && n < 127)
+    return strFromByte(n)
+}"""
+HELPERS["pyFound"] = """fn pyFound(i: int) -> int {
+    assert i >= 0
+    return i
+}"""
+HELPERS["pySplit"] = """fn pySplit(s: str, sep: str) -> [str] {
+    assert sep.len() > 0
+    return s.split(sep)
+}"""
+HELPERS["pyReplace"] = """fn pyReplace(s: str, a: str, b: str) -> str {
+    assert a.len() > 0
+    return s.replace(a, b)
+}"""
+HELPERS["pyCount"] = """fn pyCount(s: str, t: str) -> int {
+    assert t.len() > 0
+    return s.count(t)
+}"""
+HELPERS["pyIntOfFloat"] = """fn pyIntOfFloat(x: float) -> int {
+    assert x > -9.0e18 && x < 9.0e18
+    return int(x)
+}"""
+HELPERS["pySumFloatPlain"] = """fn pySumFloatPlain(a: [float]) -> float {
+    assert a.len() > 0
+    var total = 0.0
+    for i in 0..a.len() {
+        total = total + a[i]
+    }
+    return total
+}"""
+HELPERS["pySumFloat"] = """fn pySumFloat(a: [float]) -> float {
+    assert a.len() > 0
+    var hi = 0.0
+    var lo = 0.0
+    for i in 0..a.len() {
+        let x = a[i]
+        let t = hi + x
+        if abs(hi) >= abs(x) {
+            lo = lo + ((hi - t) + x)
+        } else {
+            lo = lo + ((x - t) + hi)
+        }
+        hi = t
+    }
+    if lo != 0.0 && !isInf(lo) && !isNaN(lo) {
+        return hi + lo
+    }
+    return hi
+}"""
+HELPERS["pyNever"] = """fn pyNever() -> bool {
+    return false
+}"""
+HELPERS["pyAbs"] = """fn pyAbs(x: int) -> int {
+    return if x < 0 { 0 - x } else { x }
+}"""
+HELPERS["pyF53"] = """fn pyF53(i: int) -> float {
+    assert i >= -9007199254740992 && i <= 9007199254740992
+    return float(i)
+}"""
+HELPERS["pyMinF"] = """fn pyMinF(a: float, b: float) -> float {
+    return if b < a { b } else { a }
+}"""
+HELPERS["pyMaxF"] = """fn pyMaxF(a: float, b: float) -> float {
+    return if b > a { b } else { a }
+}"""
+HELPERS["pyMinFloats"] = """fn pyMinFloats(a: [float]) -> float {
+    assert a.len() > 0
+    var best = a[0]
+    for i in 1..a.len() {
+        if a[i] < best {
+            best = a[i]
+        }
+    }
+    return best
+}"""
+HELPERS["pyMaxFloats"] = """fn pyMaxFloats(a: [float]) -> float {
+    assert a.len() > 0
+    var best = a[0]
+    for i in 1..a.len() {
+        if a[i] > best {
+            best = a[i]
+        }
+    }
+    return best
+}"""
+HELPERS["pySortable"] = """fn pySortable(a: [float]) -> bool {
+    for i in 0..a.len() {
+        let x = a[i]
+        if x != x {
+            return false
+        }
+        if x == 0.0 && 1.0 / x < 0.0 {
+            return false
+        }
+    }
+    return true
+}"""
+HELPERS["pyParseInt"] = """fn pyParseInt(s: str) -> int {
+    let n = s.len()
+    assert n > 0 && n < 19
+    let from = if s[0] == 45 { 1 } else { 0 }
+    assert n > from
+    for i in from..n {
+        assert s[i] >= 48 && s[i] <= 57
+    }
+    return parseInt(s)
+}"""
+HELPERS["pyIsAlnum"] = """fn pyIsAlnum(s: str) -> bool {
+    if s.len() == 0 {
+        return false
+    }
+    for i in 0..s.len() {
+        let c = s[i]
+        if !((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+            return false
+        }
+    }
+    return true
+}"""
+HELPERS["pySin"] = """fn pySin(x: float) -> float {
+    assert !isInf(x)
+    return sin(x)
+}"""
+HELPERS["pyCos"] = """fn pyCos(x: float) -> float {
+    assert !isInf(x)
+    return cos(x)
+}"""
+HELPERS["pySumF"] = """fn pySumF(a: [float]) -> float {
+    assert a.len() > 0
+    return a.sum()
+}"""
+HELPERS["pyFpCheck"] = """extern "C" {
+    fn turi_fp_check()
+}
+
+trusted fn pyFpCheck() {
+    turi_fp_check()
+}"""
 HELPERS["pyPowMod"] = """fn pyPowMod(base: int, exp: int, m: int) -> int {
+    assert exp >= 0
     var result = 1 % m
     var b = pyMod(base, m)
     var e = exp
@@ -340,21 +616,238 @@ HELPERS["pyPowMod"] = """fn pyPowMod(base: int, exp: int, m: int) -> int {
     }
     return result
 }"""
-HELPER_DEPS = {"pyHi": ["pyIdx"], "pyRange": ["pyRangeLen"], "pyPowMod": ["pyMod"],
+# Salida y formato (motor híbrido). Las funciones `tzx_*` están en el shim de C que acompaña a cada
+# biblioteca (`turipy.SHIM`): escriben en el búfer de salida o dan el texto de un número tal como lo
+# escribiría Python.
+HELPERS["tzxOut"] = """extern "C" {
+    fn tzx_frepr(x: float) -> int
+    fn tzx_fbuf() -> int
+    fn tzx_fmt(kind: int, iv: int, fv: float, fill: int, align: int, sign: int, alt: int, width: int, group: int, prec: int, ty: int) -> int
+    fn tzx_out_int(v: int, err: bool)
+    fn tzx_out_float(v: float, err: bool)
+}"""
+HELPERS["pyReprF"] = """trusted fn pyReprF(x: float) -> str {
+    let n = tzx_frepr(x)
+    return strFromPtr(ptrFromAddr<u8>(u64(tzx_fbuf())), n)
+}"""
+HELPERS["pyFmtI"] = """trusted fn pyFmtI(v: int, fill: int, align: int, sign: int, alt: int, width: int, group: int, prec: int, ty: int) -> str {
+    let n = tzx_fmt(0, v, 0.0, fill, align, sign, alt, width, group, prec, ty)
+    return strFromPtr(ptrFromAddr<u8>(u64(tzx_fbuf())), n)
+}"""
+HELPERS["pyFmtF"] = """trusted fn pyFmtF(v: float, fill: int, align: int, sign: int, alt: int, width: int, group: int, prec: int, ty: int) -> str {
+    let n = tzx_fmt(1, 0, v, fill, align, sign, alt, width, group, prec, ty)
+    return strFromPtr(ptrFromAddr<u8>(u64(tzx_fbuf())), n)
+}"""
+HELPERS["pyOutI"] = """trusted fn pyOutI(v: int, err: bool) {
+    tzx_out_int(v, err)
+}"""
+HELPERS["pyOutF"] = """trusted fn pyOutF(v: float, err: bool) {
+    tzx_out_float(v, err)
+}"""
+HELPERS["pyReprS"] = r"""fn pyReprS(s: str) -> str {
+    let q = if strContains(s, "'") && !strContains(s, "\"") { 34 } else { 39 }
+    var sb = sbWithCap(s.len() + 2)
+    sbPushByte(mut sb, q)
+    for i in 0..s.len() {
+        let c = s[i]
+        if c == 92 {
+            sbPush(mut sb, "\\\\")
+        } else if c == 10 {
+            sbPush(mut sb, "\\n")
+        } else if c == 13 {
+            sbPush(mut sb, "\\r")
+        } else if c == 9 {
+            sbPush(mut sb, "\\t")
+        } else if c == q {
+            sbPushByte(mut sb, 92)
+            sbPushByte(mut sb, c)
+        } else {
+            sbPushByte(mut sb, c)
+        }
+    }
+    sbPushByte(mut sb, q)
+    return sbTake(mut sb)
+}"""
+HELPERS["pyPad"] = """fn pyPad(s: str, width: int, align: int, fill: str) -> str {
+    let n = s.len()
+    if n >= width {
+        return s
+    }
+    let pad = width - n
+    if align == 62 {
+        return fill.repeat(pad) + s
+    }
+    if align == 94 {
+        return fill.repeat(pad / 2) + s + fill.repeat(pad - pad / 2)
+    }
+    return s + fill.repeat(pad)
+}"""
+HELPERS["tzxRnd"] = """extern "C" {
+    fn tzx_rnd_random(h: int) -> float
+    fn tzx_rnd_below(h: int, n: int) -> int
+    fn tzx_rnd_bits(h: int, k: int) -> int
+    fn tzx_rnd_uniform(h: int, a: float, b: float) -> float
+    fn tzx_rnd_seed(h: int, a: int)
+}"""
+HELPERS["pyRnd"] = """trusted fn pyRnd(h: int) -> float {
+    return tzx_rnd_random(h)
+}"""
+HELPERS["pyRndBelow"] = """trusted fn pyRndBelow(h: int, n: int) -> int {
+    assert n > 0
+    return tzx_rnd_below(h, n)
+}"""
+HELPERS["pyRndBits"] = """trusted fn pyRndBits(h: int, k: int) -> int {
+    assert k >= 0 && k < 64
+    if k == 0 {
+        return 0
+    }
+    return tzx_rnd_bits(h, k)
+}"""
+HELPERS["pyRndUniform"] = """trusted fn pyRndUniform(h: int, a: float, b: float) -> float {
+    return tzx_rnd_uniform(h, a, b)
+}"""
+HELPERS["pyRndSeed"] = """trusted fn pyRndSeed(h: int, a: int) {
+    tzx_rnd_seed(h, a)
+}"""
+HELPERS["pyRandrange"] = """fn pyRandrange(h: int, start: int, stop: int, step: int) -> int {
+    let width = stop - start
+    if step == 1 {
+        assert width > 0
+        return start + pyRndBelow(h, width)
+    }
+    assert step != 0
+    let n = if step > 0 { pyFloorDiv(width + step - 1, step) } else { pyFloorDiv(width + step + 1, step) }
+    assert n > 0
+    return start + step * pyRndBelow(h, n)
+}"""
+HELPERS["pyChoice"] = """fn pyChoice<T>(h: int, s: [T]) -> T {
+    return s[pyRndBelow(h, s.len())]
+}"""
+HELPERS["pyChoiceS"] = """fn pyChoiceS(h: int, s: str) -> str {
+    let k = pyRndBelow(h, s.len())
+    return s[k..k + 1]
+}"""
+HELPERS["pyShuffle"] = """fn pyShuffle<T>(h: int, x: mut [T]) {
+    var i = x.len() - 1
+    while i >= 1 {
+        let j = pyRndBelow(h, i + 1)
+        let t = x[i]
+        x[i] = x[j]
+        x[j] = t
+        i -= 1
+    }
+}"""
+HELPER_DEPS = {"pyReprF": ["tzxOut"], "pyRnd": ["tzxRnd"], "pyRndBelow": ["tzxRnd"], "pyRndBits": ["tzxRnd"],
+               "pyRndUniform": ["tzxRnd"], "pyRndSeed": ["tzxRnd"], "pyRandrange": ["pyRndBelow", "pyFloorDiv"],
+               "pyShuffle": ["pyRndBelow"], "pyChoice": ["pyRndBelow"], "pyChoiceS": ["pyRndBelow"], "pyFmtI": ["tzxOut"], "pyFmtF": ["tzxOut"], "pyOutI": ["tzxOut"],
+               "pyOutF": ["tzxOut"]}
+HELPER_DEPS.update({"pySortedFloatExact": ["pySortable"], "pyHi": ["pyIdx"], "pyRange": ["pyRangeLen"], "pyPowMod": ["pyMod"],
                "pySliceStr": ["pyHi"], "pySlice": ["pyHi"], "pyGet": ["pyAt"], "pyCharAt": ["pyAt"],
-               "pyBin": ["pyBinDigits"], "pyHex": ["pyHexDigits"]}
+               "pyBin": ["pyBinDigits"], "pyHex": ["pyHexDigits"]})
 OPEN_END = "4611686018427387904"
+SPEC = None  # expresión regular de la mini-lengua de formato (se compila al primer uso)
+
+
+def parse_spec(spec):
+    """Campos de una especificación de formato de Python, o None si no se entiende."""
+    global SPEC
+    if SPEC is None:
+        import re
+        SPEC = re.compile(r"(?:(?P<fill>.)?(?P<align>[<>=^]))?(?P<sign>[-+ ])?(?P<z>z)?(?P<alt>#)?(?P<zero>0)?"
+                          r"(?P<width>\d+)?(?P<group>[,_])?(?:\.(?P<prec>\d+))?(?P<type>[bcdeEfFgGnosxX%])?", re.S)
+    m = SPEC.fullmatch(spec)
+    return m.groupdict() if m else None
+
+
+def type_sig(t):
+    if t in (INT, FLOAT, BOOL, STR):
+        return {INT: "I", FLOAT: "F", BOOL: "B", STR: "S"}[t]
+    if isinstance(t, tuple) and t[0] == "list" and t[1] is not None:
+        return "L" + type_sig(t[1])
+    if isinstance(t, tuple) and t[0] == "tuple":
+        return "T" + str(len(t[1])) + "".join(type_sig(x) for x in t[1])
+    raise Unsupported("convertir a texto un valor de este tipo")
 
 
 class Module:
-    def __init__(self, source):
-        self.tree = ast.parse(source)
+    def __init__(self, source=None, tree=None, signatures=None, exact=False, allow_defaults=False,
+                 strict_float=True, classes=None, field_types=None):
+        self.tree = tree if tree is not None else ast.parse(source)
+        # strict_float: cada operación de coma flotante se redondea como en CPython, bit a bit. Sin él
+        # valen las reglas de Turi (puede fundir a*b+c y reordenar sumas, que es de donde sale la
+        # velocidad); una división por cero se detecta entonces por la marca del procesador al salir.
+        self.strict_float = strict_float
+        self.fp_checks = False
+        self.allow_defaults = allow_defaults
+        self.mut_levels = {}
+        self.resized = {}
+        # exact: el resultado tiene que ser idéntico al de CPython. Lo que no se pueda garantizar se
+        # rechaza o se protege con una comprobación que detiene la función (y entonces la ejecuta Python).
+        self.exact = exact
+        self.signatures = signatures or {}
+        self.parent_of = {}
+        self.ret_alias = {}
         self.helpers = []
         self.functions = {}
         self.constants = {}
         self.mut_params = {}
         self.extra = []
         self.counter = 0
+        self.uses_output = False  # alguna función escribe en sys.stdout o sys.stderr
+        # Clases de la unidad: nombre -> {"fields": [...], "methods": {método: función}}. Cada una tiene
+        # un almacén `tzP_<Clase>` que reciben todas las funciones.
+        self.classes = classes or {}
+        self.pools = sorted(self.classes)
+        self.field_types = {c: dict((field_types or {}).get(c, {})) for c in self.classes}
+        self.field_conflicts = set()
+        self.defs_by_name = {}
+        self.uses_global_random = False  # usa las funciones del módulo random (su objeto oculto)
+        self.flat = []
+        self.facts = None  # (funciones que pueden guardar objetos en algo viejo, funciones que crean)
+
+    def merge_field(self, cls, attr, t):
+        if t is None or cls not in self.field_types:
+            return
+        old = self.field_types[cls].get(attr)
+        if old is None:
+            self.field_types[cls][attr] = ("obj", None) if t == "none" else t
+            return
+        merged, same = refine(old, ("obj", None) if t == "none" else t)
+        if old == INT and t == FLOAT:
+            merged, same = FLOAT, False  # un entero que luego es flotante: no se reproduce sin marca
+        self.field_types[cls][attr] = merged
+        if not same:
+            self.field_conflicts.add((cls, attr))
+
+    def class_code(self):
+        """`struct` de cada clase y su constructor."""
+        out = []
+        pools = ", ".join(f"tzP_{c}: mut [Tz{c}]" for c in self.pools)
+        passing = ", ".join(f"mut tzP_{c}" for c in self.pools)
+        for cls in self.pools:
+            info = self.classes[cls]
+            types = self.field_types[cls]
+            for attr in info["fields"]:
+                if (cls, attr) in self.field_conflicts:
+                    raise Unsupported(f"el atributo {attr} de {cls} guarda valores de tipos distintos")
+                if not complete(types.get(attr)):
+                    raise Unsupported(f"no se pudo deducir el tipo del atributo {attr} de {cls}")
+            fields = ", ".join(f"v_{a}: {turi_type(types[a])}" for a in info["fields"])
+            out.append(f"struct Tz{cls} {{\n    {fields}\n}}" if info["fields"] else f"struct Tz{cls} {{\n    tzpad: int\n}}")
+            init = info["methods"].get("__init__")
+            zeros = ", ".join(f"v_{a}: {zero_of(types[a])}" for a in info["fields"]) or "tzpad: 0"
+            if init and init in self.functions:
+                params = self.functions[init][0][1:]
+                sig = "".join(f", {n}: {turi_type(t)}" for n, t in params if t != "none")
+                args = "".join(f", {n}" for n, t in params if t != "none")
+                body = f"    {init}({passing}, tzi{args})\n"
+            elif init:
+                continue  # nadie lo construye en nativo
+            else:
+                sig, body = "", ""
+            out.append(f"fn f_{cls}__new({pools}{sig}) -> int {{\n    let tzi = tzP_{cls}.len()\n"
+                       f"    tzP_{cls}.push(Tz{cls} {{ {zeros} }})\n{body}    return tzi\n}}")
+        return out
 
     def need(self, name):
         for dep in HELPER_DEPS.get(name, []):
@@ -380,15 +873,63 @@ class Module:
                 continue  # docstring
             else:
                 raise Unsupported("solo se admiten funciones y constantes en el nivel superior")
+        return self.translate_defs(defs)
+
+    def translate_defs(self, defs, constants=None):
+        if constants is not None:
+            self.constants = constants
+        for d in defs:
+            flatten_try(d)
         # Las funciones definidas dentro de otra pasan al nivel superior si no capturan nada.
+        self.unit_names = set()
         flat = []
         for d in defs:
-            flat.extend(self.lift(d))
+            try:
+                flat.extend(self.lift(d))
+            except Unsupported as error:
+                error.function = d.name
+                raise
+        self.unit_names = {d.name for d in flat}
+        self.defs_by_name = {d.name: d for d in flat}
         for d in flat:
-            params = [(a.arg, annotation_type(a.annotation)) for a in d.args.args]
+            try:
+                self.check_signature(d)
+                given = self.signatures.get(d.name)
+                if given:
+                    params = list(zip([a.arg for a in d.args.args], given[0]))
+                    ret = given[1]
+                elif self.exact:
+                    params, ret = [(a.arg, None) for a in d.args.args], None
+                else:
+                    params = [(a.arg, annotation_type(a.annotation)) for a in d.args.args]
+                    ret = annotation_type(d.returns)
+            except Unsupported as error:
+                error.function = d.name
+                raise
+            if any(t is None for _, t in params) and self.exact:
+                continue  # sus tipos se deducen de quien la llama
+            if self.exact and any(not complete(t) for _, t in params):
+                # Una lista que llega vacía: el tipo de sus elementos sale de cómo se usa.
+                self.functions[d.name] = (params, ret)
+                f = Function(self, d)
+                f.nullable = set()
+                f.infer_locals()
+                params = [(name, f.env.get(name) if complete(f.env.get(name)) and refine(t, f.env.get(name))[1]
+                           else t) for name, t in params]
+                for name, t in params:
+                    if not complete(t):
+                        error = Unsupported(f"no se pudo deducir el tipo de los elementos de {name}")
+                        error.function = d.name
+                        raise error
             if any(t is None for _, t in params):
-                raise Unsupported(f"la función {d.name} necesita anotar el tipo de sus parámetros")
-            self.functions[d.name] = (params, annotation_type(d.returns))
+                error = Unsupported(f"la función {d.name} necesita anotar el tipo de sus parámetros")
+                error.function = d.name
+                raise error
+            self.functions[d.name] = (params, ret)
+        self.objects_from_attributes(flat)
+        self.infer_signatures(flat)
+        self.objects_from_attributes(flat)
+        flat = [d for d in flat if d.name in self.functions]
         called = set()
         for d in flat:
             for n in ast.walk(d):
@@ -398,19 +939,326 @@ class Module:
         changed = True
         for d in flat:
             self.mut_params[d.name] = set()
+            self.mut_levels[d.name] = {}
         while changed:
             changed = False
             for d in flat:
-                if d.name not in called:
+                if d.name not in called and not self.exact:
                     continue
-                names = {a.arg for a in d.args.args}
-                for target in mutated_in_place(d, self.mut_params):
-                    if target in names and target not in self.mut_params[d.name]:
+                types = dict(self.functions[d.name][0])
+                events = mutation_events(d.body, self.mut_levels, self.functions)
+                if self.exact:
+                    # `xs += [...]` amplía la misma lista: quien llama lo ve.
+                    for n in ast.walk(d):
+                        if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and \
+                                is_mutable(types.get(n.target.id)):
+                            events.add((n.target.id, 0))
+                for target, level in events:
+                    if target in types and level not in self.mut_levels[d.name].setdefault(target, set()):
+                        self.mut_levels[d.name][target].add(level)
                         self.mut_params[d.name].add(target)
                         changed = True
-        out = [Function(self, d).emit() for d in flat]
+        if self.exact:
+            # Parámetros de lista cuyo tamaño puede cambiar dentro de la función (o de las que llama).
+            for d in flat:
+                self.resized[d.name] = set()
+            changed = True
+            while changed:
+                changed = False
+                for d in flat:
+                    params = {name for name, _ in self.functions[d.name][0]}
+                    found = resize_names(d.body, self.resized, self.functions) & params
+                    if found - self.resized[d.name]:
+                        self.resized[d.name] |= found
+                        changed = True
+            # `return lista_recibida`: quien llama recibe el mismo objeto que pasó.
+            for d in flat:
+                types = dict(self.functions[d.name][0])
+                returned = [n.value for n in ast.walk(d) if isinstance(n, ast.Return) and n.value is not None]
+                names = {v.id for v in returned if isinstance(v, ast.Name) and is_mutable(types.get(v.id))}
+                if len(names) == 1 and all(isinstance(v, ast.Name) and v.id in names for v in returned):
+                    self.ret_alias[d.name] = next(iter(names))
+        if self.exact and not self.strict_float:
+            # Con numerador constante la división va sin comprobación: si el divisor es cero lo apunta
+            # el procesador, y un `while` lo mira en cada vuelta para no seguir girando con un infinito.
+            self.fp_checks = any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div) and constant_number(n.left)
+                                 and not constant_number(n.right) for d in flat for n in ast.walk(d))
+        out = []
+        self.flat = flat
+        for d in flat:
+            try:
+                out.append(Function(self, d).emit())
+            except Unsupported as error:
+                error.function = getattr(error, "function", None) or d.name
+                raise
         helpers = [HELPERS[h] for h in self.helpers]
-        return "\n\n".join(out + self.extra + helpers) + "\n"
+        return "\n\n".join(self.class_code() + out + self.extra + helpers) + "\n"
+
+    def check_signature(self, d):
+        a = d.args
+        if a.vararg or a.kwarg or a.kwonlyargs or a.kw_defaults or a.posonlyargs:
+            raise Unsupported("parámetros variables o solo por nombre")
+        if a.defaults and not self.allow_defaults:
+            raise Unsupported("parámetros con valor por defecto")
+        if d.decorator_list:
+            raise Unsupported("función decorada")
+        if isinstance(d, ast.AsyncFunctionDef):
+            raise Unsupported("función asíncrona")
+
+    def infer_signatures(self, flat):
+        """Tipos de los parámetros de las funciones sin firma, deducidos de las llamadas que les hacen
+        las que ya la tienen, y tipo del resultado de todas."""
+        by_name = {d.name: d for d in flat}
+        for _ in range(12):
+            before = repr(self.functions)
+            self.infer_returns([d for d in flat if d.name in self.functions], rounds=1, must=False)
+            for d in flat:
+                if d.name not in self.functions:
+                    continue
+                f = Function(self, d)
+                f.nullable = set()
+                f.infer_locals()
+                for n in ast.walk(d):
+                    target, prefix = self.class_callee(f, n)
+                    if target and target in self.functions:
+                        types = prefix + [f.ty(a) for a in n.args]
+                        params = self.functions[target][0]
+                        for i, at in enumerate(types[:len(params)]):
+                            if params[i][1] == "none" and is_obj(at):
+                                params = params[:i] + [(params[i][0], at)] + params[i + 1:]
+                                self.functions[target] = (params, self.functions[target][1])
+                        continue
+                    if target and target in by_name and target not in self.functions:
+                        callee = by_name[target]
+                        types = prefix + ["none" if isinstance(a, ast.Constant) and a.value is None else f.ty(a)
+                                          for a in n.args]
+                        bound = self.bind_types(callee, types, n.keywords, f)
+                        if bound and all(complete(t) for t in bound):
+                            self.functions[callee.name] = (list(zip([a.arg for a in callee.args.args], bound)), None)
+                        continue
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in self.functions:
+                        # Un parámetro que llegó como None y aquí recibe un objeto es un objeto (None es -1).
+                        params = self.functions[n.func.id][0]
+                        for i, a in enumerate(n.args[:len(params)]):
+                            at = f.ty(a)
+                            if params[i][1] == "none" and is_obj(at):
+                                params = params[:i] + [(params[i][0], at)] + params[i + 1:]
+                                self.functions[n.func.id] = (params, self.functions[n.func.id][1])
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in by_name and \
+                            n.func.id not in self.functions and not n.keywords:
+                        callee = by_name[n.func.id]
+                        types = ["none" if (isinstance(a, ast.Constant) and a.value is None) or
+                                 (isinstance(a, ast.Name) and a.id in f.none_params and f.ty(a) is None)
+                                 else f.ty(a) for a in n.args]
+                        if len(types) == len(callee.args.args) and all(complete(t) for t in types):
+                            self.functions[callee.name] = (list(zip([a.arg for a in callee.args.args], types)), None)
+            if repr(self.functions) == before:
+                self.infer_returns([d for d in flat if d.name in self.functions], rounds=1, must=False,
+                                   optimistic=True)
+                if repr(self.functions) == before:
+                    break
+        self.infer_returns([d for d in flat if d.name in self.functions])
+
+    def objects_from_attributes(self, flat):
+        """Un parámetro que llegó como None pero cuyo código usa `p.campo` o `p.método()` es un objeto:
+        el de la única clase de la unidad que tiene esos nombres (None es su posición -1)."""
+        for d in flat:
+            if d.name not in self.functions:
+                continue
+            params, ret = self.functions[d.name]
+            changed = False
+            for i, (pname, pt) in enumerate(params):
+                if pt != "none":
+                    continue
+                used = {n.attr for n in ast.walk(d) if isinstance(n, ast.Attribute) and
+                        isinstance(n.value, ast.Name) and n.value.id == pname}
+                if not used:
+                    continue
+                owners = [c for c, info in self.classes.items()
+                          if used <= set(info["fields"]) | set(info["methods"])]
+                if len(owners) == 1:
+                    params = params[:i] + [(pname, ("obj", owners[0]))] + params[i + 1:]
+                    changed = True
+            if changed:
+                self.functions[d.name] = (params, ret)
+
+    def heap_effects(self, f, nodes, me=None):
+        """(nada de `nodes` guarda un objeto en algo que ya existía, funciones de la unidad que llama,
+        crea objetos directamente). Guardar en un campo de `me` (el `self` de un __init__) no cuenta:
+        ese objeto es nuevo."""
+        ok, callees, new = True, set(), False
+        fields = {}
+        for cls in self.classes:
+            for attr, t in self.field_types[cls].items():
+                fields[attr] = fields.get(attr, False) or holds_obj(t)
+        for top in nodes:
+            for n in ast.walk(top):
+                if isinstance(n, (ast.Global, ast.Nonlocal)):
+                    ok = False
+                elif isinstance(n, ast.Attribute) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                    if fields.get(n.attr, True) and not (me and isinstance(n.value, ast.Name) and n.value.id == me):
+                        ok = False
+                elif isinstance(n, ast.Subscript) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                    if holds_obj(f.ty(n.value)):
+                        ok = False
+                elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                    name = n.func.id
+                    if name in self.functions:
+                        callees.add(name)
+                    elif name.startswith("C_") and name[2:] in self.classes:
+                        new = True
+                        init = self.classes[name[2:]]["methods"].get("__init__")
+                        if init:
+                            callees.add(init)
+                    elif name == "setattr":
+                        ok = False
+                elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+                    callee, _ = self.class_callee(f, n)
+                    if callee:
+                        callees.add(callee)
+                    elif n.func.attr in STORERS:
+                        receiver = n.func.value
+                        if isinstance(receiver, ast.Name) and receiver.id not in f.env:  # heapq, bisect...
+                            if any(holds_obj(f.ty(a)) for a in n.args):
+                                ok = False
+                        elif holds_obj(f.ty(receiver)):
+                            ok = False
+        return ok, callees, new
+
+    def heap_facts(self):
+        """Qué funciones pueden dejar un objeto guardado en algo que ya existía (un campo, una lista, un
+        global) y cuáles crean objetos, directamente o a través de otras. Lo que crea una función que no
+        guarda nada solo sale de ella por lo que devuelve."""
+        if self.facts is not None:
+            return self.facts
+        inits = {info["methods"]["__init__"] for info in self.classes.values() if "__init__" in info["methods"]}
+        calls, bad, makes = {}, set(), set()
+        for d in self.flat:
+            try:
+                f = Function(self, d)
+                f.nullable = set()
+                f.infer_locals()
+                me = d.args.args[0].arg if d.name in inits and d.args.args else None
+                ok, callees, new = self.heap_effects(f, d.body, me)
+            except Unsupported:
+                ok, callees, new = False, set(), True
+            calls[d.name] = callees
+            if not ok:
+                bad.add(d.name)
+            if new:
+                makes.add(d.name)
+        changed = True
+        while changed:
+            changed = False
+            for name, callees in calls.items():
+                if name not in bad and (callees & bad or callees - set(calls)):
+                    bad.add(name)
+                    changed = True
+                if name not in makes and callees & makes:
+                    makes.add(name)
+                    changed = True
+        self.facts = (bad, makes)
+        return self.facts
+
+    def class_callee(self, f, n):
+        """(función, tipos de los primeros argumentos) de un constructor `C(...)` o de un método
+        `obj.m(...)` de una clase de la unidad; (None, None) si no es eso."""
+        if not isinstance(n, ast.Call):
+            return None, None
+        if isinstance(n.func, ast.Name) and n.func.id.startswith("C_") and n.func.id[2:] in self.classes:
+            cls = n.func.id[2:]
+            init = self.classes[cls]["methods"].get("__init__")
+            return (init, [("obj", cls)]) if init else (None, None)
+        if isinstance(n.func, ast.Attribute):
+            t = f.ty(n.func.value)
+            if is_obj(t) and t[1] in self.classes and n.func.attr in self.classes[t[1]]["methods"]:
+                return self.classes[t[1]]["methods"][n.func.attr], [t]
+        return None, None
+
+    def bind_types(self, callee, types, keywords, f):
+        """Tipos de los parámetros de `callee` para una llamada con estos argumentos posicionales y con
+        nombre (y los valores por defecto, que han de ser constantes)."""
+        names = [a.arg for a in callee.args.args]
+        out = list(types) + [None] * (len(names) - len(types))
+        if len(types) > len(names):
+            return None
+        for kw in keywords:
+            key = "v_" + kw.arg if kw.arg else None
+            if key not in names:
+                return None
+            out[names.index(key)] = "none" if isinstance(kw.value, ast.Constant) and kw.value.value is None \
+                else f.ty(kw.value)
+        defaults = callee.args.defaults
+        for i, default in enumerate(defaults):
+            at = len(names) - len(defaults) + i
+            if out[at] is None:
+                if isinstance(default, ast.Constant) and default.value is None:
+                    out[at] = "none"
+                elif isinstance(default, (ast.Constant, ast.UnaryOp)):
+                    out[at] = f.ty(default)
+        return out
+
+    def infer_returns(self, flat, rounds=5, must=True, optimistic=False):
+        """El tipo del resultado se deduce de los `return`. En modo exacto la anotación no cuenta:
+        Python no la comprueba y `def f(x: int) -> float: return x * 2` devuelve un entero."""
+        pending = [d for d in flat if self.functions[d.name][1] is None]
+        for _ in range(rounds):
+            for d in pending:
+                params, ret = self.functions[d.name]
+                if ret is not None:
+                    continue
+                f = Function(self, d)
+                f.nullable = set()
+                f.infer_locals()
+                values = [n.value for n in ast.walk(d) if isinstance(n, ast.Return)]
+                nullable = f.assigned_none()
+                types = []
+                for v in values:
+                    if v is None or (isinstance(v, ast.Constant) and v.value is None):
+                        types.append("none")
+                    elif isinstance(v, ast.Name) and v.id in nullable and self.exact:
+                        t = f.ty(v)
+                        types.append(("opt", t) if t is not None and not is_opt(t) and not is_obj(t) else t)
+                    else:
+                        types.append(f.ty(v))
+                if self.exact and any(t not in (None, "none") for t in types) and f.can_fall_off():
+                    types.append("none")  # llegar al final devuelve None
+                if optimistic and any(t is not None for t in types):
+                    types = [t for t in types if t is not None]
+                if not types:
+                    ret = "none"
+                elif all(t is not None for t in types):
+                    merged, same, maybe = None, True, False
+                    for t in types:
+                        if t == "none":
+                            maybe = True
+                            continue
+                        if is_opt(t):
+                            maybe, t = True, t[1]
+                        if merged is None:
+                            merged = t
+                        else:
+                            merged, ok = refine(merged, t)
+                            same = same and ok
+                    if merged is None:
+                        ret = "none"
+                    elif maybe and same and is_obj(merged):
+                        ret = merged
+                    elif maybe and same and complete(merged) and self.exact:
+                        ret = ("opt", merged)
+                    elif same and not maybe and complete(merged):
+                        ret = merged
+                    elif not self.exact and set(map(repr, types)) <= {repr(INT), repr(FLOAT)}:
+                        ret = FLOAT
+                if ret is not None:
+                    self.functions[d.name] = (params, ret)
+        if not must:
+            return
+        for d in pending:
+            if self.functions[d.name][1] is None:
+                error = Unsupported(f"no se pudo deducir el tipo del resultado de {d.name}")
+                error.function = d.name
+                raise error
 
     def lift(self, d):
         result = []
@@ -428,6 +1276,7 @@ class Module:
                 for n in ast.walk(s):
                     if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in outer and n.id not in own:
                         raise Unsupported(f"la función interna {s.name} usa variables de {d.name}")
+                self.parent_of[s.name] = self.parent_of.get(d.name, d.name)
                 result.extend(self.lift(s))
             else:
                 body.append(s)
@@ -439,21 +1288,101 @@ class Module:
 MUTATORS = {"append", "extend", "sort", "pop", "insert", "remove", "reverse", "clear", "add", "discard", "update"}
 
 
-def mutated_in_place(d, mut_params):
-    found = set()
-    for n in ast.walk(d):
-        if isinstance(n, (ast.Assign, ast.AugAssign)):
-            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
-            for t in targets:
-                for el in (t.elts if isinstance(t, ast.Tuple) else [t]):
-                    if isinstance(el, ast.Subscript) and isinstance(el.value, ast.Name):
-                        found.add(el.value.id)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and \
-                isinstance(n.func.value, ast.Name):
-            found.add(n.func.value.id)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in mut_params:
-            pass
-    return found
+def flatten_try(fn):
+    """`try` en nativo: el cuerpo, luego `else` y `finally`. Si Python fuera a lanzar un error dentro, la
+    versión nativa se detiene en ese punto y Python repite la llamada entera, que sí pasa por el
+    manejador: el resultado es el de Python sin traducir los manejadores. Con `finally` y una salida
+    (return, break, continue) dentro del cuerpo el orden no sería el mismo: se deja el `try`."""
+    def leaves(body):
+        for stmt in body:
+            for n in ast.walk(stmt):
+                if isinstance(n, (ast.Return, ast.Break, ast.Continue)):
+                    return True
+        return False
+
+    def visit(body):
+        out = []
+        for stmt in body:
+            kinds = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
+            if isinstance(stmt, kinds) and not (stmt.finalbody and leaves(stmt.body + stmt.orelse)):
+                out.extend(visit(stmt.body) + visit(stmt.orelse) + visit(stmt.finalbody))
+                continue
+            for field in ("body", "orelse", "finalbody"):
+                inner = getattr(stmt, field, None)
+                if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt) and \
+                        not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    setattr(stmt, field, visit(inner))
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                stmt.body = visit(stmt.body)
+            out.append(stmt)
+        return out or [ast.Pass()]
+
+    fn.body = visit(fn.body)
+
+
+RESIZERS = {"append", "extend", "pop", "insert", "remove", "clear", "add", "discard", "update"}
+
+
+def resize_names(body, resized=None, functions=None):
+    """Nombres cuya lista puede cambiar de tamaño (o de objeto) dentro de `body`."""
+    names = set()
+    for stmt in body:
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in RESIZERS:
+                name, depth = subscript_base(n.func.value)
+                if name and depth == 0:
+                    names.add(name)
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                names.add(n.target.id)
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                names.add(n.id)
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and resized and functions and                     n.func.id in resized:
+                params = [name for name, _ in functions.get(n.func.id, ([], None))[0]]
+                for arg, pname in zip(n.args, params):
+                    if isinstance(arg, ast.Name) and pname in resized[n.func.id]:
+                        names.add(arg.id)
+    return names
+
+
+def constant_number(node):
+    """Número literal distinto de cero (con o sin signo)."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    return isinstance(node, ast.Constant) and type(node.value) in (int, float) and node.value != 0
+
+
+def mutation_events(body, mut_levels=None, functions=None):
+    """(nombre, nivel) de cada modificación en sitio. Nivel 0 cambia la propia lista (`p[i] = v`,
+    `p.append(v)`); nivel 1 cambia una de sus filas (`p[i][j] = v`, `p[i].append(v)`)."""
+    events = set()
+    for stmt in body:
+        for n in ast.walk(stmt):
+            if isinstance(n, (ast.Assign, ast.AugAssign)):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in targets:
+                    for el in (t.elts if isinstance(t, ast.Tuple) else [t]):
+                        if isinstance(el, ast.Subscript):
+                            name, depth = subscript_base(el)
+                            if name:
+                                events.add((name, depth - 1))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS:
+                name, depth = subscript_base(n.func.value)
+                if name:
+                    events.add((name, depth))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "shuffle" and n.args:
+                name, depth = subscript_base(n.args[0])
+                if name:
+                    events.add((name, depth))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and mut_levels and \
+                    n.func.id in mut_levels and functions:
+                # Pasar la lista a otra función que la modifica también la modifica aquí.
+                names = [name for name, _ in functions.get(n.func.id, ([], None))[0]]
+                for arg, pname in zip(n.args, names):
+                    name, depth = subscript_base(arg)
+                    if name:
+                        for level in mut_levels[n.func.id].get(pname, ()):
+                            events.add((name, depth + level))
+    return events
 
 
 class Function:
@@ -467,6 +1396,25 @@ class Function:
         self.declared = set(name for name, _ in self.params)
         self.hoisted = []
         self.is_helper_mut = module.mut_params.get(node.name, set())
+        self.conflicts = set()
+        self.intfloat = set()
+        self.maybe_unset = set()
+        self.flagged = set()
+        self.falls_off = False
+        self.truth = set()
+        self.arith = set()
+        self.alias_ok = set()
+        self.lambda_names = set()
+        self.unordered = 0
+        self.nonneg_vars = set()
+        self.has_sticky = False
+        self.opt_vars = set()      # guardan el resultado de una función que puede devolver None
+        self.next_cut = None       # recorte de almacenes para el cuerpo del bucle que se va a escribir
+        self.arena_depth = 0       # dentro de un bucle o sentencia que ya recorta
+        # Parámetros que llegan como None: no pasan a Turi; son variables locales que empiezan sin valor.
+        self.none_params = {name for name, t in self.params if t == "none"}
+        for name in self.none_params:
+            self.env.pop(name, None)
 
     # ------------------------------------------------------------------ tipos
     def infer_locals(self):
@@ -476,29 +1424,59 @@ class Function:
             if before == self.env:
                 break
 
+    def assigned_none(self):
+        """Variables a las que se asigna None (más los parámetros que llegan como None)."""
+        out = set(self.none_params)
+        for n in ast.walk(self.node):
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant) and n.value.value is None:
+                out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        return out
+
+    def can_fall_off(self):
+        """Puede terminar sin `return` (en Python devuelve None)."""
+        saved = (self.maybe_unset, self.falls_off)
+        try:
+            self.check_flow()
+            return self.falls_off
+        except Unsupported:
+            return True
+        finally:
+            self.maybe_unset, self.falls_off = saved
+
     def merge(self, name, t):
+        if is_opt(t):
+            self.opt_vars.add(name)
+            t = t[1]
         if t is None:
             return
         old = self.env.get(name)
         if old is None:
             self.env[name] = t
-        elif isinstance(old, tuple) and isinstance(t, tuple) and old[0] == t[0]:
-            if old[0] in ("list", "set") and old[1] is None and t[1] is not None:
-                self.env[name] = t
-            if old[0] == "dict" and (old[1] is None or old[2] is None):
-                self.env[name] = ("dict", old[1] or t[1], old[2] or t[2])
-        elif old == INT and t == FLOAT:
-            self.env[name] = FLOAT
+            return
+        merged, same = refine(old, t)
+        if old == INT and t == FLOAT:
+            merged = FLOAT
+        self.env[name] = merged
+        if not same:
+            self.conflicts.add(name)
 
     def infer_block(self, body):
         for s in body:
             if isinstance(s, ast.Assign):
                 t = self.ty(s.value)
+                if isinstance(s.value, ast.Constant) and s.value.value is None:
+                    t = "none" if any(isinstance(x, ast.Attribute) for x in s.targets) else t
                 for target in s.targets:
                     self.infer_target(target, t)
             elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
-                self.merge(s.target.id, annotation_type(s.annotation))
+                if self.m.exact:
+                    if s.value is not None:  # la anotación no decide: cuenta el valor que se guarda
+                        self.merge(s.target.id, self.ty(s.value))
+                else:
+                    self.merge(s.target.id, annotation_type(s.annotation))
             elif isinstance(s, ast.AugAssign):
+                if isinstance(s.target, ast.Attribute):
+                    self.infer_target(s.target, self.ty(ast.BinOp(s.target, s.op, s.value)))
                 if isinstance(s.target, ast.Name):
                     self.merge(s.target.id, self.ty(ast.BinOp(s.target, s.op, s.value)))
                 elif isinstance(s.target, ast.Subscript) and isinstance(s.target.value, ast.Name):
@@ -512,6 +1490,14 @@ class Function:
                 self.infer_block(s.orelse)
             elif isinstance(s, ast.Expr) and isinstance(s.value, ast.Call):
                 call = s.value
+                if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Attribute) and call.args:
+                    owner = self.ty(call.func.value.value)
+                    if is_obj(owner) and owner[1] in self.m.classes and call.func.attr in ("append", "insert"):
+                        item = self.ty(call.args[-1])
+                        if item is not None:
+                            self.m.merge_field(owner[1], call.func.value.attr, ("list", item))
+                    elif is_obj(owner) and owner[1] in self.m.classes and call.func.attr == "extend":
+                        self.m.merge_field(owner[1], call.func.value.attr, self.ty(call.args[0]))
                 if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and call.args:
                     name = call.func.value.id
                     if call.func.attr in ("append", "add"):
@@ -535,6 +1521,10 @@ class Function:
                 self.infer_target(el, pt)
         elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
             self.infer_store_subscript(target, t)
+        elif isinstance(target, ast.Attribute):
+            base = self.ty(target.value)
+            if is_obj(base) and base[1] in self.m.classes:
+                self.m.merge_field(base[1], target.attr, t)
 
     def infer_store_subscript(self, target, t):
         name = target.value.id
@@ -644,6 +1634,10 @@ class Function:
             return self.call_type(e)
         if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name) and e.value.id == "math":
             return FLOAT
+        if isinstance(e, ast.Attribute):
+            base = self.ty(e.value)
+            if is_obj(base) and base[1] in self.m.classes:
+                return self.m.field_types[base[1]].get(e.attr)
         return None
 
     def comp_elem_type(self, e):
@@ -656,13 +1650,15 @@ class Function:
 
     def call_type(self, e):
         f = e.func
+        if isinstance(f, ast.Name) and f.id.startswith("C_") and f.id[2:] in self.m.classes:
+            return ("obj", f.id[2:])
         if isinstance(f, ast.Name):
             name = f.id
             if name in self.m.functions:
                 return self.m.functions[name][1]
             if name in ("len", "ord", "int", "round") and not (name == "round" and len(e.args) == 2):
                 return INT
-            if name in ("str", "chr", "bin", "hex"):
+            if name in ("str", "chr", "bin", "hex", "format", "repr"):
                 return STR
             if name == "float":
                 return FLOAT
@@ -694,6 +1690,18 @@ class Function:
             return None
         if isinstance(f, ast.Attribute):
             attr = f.attr
+            owner = self.ty(f.value)
+            if is_obj(owner) and owner[1] in self.m.classes:
+                target = self.m.classes[owner[1]]["methods"].get(attr)
+                return self.m.functions.get(target, (None, None))[1] if target else None
+            if self.is_random(f.value):
+                if attr in ("random", "uniform"):
+                    return FLOAT
+                if attr in ("randint", "randrange", "getrandbits"):
+                    return INT
+                if attr == "choice" and e.args:
+                    return self.elem(self.ty(e.args[0]))
+                return None
             if isinstance(f.value, ast.Name) and f.value.id == "math":
                 return INT if attr in ("floor", "ceil", "gcd", "isqrt", "factorial") else FLOAT
             base = self.ty(f.value)
@@ -722,50 +1730,394 @@ class Function:
     def emit(self):
         # `x = None` seguido de `x is None`: la variable guarda su valor y una marca aparte dice si
         # todavía no tiene ninguno.
-        self.nullable = set()
-        for n in ast.walk(self.node):
-            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant) and n.value.value is None:
-                self.nullable |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        self.nullable = self.assigned_none()
         self.lazy = 0
         self.infer_locals()
+        self.nullable |= self.opt_vars
+        self.nullable = {n for n in self.nullable if not is_obj(self.env.get(n))}
+        for name in self.none_params:
+            if self.env.get(name) is None:
+                self.env[name] = INT  # solo se compara con None: el tipo no importa
+        if self.m.exact:
+            self.check_exact()
+            self.check_flow()
+        self.flagged = self.nullable | self.maybe_unset
+        if self.m.exact:
+            self.find_nonneg()
+            # Errores de Python que no deben costar un salto dentro de un bucle (dividir entre cero, raíz
+            # de un negativo): se apuntan en una marca local y se miran al devolver.
+            self.has_sticky = not self.m.strict_float and any(
+                (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div) and not constant_number(n.left)
+                 and not constant_number(n.right)) or
+                (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "math"
+                 and n.attr in ("sqrt", "sin", "cos")) for n in ast.walk(self.node))
         self.plan_declarations()
-        params = []
+        params = [f"tzP_{c}: mut [Tz{c}]" for c in self.m.pools]
         for name, t in self.params:
+            if name in self.none_params:
+                continue
             mut = "mut " if name in self.is_helper_mut else ""
             params.append(f"{name}: {mut}{turi_type(t)}")
         ret = "" if self.ret in (None, "none") else " -> " + turi_type(self.ret)
         self.indent = 1
+        for name in sorted(self.none_params):
+            t = self.env.get(name)
+            self.out(f"var {name}: {turi_type(t)} = {zero_of(t)}")
+            if not is_obj(t):
+                self.out(f"var {name}IsNone = true")
+            self.declared.add(name)
         for name in self.hoist:
             t = self.env.get(name)
             self.out(f"var {name}: {turi_type(t)} = {zero_of(t)}")
-            if name in self.nullable:
+            if name in self.flagged:
                 self.out(f"var {name}IsNone = true")
             self.declared.add(name)
+        for name in sorted(self.intfloat):
+            self.out(f"var {name}IsInt = false")
+        if self.has_sticky:
+            self.out("var tzZ = false")
         self.block(self.node.body)
+        if self.has_sticky and self.ret in (None, "none") and not isinstance(self.node.body[-1], ast.Return):
+            self.out("assert !tzZ")
+        if self.m.exact and is_obj(self.ret) and (self.falls_off or not isinstance(self.node.body[-1], ast.Return)):
+            self.out("return -1")
+        elif self.m.exact and is_opt(self.ret) and (self.falls_off or not isinstance(self.node.body[-1], ast.Return)):
+            if self.has_sticky:
+                self.out("assert !tzZ")
+            self.out("return None")
+        elif self.m.exact and self.ret not in (None, "none") and                 (self.falls_off or not isinstance(self.node.body[-1], ast.Return)):
+            # Python devolvería None al llegar aquí: se detiene y lo resuelve Python. (Si no se puede
+            # llegar, por ejemplo tras un `while True`, el compilador lo pide igualmente.)
+            self.out(f"assert {self.m.need('pyNever')}()")
+            self.out(f"return {zero_of(self.ret)}")
         head = f"fn {self.node.name}({', '.join(params)}){ret} {{"
         return "\n".join([head] + self.lines + ["}"])
 
     def out(self, text):
         self.lines.append("    " * self.indent + text)
 
+    def mutated(self, body):
+        """Nombres cuya lista, diccionario o conjunto se modifica en sitio dentro de `body`."""
+        names = {name for name, _ in mutation_events(body, self.m.mut_levels, self.m.functions)}
+        for stmt in body:
+            for n in ast.walk(stmt):
+                if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and \
+                        is_mutable(self.env.get(n.target.id)):
+                    names.add(n.target.id)
+        return names
+
+    def check_exact(self):
+        """Cosas que en Python dependen de tipos dinámicos o de que dos nombres compartan el mismo
+        objeto. Turi copia los valores, así que aquí no se pueden reproducir con exactitud."""
+        params = {name for name, _ in self.params}
+        mutated = self.mutated(self.node.body)
+        stored = []
+        aliases = set()
+        for n in ast.walk(self.node):
+            if isinstance(n, (ast.Global, ast.Nonlocal, ast.Try, ast.With, ast.Yield, ast.YieldFrom,
+                              ast.Await, ast.ClassDef, ast.Delete, ast.Starred, ast.NamedExpr, ast.Match,
+                              ast.FunctionDef, ast.AsyncFunctionDef, ast.AsyncFor, ast.AsyncWith,
+                              ast.Import, ast.ImportFrom, ast.DictComp)) and n is not self.node:
+                raise Unsupported("construcción dinámica: " + type(n).__name__)
+            if isinstance(n, ast.Name) and not n.id.isascii():
+                raise Unsupported("nombre con letras fuera de ASCII")
+            pairs = []
+            if isinstance(n, ast.Assign):
+                if len(n.targets) > 1 and holds_mutable(self.ty(n.value)):
+                    raise Unsupported("varios nombres para la misma lista o diccionario")
+                for target in n.targets:
+                    if isinstance(target, ast.Tuple) and isinstance(n.value, ast.Tuple) and \
+                            len(target.elts) == len(n.value.elts):
+                        pairs.extend(zip(target.elts, n.value.elts))
+                    else:
+                        pairs.append((target, n.value))
+            for target, value in pairs:
+                # `b = a` y `fila = tabla[i]` comparten objeto en Python. Solo da igual si ninguno de
+                # los dos se modifica después.
+                if isinstance(value, ast.Attribute) and isinstance(target, ast.Name) and \
+                        holds_mutable(self.ty(value)):
+                    # `x = obj.lista`: el mismo objeto con dos nombres
+                    if target.id in mutated:
+                        raise Unsupported("dos nombres para la misma lista o diccionario, y se modifica")
+                    aliases.add(target.id)
+                    continue
+                bare = isinstance(value, ast.Name) or (
+                    isinstance(value, ast.Subscript) and not isinstance(value.slice, ast.Slice))
+                if not (bare and isinstance(target, ast.Name) and holds_mutable(self.ty(value))):
+                    continue
+                source, _ = subscript_base(value)
+                if source is None or source in mutated or target.id in mutated:
+                    raise Unsupported("dos nombres para la misma lista o diccionario, y se modifica")
+                aliases.add(target.id)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and \
+                    n.func.attr in ("append", "add", "insert"):
+                stored.extend((a.id, n) for a in n.args if isinstance(a, ast.Name) and is_mutable(self.ty(a)))
+            if isinstance(n, (ast.List, ast.Tuple, ast.Dict, ast.Set)) and \
+                    isinstance(getattr(n, "ctx", ast.Load()), ast.Load):
+                items = n.values if isinstance(n, ast.Dict) else n.elts
+                stored.extend((x.id, n) for x in items if isinstance(x, ast.Name) and is_mutable(self.ty(x)))
+            if isinstance(n, (ast.ListComp, ast.GeneratorExp, ast.SetComp)) and isinstance(n.elt, ast.Name) and \
+                    is_mutable(self.ty(n.elt)) and n.elt.id in self.env:
+                raise Unsupported("comprensión que repite la misma lista en cada posición")
+            if isinstance(n, ast.Assign):
+                for target in n.targets:
+                    if isinstance(target, (ast.Subscript, ast.Attribute)) and isinstance(n.value, ast.Name) and \
+                            is_mutable(self.ty(n.value)):
+                        stored.append((n.value.id, n))
+            if isinstance(n, ast.For):
+                aliases |= {x.id for x in ast.walk(n.target)
+                            if isinstance(x, ast.Name) and holds_mutable(self.env.get(x.id))}
+                self.check_loop(n, mutated)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in self.m.mut_params:
+                names = [a.id for a in n.args if isinstance(a, ast.Name) and is_mutable(self.ty(a))]
+                if len(names) != len(set(names)) and self.m.mut_params[n.func.id]:
+                    raise Unsupported("la misma lista pasada dos veces a una función que la modifica")
+        names = [name for name, _ in stored]
+        for name, node in stored:
+            if name in params or name in aliases or names.count(name) > 1 or not self.fresh_store(name, node):
+                raise Unsupported(f"la lista {name} se guarda dentro de otra y puede cambiar después")
+        # Parámetro de lista: `p = otra` es local, `p.append(x)` lo ve quien llama. Las dos cosas a la vez, no.
+        for n in ast.walk(self.node):
+            if isinstance(n, ast.Assign):
+                for target in n.targets:
+                    for el in (target.elts if isinstance(target, ast.Tuple) else [target]):
+                        if isinstance(el, ast.Name) and el.id in self.is_helper_mut:
+                            raise Unsupported(f"el parámetro {el.id} se reasigna y también se modifica")
+        # Una variable que empieza en un entero literal y luego acumula flotantes (`total = 0`): se
+        # guarda como flotante con una marca; donde su tipo real importaría, se comprueba la marca.
+        kinds, int_expr = {}, set()
+        other = set(params)
+        for n in ast.walk(self.node):
+            if isinstance(n, (ast.For, ast.comprehension)):
+                other |= {x.id for x in ast.walk(n.target) if isinstance(x, ast.Name)}
+            pairs = []
+            if isinstance(n, ast.Assign):
+                for target in n.targets:
+                    if isinstance(target, ast.Name):
+                        pairs.append((target.id, n.value))
+                    else:
+                        other |= {x.id for x in ast.walk(target) if isinstance(x, ast.Name) and
+                                  isinstance(x.ctx, ast.Store)}
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                pairs.append((n.target.id, ast.BinOp(n.target, n.op, n.value)))
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.value is not None:
+                pairs.append((n.target.id, n.value))
+            for name, value in pairs:
+                t = self.ty(value)
+                kinds.setdefault(name, set()).add(repr(t))
+                literal = isinstance(value, ast.Constant) or (
+                    isinstance(value, ast.UnaryOp) and isinstance(value.operand, ast.Constant))
+                if t == INT and not literal:
+                    int_expr.add(name)
+        self.intfloat = {name for name, k in kinds.items()
+                         if k == {repr(INT), repr(FLOAT)} and name not in int_expr and name not in other}
+        for name in sorted(self.conflicts - self.intfloat):
+            raise Unsupported(f"la variable {name} guarda valores de tipos distintos")
+        for name in (self.nullable & params) - self.none_params:
+            raise Unsupported(f"el parámetro {name} se pone a None")
+        # Lo que se devuelve: la lista recibida tal cual (quien llama recibe su mismo objeto) o algo
+        # nuevo. Una parte de un argumento, o un alias, no.
+        returned = [n.value for n in ast.walk(self.node) if isinstance(n, ast.Return) and n.value is not None]
+        alias = self.m.ret_alias.get(self.node.name)
+        for value in returned:
+            if isinstance(value, ast.Name) and value.id == alias:
+                continue
+            if not holds_mutable(self.ty(value)):
+                continue
+            for name in self.escaping(value):
+                if name in params or name in aliases:
+                    raise Unsupported(f"devuelve {name} o una parte suya, que también tiene quien llama")
+        if alias and any(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and n.id == alias
+                         for n in ast.walk(self.node)):
+            raise Unsupported(f"devuelve el parámetro {alias} después de reasignarlo")
+        self.alias_ok = aliases
+
+    def escaping(self, e):
+        """Nombres cuyo objeto (o una parte) sale tal cual en el valor de `e`."""
+        if isinstance(e, ast.Name):
+            return {e.id}
+        if isinstance(e, ast.Subscript) and not isinstance(e.slice, ast.Slice):
+            return self.escaping(e.value)
+        if isinstance(e, ast.IfExp):
+            return self.escaping(e.body) | self.escaping(e.orelse)
+        if isinstance(e, (ast.Tuple, ast.List)):
+            out = set()
+            for x in e.elts:
+                out |= self.escaping(x)
+            return out
+        return set()
+
+    def count_mut(self, body, name):
+        """Cuántas veces se modifica en sitio `name` dentro de `body`."""
+        total = 0
+        for stmt in body:
+            for n in ast.walk(stmt):
+                if isinstance(n, (ast.Assign, ast.AugAssign)):
+                    targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                    for t in targets:
+                        for el in (t.elts if isinstance(t, ast.Tuple) else [t]):
+                            if isinstance(el, ast.Subscript) and subscript_base(el)[0] == name:
+                                total += 1
+                    if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and n.target.id == name:
+                        total += 1
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and \
+                        subscript_base(n.func.value)[0] == name:
+                    total += 1
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "shuffle" and \
+                        n.args and subscript_base(n.args[0])[0] == name:
+                    total += 1
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in self.m.mut_params:
+                    total += sum(1 for a in n.args if subscript_base(a)[0] == name)
+        return total
+
+    def fresh_store(self, name, node):
+        """`fila = []` ... `fila.append(x)` ... `tabla.append(fila)`: se guarda una lista recién hecha
+        que nadie toca después (lo siguiente que le pasa a `fila` es recibir otra lista nueva)."""
+        def search(block):
+            for i, stmt in enumerate(block):
+                if not any(n is node for n in ast.walk(stmt)):
+                    continue
+                if isinstance(stmt, (ast.For, ast.While)):
+                    return search(stmt.body)
+                for sub in ast.walk(stmt):
+                    if isinstance(sub, (ast.For, ast.While)) and any(n is node for n in ast.walk(sub)):
+                        return search(sub.body)
+                for j in range(i - 1, -1, -1):
+                    prev = block[j]
+                    if isinstance(prev, ast.Assign) and len(prev.targets) == 1 and \
+                            isinstance(prev.targets[0], ast.Name) and prev.targets[0].id == name:
+                        value = prev.value
+                        if isinstance(value, ast.Name) or (
+                                isinstance(value, ast.Subscript) and not isinstance(value.slice, ast.Slice)):
+                            return False
+                        return self.count_mut(block[j:i + 1], name) == self.count_mut(self.node.body, name)
+                return False
+            return False
+
+        return search(self.node.body)
+
+    GROWERS = {"append", "extend", "pop", "insert", "remove", "clear", "add", "discard", "update"}
+
+    def check_loop(self, loop, mutated_anywhere):
+        """`for x in xs` recorre la lista viva. Cambiar un elemento se puede seguir igual por índice;
+        cambiar el tamaño, o tocar las filas mientras se recorren, no se reproduce con exactitud."""
+        it = loop.iter
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range":
+            return
+        body_mut = self.mutated(loop.body)
+        body_set = {n.id for st in loop.body for n in ast.walk(st)
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        resized = set()
+        for st in loop.body:
+            for n in ast.walk(st):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in self.GROWERS:
+                    resized.add(subscript_base(n.func.value)[0])
+                if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                    resized.add(n.target.id)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in self.m.mut_params:
+                    resized |= {subscript_base(a)[0] for a in n.args}
+        rows = any(isinstance(n, ast.Name) and holds_mutable(self.env.get(n.id)) for n in ast.walk(loop.target))
+        direct = isinstance(it, ast.Name) or (
+            isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id in ("enumerate", "zip")
+            and all(isinstance(a, ast.Name) for a in it.args))
+        for n in ast.walk(it):
+            if not (isinstance(n, ast.Name) and (is_mutable(self.ty(n)) or self.ty(n) == STR)):
+                continue
+            if n.id in body_set or n.id in resized or (n.id in body_mut and (rows or not direct)):
+                raise Unsupported(f"el bucle modifica {n.id} mientras lo recorre")
+        for n in ast.walk(loop.target):
+            if isinstance(n, ast.Name) and holds_mutable(self.env.get(n.id)) and n.id in mutated_anywhere:
+                raise Unsupported(f"modifica una fila a través de la variable {n.id} del for")
+
+    def check_flow(self):
+        """Lo que Python resuelve al ejecutar: una variable leída antes de recibir valor (error en
+        Python) y una función con resultado que puede terminar sin `return` (devuelve None)."""
+        params = {name for name, _ in self.params}
+        unset = set()
+
+        def split(stmt):
+            reads, stores = [], []
+            for n in self.shallow_names(stmt):
+                (stores if isinstance(n.ctx, ast.Store) else reads).append(n.id)
+            if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
+                reads.append(stmt.target.id)
+            return reads, stores
+
+        local = set()
+
+        def collect(body):
+            for stmt in body:
+                local.update(split(stmt)[1])
+                for field in ("body", "orelse"):
+                    inner = getattr(stmt, field, None)
+                    if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
+                        collect(inner)
+
+        collect(self.node.body)
+        local -= params
+
+        def flow(body, defined, breaks):
+            for stmt in body:
+                reads, stores = split(stmt)
+                for name in reads:
+                    if name in local and name not in defined:
+                        unset.add(name)
+                if isinstance(stmt, (ast.Return, ast.Raise)):
+                    return None
+                if isinstance(stmt, ast.Break):
+                    if breaks is not None:
+                        breaks.append(set(defined))
+                    return None
+                if isinstance(stmt, ast.Continue):
+                    return None
+                if isinstance(stmt, ast.If):
+                    a = flow(stmt.body, set(defined), breaks)
+                    b = flow(stmt.orelse, set(defined), breaks)
+                    if a is None and b is None:
+                        return None
+                    defined = a if b is None else b if a is None else (a & b)
+                elif isinstance(stmt, ast.While):
+                    inner = []
+                    flow(stmt.body, set(defined), inner)
+                    if isinstance(stmt.test, ast.Constant) and stmt.test.value in (True, 1):
+                        if not inner:
+                            return None
+                        defined = set.intersection(*inner)
+                elif isinstance(stmt, ast.For):
+                    flow(stmt.body, defined | set(stores), [])
+                else:
+                    defined = defined | set(stores)
+            return defined
+
+        end = flow(self.node.body, set(), None)
+        self.falls_off = end is not None
+        if unset & self.nullable:
+            raise Unsupported("variable que puede ser None y además puede no tener valor")
+        self.maybe_unset = unset
+
     def plan_declarations(self):
         """Una variable de Python vive en toda la función. Se declara donde se asigna por primera vez si
-        todos sus usos quedan dentro de ese bloque; si no, se declara al principio de la función."""
-        first = {}
-        uses = {}
+        todos sus usos quedan dentro de ese bloque; si no, se declara al principio de la función. La
+        variable de un `for` que solo se usa dentro de los `for` que la recorren es de cada bucle: así
+        el compilador la ve como el iterador que es."""
+        first, uses, binders = {}, {}, {}
 
         def walk(body, path):
-            for s in body:
-                here = path
-                for n in self.shallow_names(s):
-                    target_of = id(s) if isinstance(s, ast.For) and isinstance(n.ctx, ast.Store) else None
-                    uses.setdefault(n.id, []).append((here, target_of))
-                    if isinstance(n.ctx, ast.Store) and n.id not in first:
-                        first[n.id] = (here, s)
+            for stmt in body:
+                if isinstance(stmt, ast.For):
+                    for n in ast.walk(stmt.target):
+                        if isinstance(n, ast.Name):
+                            binders.setdefault(n.id, []).append((path, stmt))
+                for n in self.shallow_names(stmt):
+                    store = isinstance(n.ctx, ast.Store)
+                    owner = id(stmt) if isinstance(stmt, ast.For) and store else None
+                    uses.setdefault(n.id, []).append((path, owner, store))
+                    if store and n.id not in first:
+                        first[n.id] = (path, stmt)
                 for field in ("body", "orelse"):
-                    inner = getattr(s, field, None)
+                    inner = getattr(stmt, field, None)
                     if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
-                        walk(inner, path + ((id(s), field),))
+                        walk(inner, path + ((id(stmt), field),))
 
         walk(self.node.body, ())
         self.hoist = []
@@ -773,20 +2125,105 @@ class Function:
         for name, (path, stmt) in first.items():
             if name in self.declared:
                 continue
-            is_loop_target = isinstance(stmt, ast.For) and any(
-                isinstance(n, ast.Name) and n.id == name for n in ast.walk(stmt.target))
-            inside = path + ((id(stmt), "body"),) if is_loop_target else path
-            escapes = any(u[:len(inside)] != inside and not (is_loop_target and owner == id(stmt))
-                          for u, owner in uses[name])
-            if is_loop_target:
-                assigned_in_body = any(
-                    isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)
-                    for s in stmt.body for n in ast.walk(s))
-                if escapes or assigned_in_body:
+            loops = binders.get(name, [])
+            if loops:
+                bodies = [at + ((id(loop), "body"),) for at, loop in loops]
+                owners = {id(loop) for _, loop in loops}
+                local = name not in self.flagged
+                for at, owner, store in uses[name]:
+                    if owner in owners:
+                        continue
+                    if store or not any(at[:len(b)] == b for b in bodies):
+                        local = False
+                if any(at[:len(b)] == b for b in bodies for at, _ in loops):
+                    local = False  # un for dentro de otro con la misma variable
+                if not local:
                     self.loop_vars_outside.add(name)
                     self.hoist.append(name)
-            elif escapes or name in self.nullable:
+                continue
+            if any(at[:len(path)] != path for at, _, _ in uses[name]) or name in self.flagged:
                 self.hoist.append(name)
+
+    def find_nonneg(self):
+        """Variables enteras que nunca son negativas (contadores, tamaños, restos). Con ellas `//`, `%`
+        y los índices son los de la máquina, sin el ajuste de signo de Python."""
+        defs = {}
+        params = {name for name, _ in self.params}
+
+        def add(name, value):
+            defs.setdefault(name, []).append(value)
+
+        for n in ast.walk(self.node):
+            if isinstance(n, ast.Assign):
+                for target in n.targets:
+                    if isinstance(target, ast.Name):
+                        add(target.id, n.value)
+                    else:
+                        for x in ast.walk(target):
+                            if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store):
+                                add(x.id, None)
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                add(n.target.id, ast.BinOp(ast.Name(n.target.id, ast.Load()), n.op, n.value))
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.value is not None:
+                add(n.target.id, n.value)
+            elif isinstance(n, (ast.For, ast.comprehension)):
+                it = n.iter
+                counted = isinstance(n.target, ast.Name) and isinstance(it, ast.Call) and \
+                    isinstance(it.func, ast.Name) and it.func.id == "range" and 1 <= len(it.args) <= 2
+                if counted:
+                    add(n.target.id, it.args[0] if len(it.args) == 2 else ast.Constant(0))
+                else:
+                    for x in ast.walk(n.target):
+                        if isinstance(x, ast.Name):
+                            add(x.id, None)
+        good = {name for name in defs if name not in params and self.env.get(name) == INT}
+        changed = True
+        while changed:
+            changed = False
+            for name in sorted(good):
+                if not all(v is not None and self.is_nonneg(v, good) for v in defs[name]):
+                    good.discard(name)
+                    changed = True
+        self.nonneg_vars = good
+
+    def is_nonneg(self, e, good):
+        if isinstance(e, ast.Constant):
+            return type(e.value) is int and e.value >= 0
+        if isinstance(e, ast.Name):
+            return e.id in good or e.id in self.nonneg
+        if isinstance(e, ast.BinOp):
+            left, right = self.is_nonneg(e.left, good), self.is_nonneg(e.right, good)
+            if isinstance(e.op, (ast.Add, ast.Mult, ast.FloorDiv, ast.BitOr, ast.BitXor)):
+                return left and right
+            if isinstance(e.op, ast.Mod):
+                return right  # en Python el resto lleva el signo del divisor
+            if isinstance(e.op, ast.BitAnd):
+                return left or right
+            if isinstance(e.op, (ast.RShift, ast.LShift, ast.Pow)):
+                return left
+            return False
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id not in self.m.functions:
+            if e.func.id in ("len", "abs", "ord"):
+                return True
+            if e.func.id in ("min", "max") and len(e.args) > 1 and not e.keywords:
+                return all(self.is_nonneg(a, good) for a in e.args)
+            return False
+        if isinstance(e, ast.IfExp):
+            return self.is_nonneg(e.body, good) and self.is_nonneg(e.orelse, good)
+        if isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.UAdd):
+            return self.is_nonneg(e.operand, good)
+        return False
+
+    def sticky(self, condition, node):
+        """Apunta sin saltar que, si `condition` se cumple, Python daría un error aquí. Devuelve False
+        cuando en este punto no se puede (la expresión se evalúa solo a veces, o no se puede repetir)."""
+        if not self.has_sticky or self.lazy:
+            return False
+        if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "pop"
+               for n in ast.walk(node)):
+            return False
+        self.out(f"tzZ = tzZ || {condition}")
+        return True
 
     @staticmethod
     def shallow_names(s):
@@ -819,11 +2256,22 @@ class Function:
             self.stmt(s)
 
     def assign_name(self, name, text, t=None):
-        if name in self.nullable:
+        if text == "None" and is_obj(self.env.get(name)) and name not in self.flagged:
+            text, t = "-1", self.env.get(name)
+        if name in self.flagged and is_opt(t):
+            tmp = self.m.fresh("o")
+            self.out(f"let {tmp} = {text}")
+            self.out(f"{name} = unwrapOr({tmp}, {zero_of(t[1])})")
+            return self.out(f"{name}IsNone = isNone({tmp})")
+        if is_opt(t):
+            raise Unsupported("guardar en una variable un valor que puede ser None")
+        if name in self.flagged:
             if text == "None":
                 return self.out(f"{name}IsNone = true")
             self.out(f"{name} = {text}")
             return self.out(f"{name}IsNone = false")
+        if name in self.intfloat:
+            self.out(f"{name}IsInt = {'true' if t == INT else 'false'}")
         if name in self.declared:
             self.out(f"{name} = {text}")
             return
@@ -834,23 +2282,104 @@ class Function:
         else:
             self.out(f"var {name} = {text}")
 
+    def arena(self, nodes):
+        """Marca los almacenes antes de `nodes` y devuelve las líneas que los recortan a esa marca (en un
+        bucle, al empezar cada vuelta y al salir): los objetos creados ahí dentro se tiran de golpe, como
+        en la arena del C experto. Solo si crean objetos y nada de lo creado puede seguir vivo después:
+        no queda en ninguna variable ni guardado en algo que ya existía (campo, lista, global)."""
+        if not self.m.pools:
+            return None
+        bad, makes = self.m.heap_facts()
+        try:
+            ok, callees, new = self.m.heap_effects(self, nodes)
+        except Unsupported:
+            return None
+        if not ok or callees & bad or not (new or callees & makes):
+            return None
+        local = set()
+        for top in nodes:
+            for n in ast.walk(top):
+                if isinstance(n, ast.comprehension):
+                    local |= {id(x) for x in ast.walk(n.target)}
+        for top in nodes:
+            for n in ast.walk(top):
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and id(n) not in local and \
+                        holds_obj(self.env.get(n.id)):
+                    return None
+        cuts = []
+        for c in self.m.pools:
+            mark = self.m.fresh("m")
+            self.out(f"let {mark} = tzP_{c}.len()")
+            cuts.append(f"truncate(mut tzP_{c}, {mark})")
+        return cuts
+
     def stmt(self, s):
+        if self.arena_depth == 0 and self.m.pools and isinstance(s, (ast.Expr, ast.Assign, ast.AugAssign)) and \
+                any(isinstance(n, ast.Call) for n in ast.walk(s)):
+            cut = self.arena([s])
+            if cut:
+                self.arena_depth += 1
+                try:
+                    self.stmt_inner(s)
+                finally:
+                    self.arena_depth -= 1
+                for line in cut:
+                    self.out(line)
+                return
+        return self.stmt_inner(s)
+
+    def stmt_inner(self, s):
         if isinstance(s, ast.Expr):
             if isinstance(s.value, ast.Constant):
                 return
             return self.expr_stmt(s.value)
         if isinstance(s, ast.Pass):
             return
+        if isinstance(s, ast.Return) and is_opt(self.ret):
+            if s.value is None or (isinstance(s.value, ast.Constant) and s.value.value is None):
+                text = "None"
+            elif isinstance(s.value, ast.Name) and s.value.id in self.flagged:
+                name = s.value.id
+                text = f"(if {name}IsNone {{ None }} else {{ Some({name}) }})"
+            else:
+                text, t = self.ex(s.value)
+                if is_opt(t):
+                    if not refine(t, self.ret)[1]:
+                        raise Unsupported("return de un tipo distinto al de los demás")
+                else:
+                    if t is None or not refine(t, self.ret[1])[1]:
+                        raise Unsupported("return de un tipo distinto al de los demás")
+                    if self.ret[1] == FLOAT and t == INT:
+                        text = f"float({text})"
+                    text = f"Some({text})"
+            if self.has_sticky:
+                self.out("assert !tzZ")
+            return self.out(f"return {text}")
+        if isinstance(s, ast.Return) and is_obj(self.ret) and isinstance(s.value, ast.Constant) and \
+                s.value.value is None:
+            if self.has_sticky:
+                self.out("assert !tzZ")
+            return self.out("return -1")
         if isinstance(s, ast.Return):
-            if s.value is None:
+            if s.value is None or (isinstance(s.value, ast.Constant) and s.value.value is None):
+                if self.has_sticky:
+                    self.out("assert !tzZ")
                 return self.out("return")
             text, t = self.ex(s.value)
+            if self.m.exact and (t is None or self.ret in (None, "none") or not refine(t, self.ret)[1]):
+                raise Unsupported("return de un tipo distinto al de los demás")
             if self.ret == FLOAT and t == INT:
                 text = f"float({text})"
+            if self.has_sticky:
+                self.out("assert !tzZ")
             return self.out(f"return {text}")
         if isinstance(s, ast.Assign):
             if len(s.targets) > 1:
                 text, t = self.ex(s.value)
+                if self.m.exact and not isinstance(s.value, (ast.Constant, ast.Name)):
+                    once = self.m.fresh("t")
+                    self.out(f"let {once} = {text}")
+                    text = once
                 for target in s.targets:
                     self.store(target, text, t)
                 return
@@ -863,7 +2392,10 @@ class Function:
             value = ast.BinOp(s.target, s.op, s.value)
             ast.copy_location(value, s)
             target = s.target
-            if isinstance(target, ast.Name) or isinstance(target, ast.Subscript):
+            if isinstance(target, ast.Subscript) and self.m.exact:
+                # `a[f()] += 1`: Python calcula el índice una sola vez.
+                target = self.index_once(target)
+            if isinstance(target, (ast.Name, ast.Subscript, ast.Attribute)):
                 read = ast.parse(ast.unparse(target), mode="eval").body
                 value = ast.BinOp(read, s.op, s.value)
                 return self.assign(target, value)
@@ -875,7 +2407,10 @@ class Function:
             node = s
             while len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
                 node = node.orelse[0]
-                self.out(f"}} else if {self.cond(node.test)} {{")
+                self.lazy += 1  # esta condición solo se evalúa si las anteriores no se cumplieron
+                test = self.cond(node.test)
+                self.lazy -= 1
+                self.out(f"}} else if {test} {{")
                 self.nested(node.body)
             if node.orelse:
                 self.out("} else {")
@@ -884,12 +2419,24 @@ class Function:
         if isinstance(s, ast.While):
             if s.orelse:
                 raise Unsupported("while ... else")
+            cut = self.arena([s.test] + s.body)
             self.lazy += 1
             test = self.cond(s.test)
             self.lazy -= 1
             self.out(f"while {test} {{")
+            if self.m.fp_checks:
+                self.out(f"    {self.m.need('pyFpCheck')}()")
+            if self.has_sticky:
+                self.out("    assert !tzZ")
+            for line in cut or ():
+                self.out("    " + line)
+            self.arena_depth += bool(cut)
             self.nested(s.body)
-            return self.out("}")
+            self.arena_depth -= bool(cut)
+            self.out("}")
+            for line in cut or ():
+                self.out(line)
+            return
         if isinstance(s, ast.For):
             if s.orelse:
                 raise Unsupported("for ... else")
@@ -900,7 +2447,27 @@ class Function:
             return self.out("continue")
         if isinstance(s, ast.Assert):
             return self.out(f"assert {self.cond(s.test)}")
+        if isinstance(s, ast.Raise) and self.m.exact:
+            # Python lanzaría aquí un error: la versión nativa se detiene y Python repite la llamada, que
+            # lo lanza con su mensaje y su traza. El error no se calcula aquí.
+            return self.out(f"assert {self.m.need('pyNever')}()")
         raise Unsupported("sentencia no admitida: " + type(s).__name__)
+
+    def index_once(self, target):
+        """Copia de `target` (a[i][j]...) con cada índice que tiene llamadas guardado antes en una
+        variable, para que leer y escribir usen el mismo valor."""
+        if not isinstance(target, ast.Subscript):
+            return target
+        base = self.index_once(target.value)
+        index = target.slice
+        if not isinstance(index, ast.Slice) and any(isinstance(n, ast.Call) for n in ast.walk(index)):
+            text, t = self.ex(index)
+            name = self.m.fresh("k")
+            self.out(f"let {name} = {text}")
+            self.env[name] = t
+            self.lambda_names.add(name)
+            index = ast.Name(name, ast.Load())
+        return ast.copy_location(ast.Subscript(base, index, target.ctx), target)
 
     def nested(self, body):
         saved = set(self.declared)
@@ -953,6 +2520,14 @@ class Function:
                 self.out(f"    {target.id}.add({item})")
                 self.out("}")
             return
+        if isinstance(target, ast.Name) and isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and \
+                value.func.id in self.m.ret_alias:
+            names = [name for name, _ in self.m.functions[value.func.id][0]]
+            at = names.index(self.m.ret_alias[value.func.id])
+            if at < len(value.args) and isinstance(value.args[at], ast.Name) and value.args[at].id == target.id:
+                # La función devuelve la misma lista que recibe y ya la modificó en sitio.
+                self.result_unused = value
+                return self.out(self.ex(value)[0])
         text, t = self.ex(value)
         self.store(target, text, t)
 
@@ -962,13 +2537,56 @@ class Function:
             if want == FLOAT and t == INT:
                 text = f"float({text})"
             return self.assign_name(target.id, text, t)
+        if isinstance(target, ast.Attribute):
+            owner = self.ty(target.value)
+            if not (is_obj(owner) and owner[1] in self.m.classes and
+                    target.attr in self.m.classes[owner[1]]["fields"]):
+                raise Unsupported("asignar un atributo de algo que no es un objeto de una clase traducida")
+            want = self.m.field_types[owner[1]].get(target.attr)
+            if text == "None":
+                if not is_obj(want):
+                    raise Unsupported("poner a None un atributo que no es un objeto")
+                text = "-1"
+            elif want == FLOAT and t == INT:
+                text = f"float({text})"
+            elif self.m.exact and t is not None and not refine(t, want)[1]:
+                raise Unsupported("guardar en un atributo un valor de otro tipo")
+            obj, _ = self.ex(target.value)
+            if "(" in text:
+                tmp = self.m.fresh("a")
+                self.out(f"let {tmp} = {text}")
+                text = tmp
+            return self.out(f"tzP_{owner[1]}[{obj}].v_{target.attr} = {text}")
         if isinstance(target, ast.Subscript):
-            base, bt = self.ex(target.value)
+            base, bt = self.place(target.value)
             if isinstance(target.slice, ast.Slice):
                 raise Unsupported("asignar a un corte")
+            if self.m.exact:
+                want = bt[1] if isinstance(bt, tuple) and bt[0] == "list" else \
+                    bt[2] if isinstance(bt, tuple) and bt[0] == "dict" else None
+                if want is None or repr(want) != repr(t):
+                    raise Unsupported("guardar en una lista o diccionario un valor de otro tipo")
+                if isinstance(bt, tuple) and bt[0] == "dict" and bt[1] not in (INT, STR, BOOL):
+                    raise Unsupported("diccionario con claves que no son enteros ni textos")
             index = self.index(target.slice, base, bt)
             return self.out(f"{base}[{index}] = {text}")
         raise Unsupported("destino de asignación no admitido")
+
+    def place(self, node):
+        """Lugar donde se escribe (`xs`, `g[i]`): un nombre se usa tal cual, sin comprobar marcas."""
+        if isinstance(node, ast.Name) and node.id not in self.subst:
+            if self.m.exact and node.id in self.flagged:
+                self.out(f"assert !{node.id}IsNone")
+            return node.id, self.ty(node)
+        if isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
+            base, bt = self.place(node.value)
+            if isinstance(bt, tuple) and bt[0] == "list":
+                return f"{base}[{self.index(node.slice, base, bt)}]", bt[1]
+            if isinstance(bt, tuple) and bt[0] == "dict" and self.m.exact:
+                key = self.ex(node.slice)[0]
+                self.out(f"assert {base}.has({key})")
+                return f"{base}[{key}]", bt[2]
+        return self.ex(node)
 
     def index(self, node, base, bt):
         text, _ = self.ex(node)
@@ -976,12 +2594,16 @@ class Function:
             return text
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant):
             return f"{base}.len() - {node.operand.value}"
-        if isinstance(node, ast.Constant) or self.never_negative(node):
+        if isinstance(node, ast.Constant) or self.never_negative(node) or self.m.exact:
+            # Con resultado exacto, un índice negativo que no sea literal detiene la función y la
+            # resuelve Python: es raro, y así el acceso es el directo.
             return text
         return f"{self.m.need('pyAt')}({text}, {base}.len())"
 
     def never_negative(self, node):
         """Índices que vienen de un `range` ascendente, de `len` o de sumas de ellos."""
+        if self.m.exact:
+            return self.is_nonneg(node, self.nonneg_vars)
         if isinstance(node, ast.Constant):
             return isinstance(node.value, int) and node.value >= 0
         if isinstance(node, ast.Name):
@@ -994,11 +2616,118 @@ class Function:
 
     nonneg = frozenset()
 
+    # ------------------------------------------------------------------ salida
+    @staticmethod
+    def std_stream(node):
+        """1 para `sys.stdout`, 2 para `sys.stderr`, None si es otra cosa."""
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "sys" and \
+                node.attr in ("stdout", "stderr"):
+            return 1 if node.attr == "stdout" else 2
+        return None
+
+    def write(self, text, stream):
+        """Escribe un texto ya calculado (expresión Turi de tipo str)."""
+        self.m.uses_output = True
+        if text in ('""',):
+            return
+        self.out(f"{'write' if stream == 1 else 'ewrite'}({text})")
+
+    def write_value(self, text, t, stream):
+        """Escribe `str(valor)` sin crear un texto intermedio cuando no hace falta."""
+        self.m.uses_output = True
+        err = "true" if stream == 2 else "false"
+        if t == INT:
+            return self.out(f"{self.m.need('pyOutI')}({text}, {err})")
+        if t == FLOAT:
+            return self.out(f"{self.m.need('pyOutF')}({text}, {err})")
+        self.write(self.text_of(text, t), stream)
+
+    def print_call(self, e):
+        stream, sep, end = 1, '" "', '"\\n"'
+        values = []
+        for a in e.args:
+            if isinstance(a, ast.Starred):
+                raise Unsupported("print con *")
+            text, t = self.ex(a)
+            if t is None and not (isinstance(a, ast.Constant) and a.value is None):
+                raise Unsupported("print de un valor de tipo no deducido")
+            if isinstance(a, ast.Constant) and a.value is None:
+                text, t = '"None"', STR
+            elif isinstance(a, ast.Name) and a.id in self.flagged and a.id not in self.maybe_unset:
+                text, t = self.as_text(a), STR
+            elif not isinstance(a, (ast.Name, ast.Constant)):
+                # Python calcula todos los argumentos antes de escribir nada.
+                name = self.m.fresh("w")
+                self.out(f"let {name} = {text}")
+                text = name
+            values.append((text, t))
+        for kw in e.keywords:
+            if kw.arg in ("sep", "end"):
+                if isinstance(kw.value, ast.Constant) and kw.value.value is None:
+                    continue
+                text, t = self.ex(kw.value)
+                if t != STR:
+                    raise Unsupported(f"print con {kw.arg} que no es un texto")
+                if not isinstance(kw.value, (ast.Name, ast.Constant)):
+                    name = self.m.fresh("w")
+                    self.out(f"let {name} = {text}")
+                    text = name
+                if kw.arg == "sep":
+                    sep = text
+                else:
+                    end = text
+            elif kw.arg == "file":
+                if isinstance(kw.value, ast.Constant) and kw.value.value is None:
+                    continue
+                stream = self.std_stream(kw.value)
+                if stream is None:
+                    raise Unsupported("print a un archivo")
+            elif kw.arg == "flush":
+                if not isinstance(kw.value, ast.Constant):
+                    raise Unsupported("print con flush calculado")
+            else:
+                raise Unsupported("print con argumentos con nombre desconocidos")
+        for i, (text, t) in enumerate(values):
+            if i:
+                self.write(sep, stream)
+            self.write_value(text, t, stream)
+        self.write(end, stream)
+
     def expr_stmt(self, e):
-        if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute):
-            base, bt = self.ex(e.func.value)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "print" and self.m.exact:
+            return self.print_call(e)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and self.m.exact and \
+                self.std_stream(e.func.value) is not None:
+            stream = self.std_stream(e.func.value)
+            if e.func.attr == "flush" and not e.args:
+                return
+            if e.func.attr == "write" and len(e.args) == 1 and not e.keywords:
+                text, t = self.ex(e.args[0])
+                if t != STR:
+                    raise Unsupported("write de algo que no es un texto")
+                return self.write(text, stream)
+            raise Unsupported(f"sys.{'stdout' if stream == 1 else 'stderr'}.{e.func.attr}")
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr in MUTATORS | {"setdefault"}:
+            base, bt = self.place(e.func.value)
             attr = e.func.attr
             args = [self.ex(a) for a in e.args]
+            exact = self.m.exact
+            if exact and not is_mutable(bt):
+                raise Unsupported(f"{attr} sobre un tipo no deducido")
+            if exact and e.keywords and attr != "sort":
+                raise Unsupported(f"{attr} con argumentos con nombre")
+            if exact and attr in ("append", "add", "insert", "remove", "discard") and \
+                    (not args or repr(args[-1][1]) != repr(self.elem(bt))):
+                raise Unsupported(f"{attr} de un valor de otro tipo que el resto")
+            if exact and attr == "extend" and repr(self.elem(self.ty(e.args[0]))) != repr(self.elem(bt)):
+                raise Unsupported("extend con elementos de otro tipo")
+            if exact and attr in ("sort", "remove") and bt[0] == "list" and \
+                    self.elem(bt) not in ((INT, STR, FLOAT) if attr == "sort" else (INT, STR, BOOL)):
+                raise Unsupported(f"{attr} en una lista de este tipo")
+            if exact and attr == "sort" and self.elem(bt) == FLOAT:
+                self.out(f"assert {self.m.need('pySortable')}({base})")
+            if exact and attr == "remove" and bt[0] == "set":
+                self.out(f"assert {base}.has({args[0][0]})")
             if attr == "append":
                 return self.out(f"{base}.push({self.coerce(args[0], self.elem(bt))})")
             if attr == "extend":
@@ -1016,12 +2745,16 @@ class Function:
                 return self.out(f"setDel(mut {base}, {args[0][0]})")
             if attr == "sort" and not e.keywords:
                 return self.out(f"{base}.sort()")
-            if attr == "sort" and len(e.keywords) == 1 and e.keywords[0].arg == "reverse":
+            if attr == "sort" and len(e.keywords) == 1 and e.keywords[0].arg == "reverse" and \
+                    isinstance(e.keywords[0].value, ast.Constant) and e.keywords[0].value.value in (True, False):
                 self.out(f"{base}.sort()")
+                if e.keywords[0].value.value is False:
+                    return
                 return self.out(f"{base} = {base}.reverse()")
             if attr == "reverse":
                 return self.out(f"{base} = {base}.reverse()")
             if attr == "pop" and not args:
+                self.out(f"assert {base}.len() > 0")
                 return self.out(f"{base}.pop()")
             if attr == "clear":
                 return self.out(f"{base}.clear()")
@@ -1033,7 +2766,12 @@ class Function:
             if attr == "remove" and len(args) == 1:
                 idx = self.m.fresh("i")
                 self.out(f"let {idx} = {base}.indexOf({args[0][0]})")
+                self.out(f"assert {idx} >= 0")
                 return self.out(f"{base} = {base}[0..{idx}].concat({base}[{idx} + 1..{base}.len()])")
+            if exact:
+                raise Unsupported(f"método no admitido como sentencia: {attr}")
+        if self.m.exact and isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
+            self.result_unused = e
         text, _ = self.ex(e)
         self.out(text)
 
@@ -1042,7 +2780,34 @@ class Function:
         text, t = pair
         return f"float({text})" if want == FLOAT and t == INT else text
 
+    def mark_truth(self, e):
+        """`a and b` da uno de sus operandos, no un booleano: solo equivale donde se mira su verdad."""
+        self.truth.add(id(e))
+        if isinstance(e, ast.BoolOp):
+            for v in e.values:
+                self.mark_truth(v)
+        elif isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.Not):
+            self.mark_truth(e.operand)
+
+    def once(self, text):
+        """Valor que Python calcula una sola vez (los argumentos de `range`)."""
+        if text.lstrip("-").isdigit():
+            return text
+        name = self.m.fresh("r")
+        self.out(f"let {name} = {text}")
+        return name
+
+    def loop_bind(self, name, text):
+        outside = name in self.loop_vars_outside
+        self.out(f"    {'' if outside else 'let '}{name} = {text}")
+        if outside and name in self.flagged:
+            self.out(f"    {name}IsNone = false")
+
     def cond(self, e):
+        if isinstance(e, ast.Name) and e.id in self.flagged and e.id not in self.subst and self.m.exact and \
+                e.id not in self.maybe_unset and self.env.get(e.id) is not None:
+            return f"(!{e.id}IsNone && {self.truthy(e.id, self.env[e.id])})"
+        self.mark_truth(e)
         text, t = self.ex(e)
         if t == BOOL or isinstance(e, (ast.Compare, ast.BoolOp)) or (isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.Not)):
             return text
@@ -1050,6 +2815,10 @@ class Function:
 
     @staticmethod
     def truthy(text, t):
+        if is_opt(t):
+            raise Unsupported("verdad de un valor que puede ser None")
+        if is_obj(t):
+            return f"({text} != -1)"
         if t == BOOL:
             return text
         if t == INT:
@@ -1066,11 +2835,21 @@ class Function:
             a, b, step = self.range_args(it)
             return f"{self.m.need('pyRange')}({a}, {b}, {step})"
         text, t = self.ex(it)
+        if isinstance(t, tuple) and t[0] in ("dict", "set"):
+            self.order_free(False)
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute) and it.func.attr in ("keys", "values"):
+            self.order_free(False)
+        if self.m.exact and not (t == STR or (isinstance(t, tuple) and t[0] == "list")):
+            raise Unsupported("recorrer algo que no es una lista ni un texto")
         if isinstance(t, tuple) and t[0] == "dict":
             return f"{text}.keys()"
         if isinstance(t, tuple) and t[0] == "set":
             return f"setItems({text})"
         return text
+
+    def order_free(self, ok):
+        if self.m.exact and not ok:
+            raise Unsupported("recorrer un diccionario o conjunto: su orden aquí no es el de Python")
 
     def range_args(self, call):
         args = [self.ex(a)[0] for a in call.args]
@@ -1081,26 +2860,45 @@ class Function:
         return args[0], args[1], args[2]
 
     def for_loop(self, s):
+        cut = self.arena([s.target, s.iter] + s.body)
+        self.next_cut = cut
+        self.arena_depth += bool(cut)
+        try:
+            self.for_loop_inner(s)
+        finally:
+            self.arena_depth -= bool(cut)
+            self.next_cut = None
+        for line in cut or ():
+            self.out(line)
+
+    def for_loop_inner(self, s):
         it, target = s.iter, s.target
         saved_nonneg = self.nonneg
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range" and \
                 isinstance(target, ast.Name):
             a, b, step = self.range_args(it)
+            if self.m.exact and step != "1":
+                a, b, step = self.once(a), self.once(b), self.once(step)
             name = target.id
             outside = name in self.loop_vars_outside
             var = self.m.fresh("i") if outside else name
             if step == "1":
                 self.out(f"for {var} in {a}..{b} {{")
-                if self.never_negative(it.args[0]) if len(it.args) > 1 else True:
+                reassigned = any(isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)
+                                 for st in s.body for n in ast.walk(st))
+                if not reassigned and (self.never_negative(it.args[0]) if len(it.args) > 1 else True):
                     self.nonneg = self.nonneg | {name}
                 if outside:
-                    self.out(f"    {name} = {var}")
+                    self.loop_bind(name, var)
+                    if not reassigned:
+                        self.subst[name] = var  # dentro del cuerpo se lee el iterador, no la copia
             else:
                 k = self.m.fresh("k")
                 self.out(f"for {k} in 0..{self.m.need('pyRangeLen')}({a}, {b}, {step}) {{")
-                self.out(f"    {'' if outside else 'let '}{name} = {a} + {k} * ({step})")
+                self.loop_bind(name, f"{a} + {k} * ({step})")
             self.nested_loop(s.body, {name} if not outside else set())
             self.nonneg = saved_nonneg
+            self.subst.pop(name, None)
             return self.out("}")
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "enumerate" and \
                 isinstance(target, ast.Tuple) and len(target.elts) == 2 and all(isinstance(x, ast.Name) for x in target.elts):
@@ -1110,9 +2908,9 @@ class Function:
             k = self.m.fresh("k") if (start or i in self.loop_vars_outside) else i
             self.out(f"for {k} in 0..{seq}.len() {{")
             if k != i:
-                self.out(f"    {'' if i in self.loop_vars_outside else 'let '}{i} = {k}" + (f" + {start}" if start else ""))
+                self.loop_bind(i, k + (f" + {start}" if start else ""))
             elem = f"{seq}[{k}..{k} + 1]" if st == STR else f"{seq}[{k}]"
-            self.out(f"    {'' if x in self.loop_vars_outside else 'let '}{x} = {elem}")
+            self.loop_bind(x, elem)
             self.nonneg = self.nonneg | {i}
             self.nested_loop(s.body, {i, x} - self.loop_vars_outside)
             self.nonneg = saved_nonneg
@@ -1129,11 +2927,12 @@ class Function:
             self.out(f"for {k} in 0..{n} {{")
             for el, (seq, st) in zip(target.elts, seqs):
                 elem = f"{seq}[{k}..{k} + 1]" if st == STR else f"{seq}[{k}]"
-                self.out(f"    {'' if el.id in self.loop_vars_outside else 'let '}{el.id} = {elem}")
+                self.loop_bind(el.id, elem)
             self.nested_loop(s.body, {el.id for el in target.elts} - self.loop_vars_outside)
             return self.out("}")
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute) and it.func.attr == "items" and \
                 isinstance(target, ast.Tuple) and len(target.elts) == 2:
+            self.order_free(False)
             d, _ = self.pure(it.func.value)
             k, v = target.elts[0].id, target.elts[1].id
             self.out(f"for {k} in {d}.keys() {{")
@@ -1144,7 +2943,7 @@ class Function:
             item = self.m.fresh("p")
             self.out(f"for {item} in {self.iterable(it)} {{")
             for i, el in enumerate(target.elts):
-                self.out(f"    {'' if el.id in self.loop_vars_outside else 'let '}{el.id} = {item}.{i}")
+                self.loop_bind(el.id, f"{item}.{i}")
             self.nested_loop(s.body, {el.id for el in target.elts} - self.loop_vars_outside)
             return self.out("}")
         if not isinstance(target, ast.Name):
@@ -1152,16 +2951,26 @@ class Function:
         name = target.id
         outside = name in self.loop_vars_outside
         var = self.m.fresh("x") if outside else name
+        if self.m.exact and isinstance(it, ast.Name) and it.id in self.mutated(s.body):
+            # El cuerpo cambia elementos de la lista que recorre: se lee cada uno en su momento.
+            k = self.m.fresh("k")
+            self.out(f"for {k} in 0..{it.id}.len() {{")
+            self.loop_bind(name, f"{it.id}[{k}]")
+            self.nested_loop(s.body, set() if outside else {name})
+            return self.out("}")
         self.out(f"for {var} in {self.iterable(it)} {{")
         if outside:
-            self.out(f"    {name} = {var}")
+            self.loop_bind(name, var)
         self.nested_loop(s.body, set() if outside else {name})
         self.out("}")
 
     def nested_loop(self, body, names):
+        cut, self.next_cut = self.next_cut, None
         saved = set(self.declared)
         self.declared |= names
         self.indent += 1
+        for line in cut or ():
+            self.out(line)
         self.block(body)
         self.indent -= 1
         self.declared = saved | (self.declared & set(self.hoist))
@@ -1183,12 +2992,14 @@ class Function:
             if isinstance(v, bool):
                 return ("true" if v else "false"), BOOL
             if isinstance(v, int):
+                if not -9223372036854775807 <= v <= 9223372036854775807:
+                    raise Unsupported("entero fuera de 64 bits")
                 return str(v), INT
             if isinstance(v, float):
-                if v == float("inf"):
-                    return "1.0e308", FLOAT
-                return repr(v), FLOAT
+                return float_literal(v), FLOAT
             if isinstance(v, str):
+                if self.m.exact and not v.isascii():
+                    raise Unsupported("texto no ASCII")
                 return string_literal(v), STR
             if v is None:
                 return "None", None
@@ -1197,30 +3008,43 @@ class Function:
                 return self.subst[e.id], t
             if e.id in self.m.constants and e.id not in self.env:
                 return self.ex(self.m.constants[e.id])
+            if self.m.exact:
+                if e.id in self.flagged:
+                    # Sin valor todavía (o None): Python fallaría o daría None; aquí se detiene.
+                    return f"{self.m.need('pyNeed')}(!{e.id}IsNone, {e.id})", t
+                if e.id in self.intfloat and id(e) not in self.arith:
+                    return f"{self.m.need('pyNeed')}(!{e.id}IsInt, {e.id})", t
+                if e.id not in self.env and e.id not in self.lambda_names:
+                    raise Unsupported(f"usa el nombre {e.id}, que no es una variable local con tipo conocido")
             return e.id, t
         if isinstance(e, ast.JoinedStr):
-            parts = []
-            for v in e.values:
-                if isinstance(v, ast.Constant):
-                    parts.append(string_literal(v.value)[1:-1])
-                elif isinstance(v, ast.FormattedValue) and v.format_spec is None and v.conversion == -1:
-                    parts.append("{" + self.ex(v.value)[0] + "}")
-                else:
-                    raise Unsupported("formato en cadena f")
-            return '"' + "".join(parts) + '"', STR
+            return self.joined_str(e), STR
         if isinstance(e, ast.UnaryOp):
+            if isinstance(e.op, ast.Not):
+                self.mark_truth(e.operand)
             text, ot = self.ex(e.operand)
             if isinstance(e.op, ast.Not):
                 return f"!{self.truthy_paren(text, ot, e.operand)}", BOOL
+            if self.m.exact and ot not in (INT, FLOAT):
+                raise Unsupported("signo o complemento de algo que no es un número")
             if isinstance(e.op, ast.USub):
-                if isinstance(e.operand, ast.Constant):
+                if isinstance(e.operand, ast.Constant) and not (ot == FLOAT and e.operand.value == 0):
                     return f"-{text}", ot
+                if self.m.exact and ot == FLOAT:
+                    return f"(-1.0 * {text})", ot  # conserva el signo del cero, como Python
                 return (f"(0.0 - {text})" if ot == FLOAT else f"(0 - {text})"), ot
+            if isinstance(e.op, ast.Invert) and ot == INT:
+                return f"(-1 - {text})", ot
             if isinstance(e.op, ast.UAdd):
                 return text, ot
             raise Unsupported("operador unario")
         if isinstance(e, ast.BoolOp):
             op = " && " if isinstance(e.op, ast.And) else " || "
+            if id(e) in self.truth:
+                for v in e.values:
+                    self.mark_truth(v)
+            elif self.m.exact and any(self.ty(v) != BOOL for v in e.values):
+                raise Unsupported("and / or usado como valor con operandos que no son booleanos")
             parts = []
             for i, v in enumerate(e.values):
                 self.lazy += i > 0
@@ -1237,13 +3061,29 @@ class Function:
             a, at = self.ex(e.body)
             b, bt = self.ex(e.orelse)
             self.lazy -= 1
+            if self.m.exact and at != bt:
+                raise Unsupported("expresión condicional con dos tipos")
             if FLOAT in (at, bt):
                 a, b = self.coerce((a, at), FLOAT), self.coerce((b, bt), FLOAT)
             return f"(if {self.cond(e.test)} {{ {a} }} else {{ {b} }})", t
         if isinstance(e, ast.List):
             want = t[1] if isinstance(t, tuple) else None
-            return "[" + ", ".join(self.coerce(self.ex(x), want) for x in e.elts) + "]", t
+            items = [self.ex(x) for x in e.elts]
+            if self.m.exact and len({repr(it) for _, it in items}) > 1:
+                merged, ok = items[0][1], True
+                for _, it in items[1:]:
+                    merged, same = refine(merged, it)
+                    ok = ok and same
+                if not ok or not complete(merged):
+                    raise Unsupported("lista con elementos de tipos distintos")
+                t = ("list", merged)
+                want = merged
+            if self.m.exact and not items and not complete(t):
+                return "[]", t
+            return "[" + ", ".join(self.coerce(x, want) for x in items) + "]", t
         if isinstance(e, ast.Tuple):
+            if self.m.exact and not 2 <= len(e.elts) <= 4:
+                raise Unsupported("tupla de menos de dos o de más de cuatro elementos")
             return "(" + ", ".join(self.ex(x)[0] for x in e.elts) + ")", t
         if isinstance(e, ast.Dict) and not e.keys:
             return "mapNew()", t
@@ -1253,14 +3093,307 @@ class Function:
             return self.subscript(e), t
         if isinstance(e, ast.Call):
             return self.call(e), t
+        if isinstance(e, ast.Attribute) and is_obj(self.ty(e.value)) and self.ty(e.value)[1] in self.m.classes:
+            owner = self.ty(e.value)[1]
+            if e.attr not in self.m.classes[owner]["fields"]:
+                raise Unsupported(f"atributo {e.attr} que no es un campo de {owner}")
+            obj, _ = self.ex(e.value)
+            return f"tzP_{owner}[{obj}].v_{e.attr}", t
         if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name) and e.value.id == "math":
             if e.attr == "pi":
                 return "3.141592653589793", FLOAT
+            if e.attr == "e":
+                return "2.718281828459045", FLOAT
             if e.attr == "inf":
-                return "1.0e308", FLOAT
+                return "(1.0e308 * 1.0e308)", FLOAT
         if isinstance(e, ast.Lambda):
             return self.lambda_text(e), None
         raise Unsupported("expresión no admitida: " + ast.unparse(e)[:60])
+
+    def as_text(self, node):
+        """Texto de un valor tal como lo daría `str()` en Python."""
+        if isinstance(node, ast.Constant) and node.value is None:
+            return '"None"'
+        if isinstance(node, ast.Name) and node.id in self.flagged and node.id not in self.subst and self.m.exact:
+            t = self.env.get(node.id)
+            if t is not None and node.id not in self.maybe_unset:
+                return f'(if {node.id}IsNone {{ "None" }} else {{ {self.text_of(node.id, t)} }})'
+        text, t = self.ex(node)
+        if not self.m.exact and t not in (STR, INT, BOOL):
+            return f"str({text})"
+        return self.text_of(text, t)
+
+    def text_of(self, text, t):
+        """`str()` de un valor ya traducido."""
+        if t == STR:
+            return text
+        if t == INT:
+            return f"str({text})"
+        if t == BOOL:
+            return f'(if {text} {{ "True" }} else {{ "False" }})'
+        if t == FLOAT:
+            return f"{self.m.need('pyReprF')}({text})"
+        if isinstance(t, tuple) and t[0] in ("list", "tuple") and complete(t):
+            return f"{self.repr_helper(t)}({text})"
+        if is_obj(t) and t[1] in self.m.classes:
+            methods = self.m.classes[t[1]]["methods"]
+            for dunder in ("__str__", "__repr__"):
+                if dunder in methods and methods[dunder] in self.m.functions:
+                    return f"{methods[dunder]}({self.pool_args()}, {text})"
+            raise Unsupported(f"texto de un objeto de {t[1]} sin __str__ ni __repr__")
+        if is_opt(t) and complete(t[1]):
+            name = "pyStrO" + type_sig(t[1])
+            if name not in HELPERS:
+                inner = self.text_of("v", t[1])
+                HELPERS[name] = (f"fn {name}(o: {turi_type(t)}) -> str {{\n    if isNone(o) {{\n        return \"None\"\n"
+                                 f"    }}\n    let v = unwrapOr(o, {zero_of(t[1])})\n    return {inner}\n}}")
+                HELPER_DEPS[name] = [h for h in list(HELPERS) if h != name and h + "(" in HELPERS[name]]
+            return f"{self.m.need(name)}({text})"
+        raise Unsupported("convertir a texto un valor de este tipo")
+
+    def repr_of(self, text, t):
+        """`repr()` de un valor ya traducido."""
+        if is_obj(t) and t[1] in self.m.classes:
+            target = self.m.classes[t[1]]["methods"].get("__repr__")
+            if target and target in self.m.functions:
+                return f"{target}({self.pool_args()}, {text})"
+            raise Unsupported(f"repr de un objeto de {t[1]} sin __repr__")
+        if t == STR:
+            return f"{self.m.need('pyReprS')}({text})"
+        return self.text_of(text, t)
+
+    def repr_helper(self, t):
+        """Función Turi que da el texto de una lista o tupla como lo escribe Python."""
+        name = "pyStr" + type_sig(t)
+        if name in HELPERS:
+            return self.m.need(name)
+        if t[0] == "list":
+            item = self.element_text("a[i]", t[1])
+            body = f"""fn {name}(a: {turi_type(t)}) -> str {{
+    var sb = sbNew()
+    sbPush(mut sb, "[")
+    for i in 0..a.len() {{
+        if i > 0 {{
+            sbPush(mut sb, ", ")
+        }}
+        {item}
+    }}
+    sbPush(mut sb, "]")
+    return sbTake(mut sb)
+}}"""
+        else:
+            parts = [self.element_text(f"a.{i}", x) for i, x in enumerate(t[1])]
+            lines = ["    sbPush(mut sb, \"(\")"]
+            for i, part in enumerate(parts):
+                if i:
+                    lines.append("    sbPush(mut sb, \", \")")
+                lines.append("    " + part)
+            lines.append("    sbPush(mut sb, \",)\")" if len(parts) == 1 else "    sbPush(mut sb, \")\")")
+            body = f"fn {name}(a: {turi_type(t)}) -> str {{\n    var sb = sbNew()\n" + "\n".join(lines) + \
+                "\n    return sbTake(mut sb)\n}"
+        HELPERS[name] = body
+        deps = [h for h in ("pyReprF", "pyReprS") if h + "(" in body]
+        deps += [h for h in HELPERS if h.startswith("pyStr") and h != name and h + "(" in body]
+        HELPER_DEPS[name] = deps
+        return self.m.need(name)
+
+    def element_text(self, text, t):
+        if t == INT:
+            return f"sbPushInt(mut sb, {text})"
+        if t == BOOL:
+            return f'sbPush(mut sb, if {text} {{ "True" }} else {{ "False" }})'
+        if t == FLOAT:
+            return f"sbPush(mut sb, pyReprF({text}))"
+        if t == STR:
+            return f"sbPush(mut sb, pyReprS({text}))"
+        return f"sbPush(mut sb, {self.repr_helper(t)}({text}))"
+
+    def formatted(self, node, conversion, spec):
+        """Texto de `format(valor, spec)` (con conversión !r / !s previa) como Python."""
+        text, t = self.ex(node)
+        if conversion == ord("r") or conversion == ord("a"):
+            text, t = self.repr_of(text, t), STR
+        elif conversion == ord("s"):
+            text, t = self.text_of(text, t), STR
+        if not spec:
+            return self.text_of(text, t)
+        fields = parse_spec(spec)
+        if fields is None or fields["z"] or fields["type"] in ("c", "n"):
+            raise Unsupported("especificación de formato no admitida: " + spec)
+        if fields["fill"] is not None and not (fields["fill"].isascii() and fields["fill"].isprintable()):
+            raise Unsupported("relleno fuera de ASCII")
+        width = int(fields["width"]) if fields["width"] else 0
+        prec = int(fields["prec"]) if fields["prec"] is not None else -1
+        align = fields["align"]
+        fill = fields["fill"]
+        kind = fields["type"] or ""
+        if t == STR:
+            if fields["sign"] or fields["alt"] or fields["zero"] or fields["group"] or kind not in ("", "s") or \
+                    align == "=":
+                raise Unsupported("especificación de formato no admitida para un texto: " + spec)
+            if prec >= 0:
+                text = f"{self.m.need('pySliceStr')}({text}, 0, {prec})"
+            if width:
+                code = ord(align or "<")
+                text = f"{self.m.need('pyPad')}({text}, {width}, {code}, {string_literal(fill or ' ')})"
+            return text
+        if t == BOOL or t not in (INT, FLOAT):
+            raise Unsupported("especificación de formato para un valor que no es número ni texto")
+        if fields["zero"] and fields["group"] and width:
+            raise Unsupported("relleno con ceros y separador de miles")
+        if t == INT and kind in ("", "d", "x", "X", "o", "b"):
+            if prec >= 0:
+                raise Unsupported("precisión con un entero")
+            if fields["group"] == "," and kind not in ("", "d"):
+                raise Unsupported("separador ',' con base distinta de 10")
+        elif kind in ("", "e", "E", "f", "F", "g", "G", "%"):
+            pass
+        else:
+            raise Unsupported("tipo de formato no admitido para este valor: " + spec)
+        if fields["zero"] and align is None:
+            align, fill = "=", fill or "0"
+        elif fields["zero"]:
+            fill = fill or "0"
+        args = [str(ord(fill or " ")), str(ord(align or ">")),
+                str(ord(fields["sign"])) if fields["sign"] in ("+", " ") else "0", "1" if fields["alt"] else "0",
+                str(width),
+                "1" if fields["group"] == "," else "2" if fields["group"] == "_" else "0", str(prec),
+                str(ord(kind)) if kind else "0"]
+        if t == INT:
+            return f"{self.m.need('pyFmtI')}({text}, {', '.join(args)})"
+        return f"{self.m.need('pyFmtF')}({text}, {', '.join(args)})"
+
+    def str_format(self, fmt, args, keywords):
+        """`"...".format(...)` con el texto de formato escrito en el programa."""
+        import string
+        values = {}
+        for i, a in enumerate(args):
+            if isinstance(a, ast.Starred):
+                raise Unsupported("format con *")
+            values[i] = a
+        for kw in keywords:
+            if kw.arg is None:
+                raise Unsupported("format con **")
+            values[kw.arg] = kw.value
+        # Python calcula los argumentos una vez, en orden, antes de formatear.
+        bound = {}
+        for key, node in values.items():
+            if isinstance(node, (ast.Name, ast.Constant)):
+                bound[key] = node
+            else:
+                text, t = self.ex(node)
+                name = self.m.fresh("f")
+                self.out(f"let {name} = {text}")
+                self.env[name] = t
+                self.lambda_names.add(name)
+                bound[key] = ast.Name(name, ast.Load())
+        parts, auto = [], 0
+        try:
+            pieces = list(string.Formatter().parse(fmt))
+        except ValueError:
+            raise Unsupported("texto de format mal formado") from None
+        for literal, field, spec, conversion in pieces:
+            if literal:
+                parts.append(string_literal(literal))
+            if field is None:
+                continue
+            if field == "":
+                key, auto = auto, auto + 1
+            elif field.isdigit():
+                key = int(field)
+            elif field.isidentifier():
+                key = field
+            else:
+                raise Unsupported("format con acceso a atributos o índices")
+            if key not in bound or "{" in (spec or ""):
+                raise Unsupported("format con un campo que no está o con especificación anidada")
+            parts.append(self.formatted(bound[key], ord(conversion) if conversion else -1, spec or ""))
+        if not parts:
+            return '""'
+        return parts[0] if len(parts) == 1 else "(" + " + ".join(parts) + ")"
+
+    def percent_format(self, fmt, right):
+        """`"..." % valores` con el texto de formato escrito en el programa."""
+        import re
+        items = right.elts if isinstance(right, ast.Tuple) else [right]
+        if not isinstance(right, ast.Tuple) and isinstance(self.ty(right), tuple):
+            raise Unsupported("formato con % de una tupla guardada en una variable")
+        bound = []
+        for node in items:
+            if isinstance(node, (ast.Name, ast.Constant)):
+                bound.append(node)
+            else:
+                text, t = self.ex(node)
+                name = self.m.fresh("f")
+                self.out(f"let {name} = {text}")
+                self.env[name] = t
+                self.lambda_names.add(name)
+                bound.append(ast.Name(name, ast.Load()))
+        parts, at, k = [], 0, 0
+        pattern = re.compile(r"%(?P<flags>[-+ #0]*)(?P<width>\d+)?(?:\.(?P<prec>\d+))?(?P<type>[diouxXeEfFgGcrsa%])")
+        for m in pattern.finditer(fmt):
+            if fmt[at:m.start()]:
+                parts.append(string_literal(fmt[at:m.start()]))
+            at = m.end()
+            kind = m.group("type")
+            if kind == "%":
+                if m.group(0) != "%%":
+                    raise Unsupported("formato con % mal formado")
+                parts.append('"%"')
+                continue
+            if k >= len(bound):
+                raise Unsupported("formato con % con menos valores que campos")
+            node = bound[k]
+            k += 1
+            flags, width, prec = m.group("flags"), m.group("width") or "", m.group("prec")
+            t = self.ty(node)
+            if kind in "rsa":
+                text = self.formatted(node, ord("r") if kind in "ra" else ord("s"), "")
+                if prec is not None:
+                    text = f"{self.m.need('pySliceStr')}({text}, 0, {prec})"
+                if width:
+                    text = f"{self.m.need('pyPad')}({text}, {width}, {ord('<' if '-' in flags else '>')}, \" \")"
+                parts.append(text)
+                continue
+            if kind == "c" or (kind in "diouxX" and t != INT) or t not in (INT, FLOAT):
+                raise Unsupported("formato con % no admitido para este valor")
+            if kind in "diu" and prec is not None:
+                raise Unsupported("precisión con %d")
+            spec = ("<" if "-" in flags else "") + ("+" if "+" in flags else " " if " " in flags else "") + \
+                ("#" if "#" in flags else "") + ("0" if "0" in flags and "-" not in flags else "") + \
+                width + (f".{prec}" if prec is not None else "") + ("d" if kind in "iu" else kind)
+            parts.append(self.formatted(node, -1, spec))
+        if fmt[at:]:
+            parts.append(string_literal(fmt[at:]))
+        literal = pattern.sub("", fmt)
+        if k != len(bound) or "%" in literal:
+            raise Unsupported("formato con % con más valores que campos o mal formado")
+        if not parts:
+            return '""'
+        return parts[0] if len(parts) == 1 else "(" + " + ".join(parts) + ")"
+
+    def joined_str(self, e):
+        parts = []
+        for v in e.values:
+            if isinstance(v, ast.Constant):
+                if self.m.exact and not v.value.isascii():
+                    raise Unsupported("texto no ASCII")
+                parts.append(string_literal(v.value))
+            elif isinstance(v, ast.FormattedValue):
+                spec = ""
+                if v.format_spec is not None:
+                    if not all(isinstance(x, ast.Constant) for x in v.format_spec.values):
+                        raise Unsupported("especificación de formato calculada")
+                    spec = "".join(x.value for x in v.format_spec.values)
+                if self.m.exact or spec or v.conversion != -1:
+                    parts.append(self.formatted(v.value, v.conversion, spec))
+                else:
+                    parts.append(self.as_text(v.value))
+            else:
+                raise Unsupported("formato en cadena f")
+        if not parts:
+            return '""'
+        return parts[0] if len(parts) == 1 else "(" + " + ".join(parts) + ")"
 
     def truthy_paren(self, text, t, node):
         if t == BOOL or isinstance(node, (ast.Compare, ast.BoolOp)):
@@ -1271,6 +3404,7 @@ class Function:
 
     def lambda_text(self, e, types=None):
         names = [a.arg for a in e.args.args]
+        self.lambda_names |= set(names)
         saved = dict(self.env)
         for name, t in zip(names, types or []):
             self.env[name] = t
@@ -1282,9 +3416,20 @@ class Function:
         parts = []
         left = e.left
         for op, right in zip(e.ops, e.comparators):
+            for side in (left, right):
+                if isinstance(side, ast.Name) and side.id in self.intfloat:
+                    self.arith.add(id(side))
             a, at = self.ex(left)
             b, bt = self.ex(right)
             if isinstance(op, (ast.In, ast.NotIn)):
+                if self.m.exact:
+                    inner = bt if bt == STR else self.elem(bt) if isinstance(right, ast.Name) or \
+                        not isinstance(right, (ast.List, ast.Tuple, ast.Set)) else at
+                    if at not in (INT, STR, BOOL) or repr(inner) != repr(at):
+                        raise Unsupported("in con tipos distintos o con flotantes")
+                    if isinstance(right, (ast.List, ast.Tuple, ast.Set)) and \
+                            any(repr(self.ty(x)) != repr(at) for x in right.elts):
+                        raise Unsupported("in con una lista de tipos distintos")
                 if isinstance(bt, tuple) and bt[0] in ("dict", "set"):
                     text = f"{b}.has({a})"
                 elif isinstance(right, (ast.List, ast.Tuple, ast.Set)):
@@ -1292,15 +3437,37 @@ class Function:
                 else:
                     text = f"{b}.contains({a})"
                 parts.append(text if isinstance(op, ast.In) else f"!{text}")
+            elif is_obj(at) and (b == "None" or is_obj(bt)) and \
+                    (isinstance(op, (ast.Is, ast.IsNot)) or (isinstance(op, (ast.Eq, ast.NotEq)) and
+                                                              not self.has_eq(at, bt))):
+                other = "-1" if b == "None" else b
+                parts.append(f"{a} {'==' if isinstance(op, (ast.Is, ast.Eq)) else '!='} {other}")
+            elif is_obj(at) and is_obj(bt) and isinstance(op, (ast.Eq, ast.NotEq)):
+                text = f"{self.m.classes[at[1]]['methods']['__eq__']}({self.pool_args()}, {a}, {b})"
+                parts.append(text if isinstance(op, ast.Eq) else f"!{text}")
+            elif isinstance(op, (ast.Is, ast.IsNot)) and b == "None" and is_opt(at) and \
+                    not (isinstance(left, ast.Name) and left.id in self.nullable):
+                parts.append(f"{'isNone' if isinstance(op, ast.Is) else 'isSome'}({a})")
             elif isinstance(op, (ast.Is, ast.IsNot)) or (b == "None" and isinstance(op, (ast.Eq, ast.NotEq))):
                 if not (isinstance(left, ast.Name) and left.id in self.nullable and b == "None"):
                     raise Unsupported("is / is not")
                 parts.append(("" if isinstance(op, (ast.Is, ast.Eq)) else "!") + f"{left.id}IsNone")
             else:
+                strict = self.m.exact and self.m.strict_float and {at, bt} == {INT, FLOAT}
+                widen = self.m.need("pyF53") if strict else "float"
                 if at == INT and bt == FLOAT:
-                    a = f"float({a})"
+                    a = f"{widen}({a})"
                 if at == FLOAT and bt == INT:
-                    b = f"float({b})"
+                    b = f"{widen}({b})"
+                if self.m.exact:
+                    numbers = at in (INT, FLOAT) and bt in (INT, FLOAT)
+                    equality = isinstance(op, (ast.Eq, ast.NotEq))
+                    lists = isinstance(at, tuple) and repr(at) == repr(bt) and at[0] == "list" and \
+                        at[1] in (INT, STR, BOOL) and equality
+                    empty = equality and (a == "[]" or b == "[]") and isinstance(at if b == "[]" else bt, tuple)
+                    if not (numbers or (at == STR and bt == STR) or (at == BOOL and bt == BOOL and equality)
+                            or lists or empty):
+                        raise Unsupported("comparación entre tipos distintos o no admitidos")
                 sym = {ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">="}[type(op)]
                 if isinstance(at, tuple) or isinstance(bt, tuple):
                     if sym in ("==", "!=") and (b in ("[]",) or a in ("[]",)):
@@ -1333,10 +3500,36 @@ class Function:
         return self.m.need(name)
 
     def binop(self, e):
+        op = e.op
+        if isinstance(op, ast.Mod) and self.m.exact and isinstance(e.left, ast.Constant) and \
+                isinstance(e.left.value, str):
+            return self.percent_format(e.left.value, e.right)
+        if self.m.exact and self.intfloat and isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
+            # Un entero que acompaña a un flotante se convierte antes de operar: da lo mismo que
+            # tenerlo ya como flotante. Con otro entero no: ahí cuenta la marca.
+            for side, other in ((e.left, e.right), (e.right, e.left)):
+                if isinstance(side, ast.Name) and side.id in self.intfloat and self.ty(other) == FLOAT and \
+                        not (isinstance(other, ast.Name) and other.id in self.intfloat):
+                    self.arith.add(id(side))
         a, at = self.ex(e.left)
         b, bt = self.ex(e.right)
-        op = e.op
         floats = FLOAT in (at, bt)
+        if self.m.exact:
+            numbers = at in (INT, FLOAT) and bt in (INT, FLOAT)
+            texts = isinstance(op, ast.Add) and at == STR and bt == STR
+            joined = isinstance(op, ast.Add) and is_mutable(at) and at[0] == "list" and repr(at) == repr(bt) \
+                and complete(at)
+            times = isinstance(op, ast.Mult) and (
+                (at == STR and bt == INT) or (at == INT and bt == STR) or
+                (isinstance(e.left, ast.List) and bt == INT) or (isinstance(e.right, ast.List) and at == INT))
+            if not (numbers or texts or joined or times):
+                raise Unsupported("operación entre tipos distintos o no admitidos")
+            if isinstance(op, (ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift)) and floats:
+                raise Unsupported("operación de bits con flotantes")
+            if times and (isinstance(e.left, ast.List) or isinstance(e.right, ast.List)):
+                display = e.left if isinstance(e.left, ast.List) else e.right
+                if len(display.elts) != 1 or holds_mutable(self.ty(display.elts[0])):
+                    raise Unsupported("repetir una lista de listas: en Python todas serían la misma")
         if floats:
             a, b = self.coerce((a, at), FLOAT), self.coerce((b, bt), FLOAT)
         if isinstance(op, ast.Add):
@@ -1358,9 +3551,25 @@ class Function:
                 raise Unsupported("repetir una lista de varios elementos")
             return f"({a} * {b})"
         if isinstance(op, ast.Div):
+            if self.m.exact and self.m.strict_float:
+                if floats and constant_number(e.right):
+                    return f"({a} / {b})"
+                return f"{self.m.need('pyFDiv')}({a}, {b})" if floats else f"{self.m.need('pyTrueDiv')}({a}, {b})"
+            if self.m.exact:
+                top = a if floats else f"float({a})"
+                bottom = b if floats else f"float({b})"
+                if constant_number(e.right):
+                    return f"({top} / {bottom})"  # divisor literal distinto de cero: no hay error posible
+                if constant_number(e.left) and not self.lazy:
+                    return f"({top} / {bottom})"  # divisor cero: lo apunta el procesador (ver fp_checks)
+                if self.sticky(f"({b} == {'0.0' if floats else '0'})", e.right):
+                    return f"({top} / {bottom})"
+                return f"{self.m.need('pyFDiv')}({top}, {bottom})"
             return f"({self.coerce((a, at), FLOAT) if at != FLOAT else a} / {self.coerce((b, bt), FLOAT) if bt != FLOAT else b})" \
                 if not floats else f"({a} / {b})"
         if isinstance(op, ast.FloorDiv):
+            if floats and self.m.exact:
+                raise Unsupported("división entera de flotantes")
             if floats:
                 return f"floor({a} / {b})"
             if self.never_negative(e.left) and self.never_negative(e.right):
@@ -1376,17 +3585,35 @@ class Function:
             return f"{self.m.need('pyMod')}({a}, {b})"
         if isinstance(op, ast.Pow):
             if floats or isinstance(e.right, ast.UnaryOp):
+                if self.m.exact:
+                    if not floats:
+                        raise Unsupported("potencia con exponente negativo")
+                    return f"{self.m.need('pyFPow')}({a}, {b})"
                 if b in ("0.5",):
                     return f"sqrt({a})"
                 return f"pow({self.coerce((a, at), FLOAT)}, {self.coerce((b, bt), FLOAT)})"
             return f"{self.m.need('pyPow')}({a}, {b})"
+        if self.m.exact and isinstance(op, (ast.LShift, ast.RShift)):
+            return f"{self.m.need('pyShl' if isinstance(op, ast.LShift) else 'pyShr')}({a}, {b})"
         sym = {ast.BitAnd: "&", ast.BitOr: "|", ast.BitXor: "^", ast.LShift: "<<", ast.RShift: ">>"}.get(type(op))
         if sym:
+            if self.m.exact and floats:
+                raise Unsupported("operación de bits con flotantes")
             return f"({a} {sym} {b})"
         raise Unsupported("operador no admitido")
 
     def subscript(self, e):
         base, bt = self.ex(e.value)
+        if self.m.exact:
+            if not (bt == STR or (isinstance(bt, tuple) and bt[0] in ("list", "dict", "tuple"))):
+                raise Unsupported("índice sobre un tipo no deducido")
+            if not isinstance(e.slice, ast.Slice) and bt[0] != "dict" and self.ty(e.slice) != INT:
+                raise Unsupported("índice que no es un entero")
+            if isinstance(e.slice, ast.Slice) and any(
+                    x is not None and self.ty(x) != INT for x in (e.slice.lower, e.slice.upper, e.slice.step)):
+                raise Unsupported("corte con límites que no son enteros")
+            if bt[0] == "tuple" and not isinstance(e.slice, ast.Constant):
+                raise Unsupported("tupla con índice variable")
         if isinstance(e.slice, ast.Slice):
             sl = e.slice
             if sl.step is not None:
@@ -1414,8 +3641,18 @@ class Function:
         if isinstance(bt, tuple) and bt[0] == "tuple" and isinstance(e.slice, ast.Constant):
             return f"{base}.{e.slice.value}"
         if isinstance(bt, tuple) and bt[0] == "dict":
-            return f"{base}[{self.ex(e.slice)[0]}]"
-        if not (isinstance(e.value, ast.Name) or base.isidentifier()) and not self.never_negative(e.slice):
+            key = self.ex(e.slice)[0]
+            if self.m.exact:
+                # En Python una clave que no está es un error; aquí detiene la función.
+                if not isinstance(e.slice, (ast.Name, ast.Constant)) and any(
+                        isinstance(n, ast.Call) for n in ast.walk(e.slice)):
+                    raise Unsupported("clave de diccionario con llamadas")
+                if repr(self.ty(e.slice)) != repr(bt[1]) or bt[1] not in (INT, STR, BOOL):
+                    raise Unsupported("clave de diccionario de otro tipo")
+                return f"{self.m.need('pyNeed')}({base}.has({key}), {base}[{key}])"
+            return f"{base}[{key}]"
+        if not (isinstance(e.value, ast.Name) or base.isidentifier()) and not self.never_negative(e.slice) and \
+                not self.m.exact:
             return f"{self.m.need('pyCharAt' if bt == STR else 'pyGet')}({base}, {self.ex(e.slice)[0]})"
         index = self.index(e.slice, base, bt)
         if bt == STR:
@@ -1471,64 +3708,138 @@ class Function:
         args = e.args
         if isinstance(f, ast.Name):
             name = f.id
+            if name in getattr(self.m, "unit_names", ()) and name not in self.m.functions:
+                raise Unsupported(f"no se pudieron deducir los tipos con que se llama a {name}")
+            if name.startswith("C_") and name[2:] in self.m.classes:
+                cls = name[2:]
+                init = self.m.classes[cls]["methods"].get("__init__")
+                if init is None:
+                    if args or e.keywords:
+                        raise Unsupported(f"{cls}() con argumentos y sin __init__")
+                    return f"f_{cls}__new({self.pool_args()})"
+                return self.unit_call(init, args, e.keywords, skip=1, emit_as=f"f_{cls}__new")
+            if name == "isinstance" and len(args) == 2:
+                return self.isinstance_text(args[0], args[1])
+            if name in self.m.functions and (e.keywords or len(args) != len(self.m.functions[name][0])):
+                return self.unit_call(name, args, e.keywords)
             if name in self.m.functions:
                 params, _ = self.m.functions[name]
+                if e.keywords or len(args) != len(params):
+                    raise Unsupported(f"llamada a {name} con argumentos con nombre o en otro número")
+                if self.m.exact and name in self.m.ret_alias and e is not getattr(self, "result_unused", None):
+                    raise Unsupported(f"usa el resultado de {name}, que es la misma lista que recibió")
                 muts = self.m.mut_params.get(name, set())
                 texts = []
                 for a, (pname, pt) in zip(args, params):
-                    text, at = self.ex(a)
+                    if pt == "none":
+                        if not (isinstance(a, ast.Constant) and a.value is None):
+                            raise Unsupported(f"llamada a {name} con un argumento de otro tipo")
+                        continue
                     if pname in muts:
-                        if not isinstance(a, ast.Name):
+                        if subscript_base(a)[0] is None:
                             raise Unsupported(f"{name} modifica su argumento: pásale una variable")
+                        text, at = self.place(a)
                         text = "mut " + text
+                    else:
+                        text, at = self.ex(a)
+                    if self.m.exact and (at is None or not refine(at, pt)[1]):
+                        raise Unsupported(f"llamada a {name} con un argumento de otro tipo")
                     texts.append(self.coerce((text, at), pt))
+                if self.m.pools:
+                    texts = [self.pool_args()] + texts
                 return f"{name}({', '.join(texts)})"
+            if self.m.exact and e.keywords and name not in ("min", "max", "sorted"):
+                raise Unsupported(f"{name} con argumentos con nombre")
             if name == "len":
+                self.unordered += 1
                 text, t = self.ex(args[0])
+                self.unordered -= 1
+                if self.m.exact and not (t == STR or is_mutable(t)):
+                    raise Unsupported("len de un tipo no deducido")
                 return f"{text}.len()"
             if name == "range":
                 a, b, step = self.range_args(e)
                 return f"{self.m.need('pyRange')}({a}, {b}, {step})"
             if name == "str":
-                text, t = self.ex(args[0])
-                return text if t == STR else f"str({text})"
+                if not args:
+                    return '""'
+                return self.as_text(args[0])
+            if name == "repr" and len(args) == 1 and self.m.exact:
+                if isinstance(args[0], ast.Constant) and args[0].value is None:
+                    return '"None"'
+                return self.repr_of(*self.ex(args[0]))
+            if name == "format" and self.m.exact and 1 <= len(args) <= 2:
+                if len(args) == 2 and not (isinstance(args[1], ast.Constant) and isinstance(args[1].value, str)):
+                    raise Unsupported("format con especificación calculada")
+                return self.formatted(args[0], -1, args[1].value if len(args) == 2 else "")
             if name == "int":
                 text, t = self.ex(args[0])
+                if self.m.exact and len(args) != 1:
+                    raise Unsupported("int con base")
                 if t == STR:
-                    return f"parseInt({text})"
+                    return f"{self.m.need('pyParseInt')}({text})" if self.m.exact else f"parseInt({text})"
                 if t == FLOAT:
-                    return f"int({text})"
+                    return f"{self.m.need('pyIntOfFloat')}({text})" if self.m.exact else f"int({text})"
                 if t == BOOL:
                     return f"(if {text} {{ 1 }} else {{ 0 }})"
+                if t != INT and self.m.exact:
+                    raise Unsupported("int() de un tipo no deducido")
                 return text
             if name == "float":
                 text, t = self.ex(args[0])
                 if isinstance(args[0], ast.Constant) and args[0].value in ("inf", "-inf"):
-                    return "1.0e308" if args[0].value == "inf" else "-1.0e308"
+                    return "(1.0e308 * 1.0e308)" if args[0].value == "inf" else "(-1.0e308 * 1.0e308)"
+                if self.m.exact and t not in (INT, FLOAT):
+                    raise Unsupported("float() de un texto")
                 return f"parseFloat({text})" if t == STR else (text if t == FLOAT else f"float({text})")
             if name == "bool":
                 text, t = self.ex(args[0])
                 return self.truthy(text, t)
             if name == "abs":
                 text, t = self.ex(args[0])
+                if self.m.exact and t not in (INT, FLOAT):
+                    raise Unsupported("abs de algo que no es un número")
+                if self.m.exact and t == INT:
+                    return f"{self.m.need('pyAbs')}({text})"
                 return f"abs({text})"
             if name == "ord":
-                return f"ord({self.ex(args[0])[0]})"
+                return f"{self.m.need('pyOrd')}({self.ex(args[0])[0]})" if self.m.exact else f"ord({self.ex(args[0])[0]})"
             if name == "chr":
-                return f"chr({self.ex(args[0])[0]})"
+                return f"{self.m.need('pyChr')}({self.ex(args[0])[0]})" if self.m.exact else f"chr({self.ex(args[0])[0]})"
             if name in ("min", "max"):
                 if e.keywords:
                     return self.best_by_key(e, name)
                 if len(args) == 1:
-                    return f"{self.listy(args[0])}.{name}()"
+                    elem = self.elem(self.ty(args[0]))
+                    if self.m.exact and elem not in (INT, FLOAT):
+                        raise Unsupported(f"{name} de una lista de este tipo")
+                    if self.m.exact and elem == FLOAT:
+                        return f"{self.m.need('pyMinFloats' if name == 'min' else 'pyMaxFloats')}({self.listy(args[0])})"
+                    return f"{self.listy(args[0], ordered=False)}.{name}()"
                 pairs = [self.ex(a) for a in args]
+                if self.m.exact and (len({repr(t) for _, t in pairs}) != 1 or pairs[0][1] not in (INT, FLOAT)):
+                    raise Unsupported(f"{name} con argumentos de tipos distintos o no numéricos")
                 want = FLOAT if FLOAT in [t for _, t in pairs] else None
                 texts = [self.coerce(p, want) for p in pairs]
+                fn = name
+                if self.m.exact and want == FLOAT:
+                    fn = self.m.need("pyMinF" if name == "min" else "pyMaxF")
                 out = texts[0]
                 for text in texts[1:]:
-                    out = f"{name}({out}, {text})"
+                    out = f"{fn}({out}, {text})"
                 return out
             if name == "sum":
+                elem = self.elem(self.ty(args[0]))
+                if self.m.exact:
+                    if len(args) != 1 or elem not in (INT, FLOAT):
+                        raise Unsupported("sum de un tipo no admitido o con valor inicial")
+                    if elem == FLOAT and not self.m.strict_float:
+                        return f"{self.m.need('pySumF')}({self.listy(args[0])})"
+                    if elem == FLOAT:
+                        # Desde Python 3.12 la suma de flotantes lleva compensación de errores.
+                        fn = "pySumFloat" if sys.version_info >= (3, 12) else "pySumFloatPlain"
+                        return f"{self.m.need(fn)}({self.listy(args[0])})"
+                    return f"{self.listy(args[0], ordered=False)}.sum()"
                 if len(args) == 2:
                     return f"({self.ex(args[1])[0]} + {self.listy(args[0])}.sum())"
                 return f"{self.listy(args[0])}.sum()"
@@ -1543,7 +3854,9 @@ class Function:
                     text = f"{source}.{name}(|{gen.target.id}| {self.cond(arg.elt)})"
                     self.env = saved
                     return text
-                return f"{self.listy(arg)}.{name}(|tzb| tzb)"
+                if self.m.exact and self.elem(self.ty(arg)) != BOOL:
+                    raise Unsupported(f"{name} de valores que no son booleanos")
+                return f"{self.listy(arg, ordered=False)}.{name}(|tzb| tzb)"
             if name == "sorted":
                 text = self.sorted_text(args[0])
                 for kw in e.keywords:
@@ -1556,6 +3869,8 @@ class Function:
                 return text
             if name == "reversed":
                 text, t = self.ex(args[0])
+                if self.m.exact and not (t == STR or (isinstance(t, tuple) and t[0] == "list")):
+                    raise Unsupported("reversed de algo que no es una lista ni un texto")
                 return f"{text}.chars().reverse()" if t == STR else f"{text}.reverse()"
             if name == "list":
                 if not args:
@@ -1564,14 +3879,19 @@ class Function:
                 if t == STR:
                     return f"{text}.chars()"
                 return self.iterable(args[0]) if not (isinstance(t, tuple) and t[0] == "list") else text
-            if name == "tuple":
+            if name == "tuple" and not self.m.exact:
                 return self.ex(args[0])[0]
             if name == "pow" and len(args) == 3:
+                if self.m.exact and any(self.ty(a) != INT for a in args):
+                    raise Unsupported("pow con módulo y argumentos que no son enteros")
                 return self.m.need("pyPowMod") + "(" + ", ".join(self.ex(a)[0] for a in args) + ")"
             if name == "pow" and len(args) == 2:
                 return self.binop(ast.BinOp(args[0], ast.Pow(), args[1]))
-            if name == "round" and len(args) == 1:
+            if name == "round" and len(args) == 1 and not self.m.exact:
                 return f"int(round({self.ex(args[0])[0]}))"
+            if self.m.exact and name in ("bin", "hex", "divmod", "ord", "chr", "range") and \
+                    any(self.ty(a) != (STR if name == "ord" else INT) for a in args):
+                raise Unsupported(f"{name} con un argumento de otro tipo")
             if name == "bin":
                 return f"{self.m.need('pyBin')}({self.ex(args[0])[0]})"
             if name == "hex":
@@ -1584,8 +3904,9 @@ class Function:
                 fn = {INT: "pySetInt", STR: "pySetStr"}.get(elem)
                 if not fn:
                     raise Unsupported("set de un tipo no admitido")
-                return f"{self.m.need(fn)}({self.listy(args[0])})"
-            if name == "format" and len(args) == 2 and isinstance(args[1], ast.Constant):
+                return f"{self.m.need(fn)}({self.listy(args[0], ordered=False)})"
+            if name == "format" and len(args) == 2 and isinstance(args[1], ast.Constant) and \
+                    (not self.m.exact or self.ty(args[0]) == INT):
                 fn = {"x": "pyHexDigits", "b": "pyBinDigits"}.get(args[1].value)
                 if fn:
                     return f"{self.m.need(fn)}({self.ex(args[0])[0]})"
@@ -1596,13 +3917,104 @@ class Function:
             return self.method(e)
         raise Unsupported("llamada no admitida")
 
+    def pool_args(self):
+        return ", ".join(f"mut tzP_{c}" for c in self.m.pools)
+
+    def has_eq(self, a, b):
+        return is_obj(a) and is_obj(b) and a[1] == b[1] and a[1] in self.m.classes and \
+            self.m.classes[a[1]]["methods"].get("__eq__") in self.m.functions
+
+    def isinstance_text(self, value, kinds):
+        names = kinds.elts if isinstance(kinds, ast.Tuple) else [kinds]
+        t = self.ty(value)
+        text, _ = self.ex(value)
+        options = []
+        for k in names:
+            if isinstance(k, ast.Name) and k.id.startswith("C_") and k.id[2:] in self.m.classes:
+                if is_obj(t) and t[1] == k.id[2:]:
+                    options.append(f"({text} != -1)")
+            elif isinstance(k, ast.Name) and k.id in ("int", "float", "str", "bool", "list", "tuple"):
+                kind = {"int": INT, "float": FLOAT, "str": STR, "bool": BOOL}.get(k.id)
+                if kind is not None and t == kind:
+                    options.append("true")
+                elif k.id == "int" and t == BOOL:
+                    options.append("true")  # bool es un int en Python
+                elif k.id in ("list", "tuple") and isinstance(t, tuple) and t[0] == k.id:
+                    options.append("true")
+            else:
+                raise Unsupported("isinstance con una clase desconocida")
+        return "(" + " || ".join(options) + ")" if options else "false"
+
+    def unit_call(self, name, args, keywords, skip=0, emit_as=None, receiver=None):
+        """Llamada a una función de la unidad con argumentos con nombre y valores por defecto.
+        `skip`: parámetros del principio que no vienen de la llamada (el `self` de un constructor, que
+        no existe todavía); `receiver`: el objeto de un método."""
+        if name not in self.m.functions:
+            raise Unsupported(f"no se pudieron deducir los tipos con que se llama a {name}")
+        params, _ = self.m.functions[name]
+        node = self.m.defs_by_name.get(name)
+        names = [p for p, _ in params]
+        given = [None] * len(params)
+        if receiver is not None:
+            given[0] = receiver
+        start = skip if receiver is None else 1
+        if len(args) > len(params) - start:
+            raise Unsupported(f"llamada a {name} con argumentos de más")
+        for i, a in enumerate(args):
+            given[start + i] = a
+        for kw in keywords:
+            key = "v_" + kw.arg if kw.arg else None
+            if key not in names or given[names.index(key)] is not None:
+                raise Unsupported(f"llamada a {name} con un argumento con nombre desconocido")
+            given[names.index(key)] = kw.value
+        if node is not None:
+            defaults = node.args.defaults
+            for i, default in enumerate(defaults):
+                at = len(names) - len(defaults) + i
+                if given[at] is None:
+                    if not isinstance(default, (ast.Constant, ast.UnaryOp)):
+                        raise Unsupported(f"valor por defecto calculado en {name}")
+                    given[at] = default
+        texts = []
+        muts = self.m.mut_params.get(name, set())
+        for i, ((pname, pt), a) in enumerate(zip(params, given)):
+            if i < skip:
+                continue
+            if a is None:
+                raise Unsupported(f"llamada a {name} sin el argumento {pname[2:]}")
+            if isinstance(a, str):
+                texts.append(a)
+                continue
+            if pt == "none":
+                if not (isinstance(a, ast.Constant) and a.value is None):
+                    raise Unsupported(f"llamada a {name} con un argumento de otro tipo")
+                continue
+            if pname in muts:
+                if subscript_base(a)[0] is None:
+                    raise Unsupported(f"{name} modifica su argumento: pásale una variable")
+                text, at = self.place(a)
+                text = "mut " + text
+            elif isinstance(a, ast.Constant) and a.value is None and is_obj(pt):
+                text, at = "-1", pt
+            else:
+                text, at = self.ex(a)
+            if self.m.exact and (at is None or not refine(at, pt)[1]):
+                raise Unsupported(f"llamada a {name} con un argumento de otro tipo")
+            texts.append(self.coerce((text, at), pt))
+        if self.m.pools:
+            texts = [self.pool_args()] + texts
+        return f"{emit_as or name}({', '.join(texts)})"
+
     def best_by_key(self, e, name):
         """`min(xs, key=f)` y `max(xs, key=f)`: un bucle que conserva el primero de los mejores."""
-        if len(e.args) != 1 or len(e.keywords) != 1 or e.keywords[0].arg != "key" or self.lazy:
+        if len(e.args) != 1 or len(e.keywords) != 1 or e.keywords[0].arg != "key" or self.lazy:  # noqa
             raise Unsupported(f"{name} con key en esta posición")
         key = e.keywords[0].value
         elem = self.elem(self.ty(e.args[0]))
         seq, best, cand = self.m.fresh("s"), self.m.fresh("b"), self.m.fresh("c")
+        source_type = self.ty(e.args[0])
+        if isinstance(source_type, tuple) and source_type[0] in ("dict", "set"):
+            self.order_free(False)
         self.out(f"let {seq} = {self.listy(e.args[0])}")
         self.out(f"var {best} = {seq}[0]")
 
@@ -1619,7 +4031,9 @@ class Function:
                 body = ast.Call(ast.Attribute(ast.Name(var, ast.Load()), key.attr, ast.Load()), [], [])
             else:
                 raise Unsupported("key no admitida")
+            self.lazy += 1  # la clave se calcula una vez por elemento, dentro del bucle
             parts = [self.ex(x)[0] for x in (body.elts if isinstance(body, ast.Tuple) else [body])]
+            self.lazy -= 1
             self.env, self.subst = saved_env, saved_subst
             return parts
 
@@ -1635,10 +4049,17 @@ class Function:
         self.out("}")
         return best
 
-    def listy(self, node):
+    def listy(self, node, ordered=True):
+        """Texto de algo recorrible. `ordered=False`: a quien lo pide le da igual el orden."""
+        self.unordered += not ordered
         text, t = self.ex(node)
+        self.unordered -= not ordered
         if t == STR:
             return f"{text}.chars()"
+        if isinstance(t, tuple) and t[0] in ("set", "dict") and ordered:
+            self.order_free(False)
+        if self.m.exact and not (isinstance(t, tuple) and t[0] in ("list", "set", "dict") and complete(t)):
+            raise Unsupported("se esperaba una lista de tipo conocido")
         if isinstance(t, tuple) and t[0] == "set":
             return f"setItems({text})"
         if isinstance(t, tuple) and t[0] == "dict":
@@ -1648,7 +4069,9 @@ class Function:
         return text
 
     def sorted_text(self, node):
+        self.unordered += 1
         text, t = self.ex(node)
+        self.unordered -= 1
         if t == STR:
             return f"{self.m.need('pySortedStr')}({text}.chars())"
         elem = self.elem(t)
@@ -1656,32 +4079,113 @@ class Function:
             text = f"setItems({text})"
         if isinstance(t, tuple) and t[0] == "dict":
             text = f"{text}.keys()"
-        fn = {INT: "pySortedInt", STR: "pySortedStr", FLOAT: "pySortedFloat"}.get(elem)
+        fn = {INT: "pySortedInt", STR: "pySortedStr",
+              FLOAT: "pySortedFloatExact" if self.m.exact else "pySortedFloat"}.get(elem)
         if not fn:
             raise Unsupported("sorted de un tipo no admitido")
         return f"{self.m.need(fn)}({text})"
 
+    def is_random(self, node):
+        """`random` (el módulo, no una variable) o una variable que guarda un random.Random."""
+        if isinstance(node, ast.Name) and node.id == "random" and node.id not in self.env:
+            return True
+        return self.ty(node) == RANDOM
+
+    def random_call(self, e):
+        """Las funciones de random.py con las mismas fórmulas (ver tools/pyfront/azar.c)."""
+        f, attr = e.func, e.func.attr
+        if e.keywords:
+            raise Unsupported(f"random.{attr} con argumentos con nombre")
+        if isinstance(f.value, ast.Name) and f.value.id == "random" and f.value.id not in self.env:
+            self.m.uses_global_random = True
+            h = "0"
+        else:
+            h = self.ex(f.value)[0]
+        args = [self.ex(a) for a in e.args]
+        need = self.m.need
+        if attr == "random" and not args:
+            return f"{need('pyRnd')}({h})"
+        if attr in ("randint", "randrange", "getrandbits", "seed") and any(t != INT for _, t in args):
+            raise Unsupported(f"random.{attr} con argumentos que no son enteros")
+        if attr == "randint" and len(args) == 2:
+            return f"{need('pyRandrange')}({h}, {args[0][0]}, {args[1][0]} + 1, 1)"
+        if attr == "randrange" and len(args) == 1:
+            return f"{need('pyRndBelow')}({h}, {args[0][0]})"
+        if attr == "randrange" and len(args) in (2, 3):
+            step = args[2][0] if len(args) == 3 else "1"
+            return f"{need('pyRandrange')}({h}, {args[0][0]}, {args[1][0]}, {step})"
+        if attr == "getrandbits" and len(args) == 1:
+            return f"{need('pyRndBits')}({h}, {args[0][0]})"
+        if attr == "seed" and len(args) == 1:
+            return f"{need('pyRndSeed')}({h}, {args[0][0]})"
+        if attr == "uniform" and len(args) == 2:
+            if any(t not in (INT, FLOAT) for _, t in args):
+                raise Unsupported("random.uniform con argumentos que no son números")
+            a, b = [self.coerce(x, FLOAT) if x[1] == FLOAT else f"{need('pyF53')}({x[0]})" for x in args]
+            return f"{need('pyRndUniform')}({h}, {a}, {b})"
+        if attr == "choice" and len(args) == 1:
+            seq, st = args[0]
+            if not (st == STR or (isinstance(st, tuple) and st[0] == "list" and complete(st))):
+                raise Unsupported("random.choice de algo que no es una lista ni un texto")
+            return f"{need('pyChoiceS' if st == STR else 'pyChoice')}({h}, {seq})"
+        if attr == "shuffle" and len(args) == 1:
+            base, bt = self.place(e.args[0])
+            if not (isinstance(bt, tuple) and bt[0] == "list"):
+                raise Unsupported("random.shuffle de algo que no es una lista")
+            return f"{need('pyShuffle')}({h}, mut {base})"
+        raise Unsupported(f"random.{attr}")
+
     def method(self, e):
         f = e.func
         attr = f.attr
+        if self.is_random(f.value):
+            return self.random_call(e)
+        owner = self.ty(f.value)
+        if is_obj(owner) and owner[1] in self.m.classes:
+            target = self.m.classes[owner[1]]["methods"].get(attr)
+            if not target:
+                raise Unsupported(f"{owner[1]} no tiene el método {attr}")
+            obj, _ = self.ex(f.value)
+            return self.unit_call(target, e.args, e.keywords, receiver=obj)
         if isinstance(f.value, ast.Name) and f.value.id == "math":
             args = [self.ex(a) for a in e.args]
             a0 = self.coerce(args[0], FLOAT) if args else ""
+            strict = self.m.exact and self.m.strict_float
+            if self.m.exact and (e.keywords or any(t not in (INT, FLOAT) for _, t in args)):
+                raise Unsupported("math." + attr + " con argumentos no numéricos")
             if attr == "sqrt":
-                return f"sqrt({a0})"
+                if not self.m.exact or (not strict and self.sticky(f"({a0} < 0.0)", e.args[0])):
+                    return f"sqrt({a0})"
+                return f"{self.m.need('pySqrt')}({a0})"
+            if attr in ("sin", "cos") and len(args) == 1:
+                if not self.m.exact or (not strict and self.sticky(f"isInf({a0})", e.args[0])):
+                    return f"{attr}({a0})"
+                return f"{self.m.need('pySin' if attr == 'sin' else 'pyCos')}({a0})"
+            if attr in ("isnan", "isinf") and len(args) == 1:
+                return f"{'isNaN' if attr == 'isnan' else 'isInf'}({a0})"
             if attr == "floor":
-                return f"int(floor({a0}))"
+                return f"{self.m.need('pyIntOfFloat')}(floor({a0}))" if self.m.exact else f"int(floor({a0}))"
             if attr == "ceil":
-                return f"int(ceil({a0}))"
+                return f"{self.m.need('pyIntOfFloat')}(ceil({a0}))" if self.m.exact else f"int(ceil({a0}))"
             if attr == "gcd":
+                if self.m.exact and (len(args) != 2 or any(t != INT for _, t in args)):
+                    raise Unsupported("math.gcd con argumentos que no son dos enteros")
                 return f"{self.m.need('pyGcd')}({args[0][0]}, {args[1][0]})"
             if attr == "fabs":
                 return f"abs({a0})"
             if attr == "pow":
-                return f"pow({a0}, {self.coerce(args[1], FLOAT)})"
-            if attr == "isqrt":
+                fn = self.m.need("pyFPow") if self.m.exact else "pow"
+                return f"{fn}({a0}, {self.coerce(args[1], FLOAT)})"
+            if attr == "isqrt" and not self.m.exact:
                 return f"int(floor(sqrt(float({args[0][0]}))))"
             raise Unsupported("math." + attr)
+        if attr == "pop" and not e.args and isinstance(self.ty(f.value), tuple) and self.ty(f.value)[0] == "list":
+            return f"{self.place(f.value)[0]}.pop()"
+        if attr in ("keys", "values"):
+            if self.m.exact and not self.unordered:
+                self.order_free(False)
+        if attr == "format" and self.m.exact and isinstance(f.value, ast.Constant) and isinstance(f.value.value, str):
+            return self.str_format(f.value.value, e.args, e.keywords)
         base, bt = self.ex(f.value)
         args = [self.ex(a) for a in e.args]
         a = [x[0] for x in args]
@@ -1690,28 +4194,49 @@ class Function:
                 arg = e.args[0]
                 at = self.ty(arg)
                 text = a[0]
+                if self.m.exact and not (at == STR or (isinstance(at, tuple) and at[0] == "list" and at[1] == STR)):
+                    raise Unsupported("join de algo que no es una lista de textos")
                 if at == STR:
                     text = f"{text}.chars()"
                 elif isinstance(at, tuple) and at[1] not in (STR, None):
                     text = f"{text}.map(|tzj| str(tzj))"
                 return f"{text}.join({base})"
+            if self.m.exact and (bt != STR or any(t != STR for _, t in args)):
+                raise Unsupported(f"str.{attr} con argumentos que no son textos")
+            if e.keywords:
+                raise Unsupported("argumentos con nombre en un método de cadena")
+            if self.m.exact and attr in ("replace", "count", "split") and a:
+                if attr == "replace" and len(a) == 2:
+                    return f"{self.m.need('pyReplace')}({base}, {a[0]}, {a[1]})"
+                if attr == "count" and len(a) == 1:
+                    return f"{self.m.need('pyCount')}({base}, {a[0]})"
+                if attr == "split" and len(a) == 1:
+                    return f"{self.m.need('pySplit')}({base}, {a[0]})"
+                raise Unsupported(f"str.{attr} con más argumentos")
             simple = {"upper": "upper", "lower": "lower", "strip": "trim", "startswith": "startsWith",
                       "endswith": "endsWith", "replace": "replace", "count": "count"}
             if attr in simple and not (attr == "strip" and a):
+                if self.m.exact and len(a) > (2 if attr == "replace" else 1 if attr != "upper" and attr != "lower" and attr != "strip" else 0):
+                    raise Unsupported(f"str.{attr} con más argumentos")
                 return f"{base}.{simple[attr]}({', '.join(a)})"
             if attr == "split":
                 return f"{base}.words()" if not a else f"{base}.split({a[0]})"
-            if attr in ("find", "index"):
+            if attr == "find" and len(a) == 1:
                 return f"{base}.indexOf({a[0]})"
+            if attr == "index" and len(a) == 1:
+                return f"{self.m.need('pyFound')}({base}.indexOf({a[0]}))" if self.m.exact else f"{base}.indexOf({a[0]})"
             checks = {"isdigit": "pyIsDigit", "isalpha": "pyIsAlpha", "isupper": "pyIsUpper", "islower": "pyIsLower",
                       "isspace": "pyIsSpace", "swapcase": "pySwapCase"}
             if attr in checks:
                 return f"{self.m.need(checks[attr])}({base})"
             if attr == "isalnum":
-                return f"({self.m.need('pyIsDigit')}({base}) || {self.m.need('pyIsAlpha')}({base}))"
+                return f"{self.m.need('pyIsAlnum')}({base})"
             raise Unsupported("método de cadena no admitido: " + attr)
         if isinstance(bt, tuple) and bt[0] == "dict":
             if attr == "get":
+                if self.m.exact and (len(args) != 2 or repr(args[0][1]) != repr(bt[1]) or
+                                     repr(args[1][1]) != repr(bt[2])):
+                    raise Unsupported("dict.get sin valor por defecto o con otro tipo")
                 if len(a) == 2 and a[1] in ("0", '""', "0.0", "false"):
                     return f"{base}[{a[0]}]"
                 if len(a) == 2:
@@ -1721,12 +4246,17 @@ class Function:
                 return f"{base}.keys()"
             if attr == "values":
                 return f"{base}.values()"
+            if attr == "items":
+                raise Unsupported("dict.items() fuera de un for")
             raise Unsupported("método de diccionario no admitido: " + attr)
         if isinstance(bt, tuple) and bt[0] == "list":
             if attr == "pop" and not a:
                 return f"{base}.pop()"
+            if self.m.exact and attr in ("index", "count") and (
+                    len(args) != 1 or bt[1] not in (INT, STR, BOOL) or repr(args[0][1]) != repr(bt[1])):
+                raise Unsupported(f"list.{attr} con un valor de otro tipo o con flotantes")
             if attr == "index":
-                return f"{base}.indexOf({a[0]})"
+                return f"{self.m.need('pyFound')}({base}.indexOf({a[0]}))" if self.m.exact else f"{base}.indexOf({a[0]})"
             if attr == "count":
                 return f"{base}.count(|tzc| tzc == {a[0]})"
             if attr == "copy":
@@ -1735,6 +4265,20 @@ class Function:
         if attr == "copy":
             return base
         raise Unsupported("método no admitido: " + attr)
+
+
+def float_literal(v):
+    if v != v:
+        raise Unsupported("NaN literal")
+    if v in (float("inf"), float("-inf")):
+        return "(1.0e308 * 1.0e308)" if v > 0 else "(-1.0e308 * 1.0e308)"
+    text = repr(v)
+    if "e" in text:
+        mantissa, exponent = text.split("e")
+        if "." not in mantissa:
+            mantissa += ".0"
+        text = mantissa + "e" + str(int(exponent))
+    return text
 
 
 def string_literal(value):
