@@ -1,3 +1,69 @@
+extern "C" {
+    fn tzx_queens_has_bmi2() -> i32
+    fn tzx_queens_grid(data: u64, selected: u64) -> u64
+}
+
+fn pyQueensAvailableFive(cols: u32, left: u32, right: u32) -> u64 {
+    // El paso de 13 bits deja dos separadores para una fila de hasta once columnas.
+    let vertical = wrappingMul(u64(cols), u64(0x10008004002001))
+    let rising = wrappingMul(u64(left & u32(2047)), u64(0x100040010004001)) & u64(0x7f03fc1ff0ffc7ff)
+    let falling = wrappingMul(u64(right), u64(0x1001001001001)) & u64(0x7f07f87fc7fe7ff)
+    return vertical & ~(rising | falling)
+}
+
+fn pyQueensProjectedRows(grid: u64, column: u64) -> int {
+    let selected = grid & (u64(0x108421) << column)
+    return int((wrappingMul(selected, u64(0x111110)) >> (u64(20) + column)) & u64(31))
+}
+
+raw fn pyQueensPackedCount5(cols: u32, available: u64, words: Ptr<u64>) -> u64 {
+    // La resta pone a cero el separador de una fila si no tiene casillas disponibles.
+    let limits = u64(0x8004002001000800)
+    if (wrappingSub(available | limits, u64(0x10008004002001)) & limits) != limits {
+        return u64(0)
+    }
+    let grid = tzx_queens_grid(available, wrappingMul(u64(cols), u64(0x10008004002001)))
+    let suffix = int(cols >> (ctz(cols) + u32(1)))
+    let distances = ptrRead(ptrAdd(words, TZ_QUEENS_GAP_BASE + suffix / 4))
+    let gap = int((distances >> u64(16 * (suffix & 3))) & u64(1023))
+    let index0 = 128 + 2 * pyQueensProjectedRows(grid, u64(0))
+    let index1 = 192 + 2 * pyQueensProjectedRows(grid, u64(1))
+    let index2 = 256 + 2 * pyQueensProjectedRows(grid, u64(2))
+    let index3 = 320 + 2 * pyQueensProjectedRows(grid, u64(3))
+    let index4 = 384 + 2 * pyQueensProjectedRows(grid, u64(4))
+    let low = ptrRead(ptrAdd(words, index0)) & ptrRead(ptrAdd(words, index1)) &
+              ptrRead(ptrAdd(words, index2)) & ptrRead(ptrAdd(words, index3)) & ptrRead(ptrAdd(words, index4))
+    let high = ptrRead(ptrAdd(words, index0 + 1)) & ptrRead(ptrAdd(words, index1 + 1)) &
+               ptrRead(ptrAdd(words, index2 + 1)) & ptrRead(ptrAdd(words, index3 + 1)) &
+               ptrRead(ptrAdd(words, index4 + 1))
+    return u64(popcnt(low & ptrRead(ptrAdd(words, 448 + 2 * gap)))) +
+           u64(popcnt(high & ptrRead(ptrAdd(words, 449 + 2 * gap))))
+}
+
+raw fn pyQueensPackedFive(cols: u32, left: u32, right: u32, words: Ptr<u64>) -> u64 {
+    return pyQueensPackedCount5(cols, pyQueensAvailableFive(cols, left, right), words)
+}
+
+raw fn pyQueensPackedSix(cols: u32, left: u32, right: u32, words: Ptr<u64>) -> u64 {
+    var pending = cols & ~(left | right)
+    if pending == u32(0) {
+        return u64(0)
+    }
+    let suffix = pyQueensAvailableFive(cols, left << u32(1), right >> u32(1))
+    var total = u64(0)
+    while pending != u32(0) {
+        let rest = pending & wrappingSub(pending, u32(1))
+        let queen = pending ^ rest
+        let omit = ptrRead(ptrAdd(words, TZ_QUEENS_THREAT_BASE + int(ctz(queen))))
+        let count = pyQueensPackedCount5(cols ^ queen, suffix & ~omit, words)
+        total = wrappingAdd(total, count)
+        pending = rest
+    }
+    return total
+}
+
+TZ_QUEENS_SHORT_LEVELS
+
 fn pyQueensRows5(available: u64, column: u32) -> int {
     // El producto reúne cinco bits separados por doce posiciones.
     let mask = (available >> u64(column)) & u64(0x1001001001001)
@@ -106,7 +172,32 @@ fn pyQueensSearch(cols: u32, left: u32, right: u32, remaining: int, table: [u64]
     return total
 }
 
-fn pyQueens(n: int) -> int {
+trusted fn pyQueensStart(cols: u32, left: u32, right: u32, remaining: int, table: [u64], packed: bool) -> u64 {
+    if packed {
+        let words = slicePtr(table)
+        var result = u64(0)
+        // La búsqueda de hasta once columnas llama aquí con cinco a diez filas pendientes.
+        raw {
+            if remaining == 5 {
+                result = pyQueensPackedFive(cols, left, right, words)
+            } else if remaining == 6 {
+                result = pyQueensPackedSix(cols, left, right, words)
+            } else if remaining == 7 {
+                result = pyQueensShort7(cols, left, right, words)
+            } else if remaining == 8 {
+                result = pyQueensShort8(cols, left, right, words)
+            } else if remaining == 9 {
+                result = pyQueensShort9(cols, left, right, words)
+            } else {
+                result = pyQueensShort10(cols, left, right, words)
+            }
+        }
+        return result
+    }
+    return pyQueensSearch(cols, left, right, remaining, table)
+}
+
+trusted fn pyQueens(n: int) -> int {
     if n < 4 {
         return if n == 0 || n == 1 { 1 } else { 0 }
     }
@@ -114,6 +205,7 @@ fn pyQueens(n: int) -> int {
         TZ_QUEENS_TAIL_TABLE
     ]
     let cols = (u32(1) << u32(n)) - u32(1)
+    let packed = n >= 6 && n <= 11 && tzx_queens_has_bmi2() != i32(0)
     let half = (u32(1) << u32(n / 2)) - u32(1)
     var choices = half
     var solutions = u64(0)
@@ -121,7 +213,7 @@ fn pyQueens(n: int) -> int {
         let rest = choices & wrappingSub(choices, u32(1))
         let queen = choices ^ rest
         choices = rest
-        solutions = solutions + pyQueensSearch(cols ^ queen, queen << u32(1), queen >> u32(1), n - 1, table)
+        solutions = solutions + pyQueensStart(cols ^ queen, queen << u32(1), queen >> u32(1), n - 1, table, packed)
     }
     if n % 2 != 0 {
         // Con la primera reina en el centro, el reflejo se aplica a la segunda fila.
@@ -134,8 +226,8 @@ fn pyQueens(n: int) -> int {
             let rest = choices & wrappingSub(choices, u32(1))
             let queen = choices ^ rest
             choices = rest
-            solutions = solutions + pyQueensSearch(restCols ^ queen, (left | queen) << u32(1),
-                                                   (right | queen) >> u32(1), n - 2, table)
+            solutions = solutions + pyQueensStart(restCols ^ queen, (left | queen) << u32(1),
+                                                  (right | queen) >> u32(1), n - 2, table, packed)
         }
     }
     return int(solutions * u64(2))

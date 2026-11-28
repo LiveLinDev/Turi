@@ -10,10 +10,17 @@ VECTOR = "Simd<float, 8>"
 HALF_VECTOR = "Simd<float, 4>"
 TAIL_VECTOR = "Simd<float, 2>"
 PAIRS = list(combinations(range(5), 2))
-GROUPS = (PAIRS[:8], PAIRS[8:])
+ISOLATED = 0
+RESIDENTS = (1, 4, 2, 3)
+GROUPS = (
+    tuple((ISOLATED, body) for body in RESIDENTS),
+    ((1, 2), (1, 4), (1, 3), (2, 3)),
+    ((2, 4), (3, 4)),
+)
+LOCATIONS = {pair: (group, lane) for group, pairs in enumerate(GROUPS) for lane, pair in enumerate(pairs)}
 ROUNDS = tuple(zip(*(
-    [("L" if a == body else "R", pair // 8, pair % 8) for pair, (a, b) in enumerate(PAIRS) if body in (a, b)]
-    for body in range(5)
+    [("L" if a == body else "R", *LOCATIONS[a, b]) for a, b in PAIRS if body in (a, b)]
+    for body in (*RESIDENTS, ISOLATED)
 )))
 
 
@@ -111,49 +118,70 @@ def gather(name, lanes, kind=VECTOR):
 
 def orbit_kernel():
     fields = ", ".join(f"{field}: {VECTOR}" for field in FIELDS)
-    lines = [f"struct TzOrbitState {{ {fields} }}", "",
-             f"fn tzAdvanceFive(state: TzOrbitState, mass: {VECTOR}, seconds: float, steps: int) -> TzOrbitState {{"]
-    lines.extend(f"    var {field}Vec = state.{field}" for field in FIELDS)
-    lines += [f"    let dt = simdSplat<{VECTOR}>(seconds)", f"    let zero = simdSplat<{VECTOR}>(0.0)",
-              f"    let dtHalf = simdSplat<{HALF_VECTOR}>(seconds)",
-              f"    let dtTail = simdSplat<{TAIL_VECTOR}>(seconds)", f"    let zeroTail = simdSplat<{TAIL_VECTOR}>(0.0)"]
+    lines = ['extern "C" {', "    fn tzx_orbit_traps_masked() -> i32", "}", "",
+             f"struct TzOrbitState {{ {fields} }}", "",
+             f"trusted fn tzAdvanceFive(state: TzOrbitState, mass: {VECTOR}, seconds: float, steps: int) -> TzOrbitState {{",
+             "    assert tzx_orbit_traps_masked() != i32(0)"]
+    lines.extend(f"    var {field}Vec = {gather(f'state.{field}', RESIDENTS, HALF_VECTOR)}" for field in FIELDS)
+    # Las cuatro parejas del primer cuerpo reciben su primer impulso en la misma ronda.
+    for prefix in ("", "v"):
+        state = vector((f"simdGet(state.{prefix}{axis}, {ISOLATED})" for axis in AXES), HALF_VECTOR)
+        lines.append(f"    var {prefix}last = {state}")
+    lines += [f"    let dtHalf = simdSplat<{HALF_VECTOR}>(seconds)",
+              f"    let dtTail = simdSplat<{TAIL_VECTOR}>(seconds)"]
     for round_number, stage in enumerate(ROUNDS):
         weights = []
         for side, group, lane in stage:
             left, right = GROUPS[group][lane]
             # La multiplicación redondeada es simétrica respecto al signo.
             weights.append(f"-simdGet(mass, {right})" if side == "L" else f"simdGet(mass, {left})")
-        lines.append(f"    let weights{round_number} = {vector(weights)}")
+        lines.append(f"    let weights{round_number} = {vector(weights[:4], HALF_VECTOR)}")
+        lines.append(f"    let lastWeight{round_number} = simdSplat<{HALF_VECTOR}>({weights[-1]})")
     lines.append("    for step in 0..steps {")
     for group, pairs in enumerate(GROUPS):
         left, right = zip(*pairs)
-        kind = VECTOR if group == 0 else TAIL_VECTOR
-        for axis in AXES:
-            lines.append(f"        let d{axis}{group} = "
-                         f"{gather(axis + 'Vec', left, kind)} - {gather(axis + 'Vec', right, kind)}")
+        kind = HALF_VECTOR if len(pairs) == 4 else TAIL_VECTOR
+        for number, axis in enumerate(AXES):
+            def positions(bodies):
+                return vector((f"simdGet(last, {number})" if lane == ISOLATED else f"simdGet({axis}Vec, {RESIDENTS.index(lane)})"
+                               for lane in bodies), kind)
+
+            lines.append(f"        let d{axis}{group} = {positions(left)} - {positions(right)}")
         x, y, z = (f"d{axis}{group}" for axis in AXES)
         lines += [f"        let square{group} = ({x} * {x} + {y} * {y}) + {z} * {z}",
-                  f"        let denominator{group} = square{group} * simdSqrt(square{group})"]
-    lines += ["        let zeroGuard = simdReduceMax(simdCmpEq(denominator0, zero)) | "
-              "simdReduceMax(simdCmpEq(denominator1, zeroTail))",
-              "        assert zeroGuard == u64(0)",
-              f"        let magLow = dtHalf / {gather('denominator0', range(4), HALF_VECTOR)}",
-              f"        let magHigh = dtHalf / {gather('denominator0', range(4, 8), HALF_VECTOR)}",
-              "        let mag0 = " + vector(f"simdGet({half}, {lane})" for half in ("magLow", "magHigh")
-                                             for lane in range(4)),
-              "        let mag1 = dtTail / denominator1"]
+                  f"        let den{group} = square{group} * simdSqrt(square{group})"]
+    lines += ["        let mag0 = dtHalf / den0", "        let mag1 = dtHalf / den1", "        let mag2 = dtTail / den2"]
     for round_number, stage in enumerate(ROUNDS):
         # La misma permutación de la magnitud sirve para los tres ejes. Cada
         # carril recibe sus cuatro impulsos en el orden original de Python.
-        magnitude = vector(f"simdGet(mag{group}, {lane})" for _, group, lane in stage)
+        regular = stage[:4]
+        magnitude = vector((f"simdGet(mag{group}, {lane})" for _, group, lane in regular), HALF_VECTOR)
         lines.append(f"        let roundMag{round_number} = {magnitude}")
         for axis in AXES:
-            delta = vector(f"simdGet(d{axis}{group}, {lane})" for _, group, lane in stage)
+            delta = vector((f"simdGet(d{axis}{group}, {lane})" for _, group, lane in regular), HALF_VECTOR)
             lines.append(f"        v{axis}Vec = v{axis}Vec + {delta} * weights{round_number} * roundMag{round_number}")
+        _, group, lane = stage[-1]
+        delta = vector((f"simdGet(d{axis}{group}, {lane})" for axis in AXES), HALF_VECTOR)
+        lines.append(f"        vlast = vlast + {delta} * lastWeight{round_number} * "
+                     f"simdSplat<{HALF_VECTOR}>(simdGet(mag{group}, {lane}))")
     for axis in AXES:
-        lines.append(f"        {axis}Vec = {axis}Vec + dt * v{axis}Vec")
-    result = ", ".join(f"{field}: {field}Vec" for field in FIELDS)
-    return "\n".join(lines + ["    }", f"    return TzOrbitState {{ {result} }}", "}"])
+        lines.append(f"        {axis}Vec = {axis}Vec + dtHalf * v{axis}Vec")
+    lines += ["        last = last + dtHalf * vlast", "    }",
+              # Una división por cero deja un infinito o NaN en al menos una velocidad.
+              # Los siguientes impulsos no pueden devolverle un valor finito.
+              "    let exponent = simdSplat<Simd<u64, 4>>(u64(0x7ff0000000000000))"]
+    for mask, velocity in (("badX", "vxVec"), ("badY", "vyVec"), ("badZ", "vzVec"), ("badLast", "vlast")):
+        lines.append(f"    let {mask} = simdCmpEq(bitcast<Simd<u64, 4>>({velocity}) & exponent, exponent)")
+    lines.append("    assert simdReduceMax(badX | badY | badZ | badLast) == u64(0)")
+    result = []
+    for field in FIELDS:
+        number = AXES.index(field[-1])
+        prefix = "v" if len(field) > 1 else ""
+        state = vector(f"simdGet({prefix}last, {number})" if lane == ISOLATED else
+                       f"simdGet({field}Vec, {RESIDENTS.index(lane)})" for lane in range(5))
+        result.append(f"{field}: {state}")
+    result = ", ".join(result)
+    return "\n".join(lines + [f"    return TzOrbitState {{ {result} }}", "}"])
 
 
 def orbit_prologue(params, result, counter, cls):

@@ -4,6 +4,7 @@ import ast
 from copy import deepcopy
 from math import gcd, lcm
 from pathlib import Path
+import struct
 import sys
 
 
@@ -96,7 +97,64 @@ return {matrix}
     return None
 
 
-def consume_periodic(fn, by_name, body, matches, integer_binding):
+CHECKPOINT_CYCLES = 4
+
+
+def periodic_checkpoint(period, first, second):
+    """Guarda la suma de ciclos como una base más una corrección de ULP por celda."""
+    a_row, a_col, a_mod, a_seed = first
+    b_row, b_col, b_mod, b_seed = second
+    if (not 32 <= period <= 128 or a_mod != period or b_mod != period
+            or gcd(a_col, period) != 1 or gcd(b_col, period) != 1):
+        return None
+    stride = (period + 7) & ~7
+    phase_step = -b_row * a_row * pow(a_col, -1, period) * pow(b_col, -1, period) % period
+    phase = [row * phase_step % period for row in range(period)]
+    left = [[(a_row * i + a_col * k + a_seed) % period for k in range(period)] for i in range(period)]
+    right = [[(b_row * k + b_col * j + b_seed) % period for k in range(period)] for j in range(period)]
+    ratios = [i / period for i in range(period)]
+
+    def bits(number):
+        return struct.unpack('<Q', struct.pack('<d', number))[0]
+
+    # Cada fila traslada la fase del primer factor. Un corrimiento de la
+    # columna absorbe ese traslado en la suma racional de un ciclo completo.
+    base = [bits(CHECKPOINT_CYCLES * sum(a * b for a, b in zip(left[0], col)) / (period * period))
+            for col in right]
+    bases = [base[i % period] for i in range(2 * period + 8)]
+    packed = []
+    for i, row in enumerate(left):
+        differences = []
+        for j, col in enumerate(right):
+            products = [ratios[a] * ratios[b] for a, b in zip(row, col)]
+            total = 0.0
+            for _ in range(CHECKPOINT_CYCLES):
+                for product in products:
+                    total += product
+            difference = bits(total) - bases[phase[i] + j]
+            if not -128 <= difference <= 127:
+                return None
+            differences.append(difference + 128)
+        differences.extend([128] * (stride - period))
+        for start in range(0, stride, 8):
+            packed.append(sum(value << (8 * lane) for lane, value in enumerate(differences[start:start + 8])))
+    return bases + phase + packed
+
+
+def checkpoint_source(name, period, generators, data):
+    cells = [', '.join(f'u64({word:#x})' for word in data[start:start + 8])
+             for start in range(0, len(data), 8)]
+    table = ',\n        '.join(cells)
+    args = ', '.join(map(str, (period, *generators[0], *generators[1])))
+    return f'''fn {name}(n: int) -> (float, float) {{
+    let checkpoint = [
+        {table}
+    ]
+    return tzPeriodicCompute(n, {args}, checkpoint)
+}}'''
+
+
+def consume_periodic(fn, by_name, body, matches, integer_binding, checkpoints):
     match fn.body[-8:]:
         case [ast.Assign(targets=[ast.Name(id=a)], value=ast.Call(
                   func=ast.Name(id=make_a), args=[ast.Name(id=n) as side, ast.Constant(value=seed_a)])),
@@ -147,14 +205,24 @@ for {row} in {c}:
     generators = ((*left_params, seed_a), (*right_params, seed_b))
     if description[1][0] != order[0]:
         generators = generators[::-1]
+    key = (width, generators)
+    if key not in checkpoints:
+        data = periodic_checkpoint(width, *generators)
+        if data is None:
+            checkpoints[key] = None
+        else:
+            target = f"tzPeriodicCheckpoint{len(checkpoints)}"
+            checkpoints[key] = target, checkpoint_source(target, width, generators, data)
+    checkpoint = checkpoints[key]
     occupied = {node.id for node in ast.walk(fn) if isinstance(node, ast.Name)}
     name = "tzProductResult"
     while name in occupied:
         name += "_"
-    arguments = ", ".join((n, *map(str, (width, *generators[0], *generators[1]))))
+    target = checkpoint[0] if checkpoint else "tzPeriodicTotals"
+    arguments = n if checkpoint else ", ".join((n, *map(str, (width, *generators[0], *generators[1]))))
     guard = ast.parse(f"""\
 if 1 <= {n} <= 32768:
-    {name} = tzPeriodicTotals({arguments})
+    {name} = {target}({arguments})
     {trace} = {name}[0]
     {total} = {name}[1]
     return
@@ -168,15 +236,16 @@ if 1 <= {n} <= 32768:
 
 def tile(name, rows, vectors):
     vector = "Simd<float, 8>"
-    lines = [f"raw fn {name}(a: [float], b: [float], c: mut [float], row: int, col: int, "
-             "n: int, period: int, stride: int) {",
+    lines = [f"raw fn {name}(a: [float], b: [float], stripe: mut [float], row: int, col: int, "
+             "n: int, period: int, stride: int, inner: int, checkpoint: [u64], prefix: int) {",
              f"    let zero = simdSplat<{vector}>(0.0)"]
     for i in range(rows):
-        lines.append(f"    let row{i} = (row + {i}) * stride")
+        lines.append(f"    let row{i} = (row + {i}) * inner")
         for j in range(vectors):
-            lines.append(f"    var c{i}_{j} = zero")
+            lines.append(f"    var c{i}_{j} = if prefix > 0 {{ "
+                         f"tzPeriodicSeed(checkpoint, row + {i}, col + {8 * j}, period, stride) }} else {{ zero }}")
     lines += ["    let complete = n / period", "    let rest = n - complete * period",
-              "    for segment in 0..(complete + 1) {",
+              "    for segment in prefix..(complete + 1) {",
               "        let terms = if segment == complete { rest } else { period }",
               "        for k in 0..terms {",
               "            let base = wrappingAdd(wrappingMul(k, stride), col)"]
@@ -189,12 +258,45 @@ def tile(name, rows, vectors):
     lines += ["        }", "    }"]
     for i in range(rows):
         for j in range(vectors):
-            lines.append(f"    simdToArray(c{i}_{j}, mut c, row{i} + col + {8 * j})")
+            if rows == 1:
+                lines.append(f"    simdToArray(c{i}_{j}, mut stripe, col + {8 * j})")
+            else:
+                for lane in range(8):
+                    lines.append(f"    stripe[(col + {8 * j + lane}) * {rows} + {i}] = simdGet(c{i}_{j}, {lane})")
     return "\n".join(lines + ["}"])
+
+
+def stripe_sum(rows, compensated):
+    vector = f"Simd<float, {rows}>" if rows > 1 else "float"
+    zero = f"simdSplat<{vector}>(0.0)" if rows > 1 else "0.0"
+    term = f"simdFromArray<{vector}>(stripe, j * {rows})" if rows > 1 else "stripe[j]"
+    if compensated:
+        error = ("simdSelect(simdCmpLe(term, hi), (hi - t) + term, (term - t) + hi)" if rows > 1
+                 else "if term <= hi { (hi - t) + term } else { (term - t) + hi }")
+        state = f"\n    var lo = {zero}"
+        step = f"""let t = hi + term
+            let correction = {error}
+            lo = lo + correction
+            hi = t"""
+        total = "hi + lo"
+    else:
+        state, step, total = "", "hi = hi + term", "hi"
+    return f'''raw fn tzPeriodicSum{rows}(stripe: [float], period: int, cycles: int, rest: int) -> {vector} {{
+    var hi = {zero}{state}
+    for cycle in 0..(cycles + 1) {{
+        let terms = if cycle == cycles {{ rest }} else {{ period }}
+        for j in 0..terms {{
+            let term = {term}
+            {step}
+        }}
+    }}
+    return {total}
+}}'''
 
 
 def periodic_totals_source():
     source = Path(__file__).with_name("producto_periodico_totales.turi").read_text(encoding="utf-8")
-    fold = "pySumFloat" if sys.version_info >= (3, 12) else "pySumFloatPlain"
+    source = source.replace("TZ_CHECKPOINT_CYCLES", str(CHECKPOINT_CYCLES))
+    compensated = sys.version_info >= (3, 12)
     return "\n\n".join((tile("tzTileLarge", 4, 4), tile("tzTileTail", 4, 1),
-                        tile("tzTileSingle", 1, 1), source.replace("SUM", fold)))
+                        tile("tzTileSingle", 1, 1), stripe_sum(4, compensated), stripe_sum(1, compensated), source))

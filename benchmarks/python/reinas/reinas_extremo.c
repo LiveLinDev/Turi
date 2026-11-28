@@ -8,12 +8,27 @@
 #endif
 #ifdef TZ_REINAS_CINCO
 #include "reinas_cinco.h"
+#ifdef TZ_REINAS_FILAS_COMPARTIDAS
+#include "reinas_filas.h"
+#endif
 #endif
 
 static uint64_t search(uint32_t cols, uint32_t left, uint32_t right, int remaining) {
 #ifdef TZ_REINAS_TRES
     uint32_t available = cols & ~(left | right);
 #ifdef TZ_REINAS_CINCO
+#ifdef TZ_REINAS_FILAS_COMPARTIDAS
+    if (cols < 2048 && right < 2048) {
+        if (remaining == 5) return count_five_available(cols, available_five(cols, left, right));
+        if (remaining == 6) return count_six_shared(cols, left, right);
+#ifdef TZ_REINAS_NIVELES
+        if (remaining == 7) return count_seven_shared(cols, left, right);
+        if (remaining == 8) return count_eight_shared(cols, left, right);
+        if (remaining == 9) return count_nine_shared(cols, left, right);
+        if (remaining == 10) return count_ten_shared(cols, left, right);
+#endif
+    }
+#endif
     if (remaining == 5 && cols < 4096) return closed_five(cols, left, right);
 #endif
 #ifdef TZ_REINAS_CUATRO

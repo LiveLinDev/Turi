@@ -2229,7 +2229,7 @@ class Root:
         if module.captures or needs_memo:
             # El código Turi se detiene a los 256 niveles. Dejar margen para que la
             # versión Python tenga pila para la misma cadena de llamadas.
-            if not (3, 11) <= sys.version_info[:2] <= (3, 14):
+            if not (3, 11) <= sys.version_info[:2] <= (3, 15):
                 raise py2turi.Unsupported("límite de recursión de CPython desconocido")
             remaining = "py_recursion_remaining" if sys.version_info >= (3, 12) else "recursion_remaining"
             budget = 260

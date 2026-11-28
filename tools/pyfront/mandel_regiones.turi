@@ -23,6 +23,12 @@ fn tzMandelGap(begin: int, end: int, n: int, inverse: float, imaginary: float,
         checksum = wrappingAdd(wrappingMul(checksum, 923521), result.1) % 1000000007
         x = x + 32
     }
+    while x + 16 <= end {
+        let result = tzMandelPixels2(x, n, inverse, imaginary)
+        count = wrappingAdd(count, result.0)
+        checksum = wrappingAdd(wrappingMul(checksum, 961), result.1) % 1000000007
+        x = x + 16
+    }
     while x < end {
         let result = tzMandelPixels1(x, n, inverse, imaginary)
         count = wrappingAdd(count, result.0)
@@ -32,12 +38,69 @@ fn tzMandelGap(begin: int, end: int, n: int, inverse: float, imaginary: float,
     return (count, checksum)
 }
 
-fn tzMandelRow(n: int, inverse: float, imaginary: float, zones: [u16]) -> (int, int) {
-    let band = min(TZ_REGION_RESOLUTION - 1, int(abs(imaginary) * float(TZ_REGION_RESOLUTION)))
-    let end = int(zones[band + 1])
+fn tzMandelGapPair(begin: int, end: int, n: int, inverse: float, a: float, b: float,
+                     base: int, seedA: int, seedB: int) -> (int, int, int) {
+    var x = begin
+    var count = base
+    var checksumA = seedA
+    var checksumB = seedB
+    while x + 16 <= end {
+        let group = tzMandelPixelsPair2(x, n, inverse, a, b)
+        count = wrappingAdd(count, group.0)
+        checksumA = wrappingAdd(wrappingMul(checksumA, 961), group.1) % 1000000007
+        checksumB = wrappingAdd(wrappingMul(checksumB, 961), group.2) % 1000000007
+        x = x + 16
+    }
+    while x < end {
+        let group = tzMandelPixelsPair1(x, n, inverse, a, b)
+        count = wrappingAdd(count, group.0)
+        checksumA = wrappingAdd(wrappingMul(checksumA, 31), group.1) % 1000000007
+        checksumB = wrappingAdd(wrappingMul(checksumB, 31), group.2) % 1000000007
+        x = x + 8
+    }
+    return (count, checksumA, checksumB)
+}
+
+fn tzMandelBounds(n: int, inverse: float) -> [u64] {
     let stride = 1.0 / float(TZ_REGION_RESOLUTION)
-    let unit = stride / inverse
     let aligned = n & ~7
+    var bounds = repeat(u64(0), 2 * TZ_REGION_RESOLUTION + 1)
+    for cell in 0..(2 * TZ_REGION_RESOLUTION + 1) {
+        let index = wrappingMul(cell, n) >> TZ_REGION_SHIFT
+        let edge = float(cell) * stride - 1.5
+        // Conserva las mismas comparaciones f64 de los extremos de cada bloque.
+        // Para n <= 2^25, el redondeo puede afectar el borde de un solo bloque.
+        var first = index & ~7
+        if float(first) * inverse - 1.5 < edge {
+            first = first + 8
+        }
+        var stop = min(aligned, (index + 1) & ~7)
+        if stop > 0 && float(stop - 1) * inverse - 1.5 > edge {
+            stop = stop - 8
+        }
+        bounds[cell] = u64(first) | (u64(stop) << u64(32))
+    }
+    return bounds
+}
+
+fn tzMandelBand(imaginary: float) -> int {
+    return min(TZ_REGION_RESOLUTION - 1, int(abs(imaginary) * float(TZ_REGION_RESOLUTION)))
+}
+
+fn tzMandelRepeat(width: int, inside: bool, powers: [u64]) -> (int, int) {
+    if width < powers.len() {
+        let value = powers[width]
+        return (int(value & u64(0xffffffff)), if inside { int(value >> u64(32)) } else { 0 })
+    }
+    let factor = tzMandelFactor(width)
+    let bytes = if inside { wrappingMul(255, wrappingMul(factor + 1000000006, 233333335) % 1000000007) } else { 0 }
+    return (factor, bytes)
+}
+
+fn tzMandelRow(n: int, inverse: float, imaginary: float, zones: [u16],
+               powers: [u64], bounds: [u64]) -> (int, int) {
+    let band = tzMandelBand(imaginary)
+    let end = int(zones[band + 1])
     var x = 0
     var count = 0
     var checksum = 0
@@ -46,30 +109,68 @@ fn tzMandelRow(n: int, inverse: float, imaginary: float, zones: [u16]) -> (int, 
         let startCell = int(zones[at])
         let last = int(zones[at + 1])
         let stopCell = last >> 1
-        let left = float(startCell) * stride - 1.5
-        let right = float(stopCell) * stride - 1.5
-        var first = max(x, int(float(startCell) * unit) & ~7)
-        if float(first) * inverse - 1.5 < left {
-            first = first + 8
-        }
-        var stop = min(aligned, (int(float(stopCell) * unit) + 1) & ~7)
-        while stop > first && float(stop - 1) * inverse - 1.5 > right {
-            stop = stop - 8
-        }
-        if first >= stop || float(first) * inverse - 1.5 < left {
+        let first = max(x, int(bounds[startCell] & u64(0xffffffff)))
+        let stop = int(bounds[stopCell] >> u64(32))
+        if first >= stop {
             continue
         }
         let gap = tzMandelGap(x, first, n, inverse, imaginary, count, checksum)
         count = gap.0
         checksum = gap.1
-        let factor = tzMandelFactor((stop - first) / 8)
-        var bytes = 0
-        if (last & 1) != 0 {
+        let inside = (last & 1) != 0
+        let repeated = tzMandelRepeat((stop - first) / 8, inside, powers)
+        if inside {
             count = wrappingAdd(count, stop - first)
-            bytes = wrappingMul(255, wrappingMul(factor + 1000000006, 233333335) % 1000000007)
         }
-        checksum = wrappingAdd(wrappingMul(checksum, factor), bytes) % 1000000007
+        checksum = wrappingAdd(wrappingMul(checksum, repeated.0), repeated.1) % 1000000007
         x = stop
     }
     return tzMandelGap(x, n, n, inverse, imaginary, count, checksum)
+}
+
+fn tzMandelRowPair(n: int, inverse: float, a: float, b: float, band: int, zones: [u16],
+                   powers: [u64], bounds: [u64]) -> (int, int, int) {
+    let end = int(zones[band + 1])
+    var x = 0
+    var count = 0
+    var checksumA = 0
+    var checksumB = 0
+    for run in int(zones[band])..end {
+        let at = TZ_REGION_RESOLUTION + 1 + 2 * run
+        let startCell = int(zones[at])
+        let last = int(zones[at + 1])
+        let first = max(x, int(bounds[startCell] & u64(0xffffffff)))
+        let stop = int(bounds[last >> 1] >> u64(32))
+        if first >= stop {
+            continue
+        }
+        let gap = tzMandelGapPair(x, first, n, inverse, a, b, count, checksumA, checksumB)
+        count = gap.0
+        let inside = (last & 1) != 0
+        let repeated = tzMandelRepeat((stop - first) / 8, inside, powers)
+        if inside {
+            count = wrappingAdd(count, 2 * (stop - first))
+        }
+        checksumA = wrappingAdd(wrappingMul(gap.1, repeated.0), repeated.1) % 1000000007
+        checksumB = wrappingAdd(wrappingMul(gap.2, repeated.0), repeated.1) % 1000000007
+        x = stop
+    }
+    return tzMandelGapPair(x, n, n, inverse, a, b, count, checksumA, checksumB)
+}
+
+fn tzMandelMirroredRows(n: int, inverse: float, a: float, b: float, zones: [u16],
+                        powers: [u64], bounds: [u64]) -> (int, int, int) {
+    if a == -b {
+        let row = tzMandelRow(n, inverse, a, zones, powers, bounds)
+        return (wrappingAdd(row.0, row.0), row.1, row.1)
+    }
+    let band = tzMandelBand(a)
+    // La franja cubre ambas coordenadas reales de la malla y sus reflejos.
+    // En los huecos cada fila sigue su propia órbita f64.
+    if band == tzMandelBand(b) {
+        return tzMandelRowPair(n, inverse, a, b, band, zones, powers, bounds)
+    }
+    let first = tzMandelRow(n, inverse, a, zones, powers, bounds)
+    let second = tzMandelRow(n, inverse, b, zones, powers, bounds)
+    return (wrappingAdd(first.0, second.0), first.1, second.1)
 }

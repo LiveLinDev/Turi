@@ -1022,9 +1022,41 @@ def queens_tail_source():
     masks = queens_tail_masks(4)
     for mask in queens_tail_masks(5):
         masks.extend((mask & ((1 << 64) - 1), mask >> 64))
+    gap_base = len(masks)
+    gaps = [0] * 1024
+    for suffix in combinations(range(1, 11), 4):
+        columns = (0, *suffix)
+        mask = sum(1 << (column - 1) for column in suffix)
+        gap = 0
+        for left, right in zip(columns, columns[1:]):
+            gap = 5 * gap + min(right - left, 5) - 1
+        gaps[mask] = gap
+    masks.extend(sum(gaps[first + i] << (16 * i) for i in range(4))
+                 for first in range(0, len(gaps), 4))
+    threat_base = len(masks)
+    masks.extend(sum(1 << (13 * row + target) for row in range(5)
+                     for target in (column - row - 1, column, column + row + 1) if 0 <= target < 11)
+                 for column in range(11))
+    levels = []
+    for remaining in range(7, 11):
+        child = "pyQueensPackedSix" if remaining == 7 else f"pyQueensShort{remaining - 1}"
+        levels.append(f"""raw fn pyQueensShort{remaining}(cols: u32, left: u32, right: u32, words: Ptr<u64>) -> u64 {{
+    var pending = cols & ~(left | right)
+    var total = u64(0)
+    while pending != u32(0) {{
+        let rest = pending & wrappingSub(pending, u32(1))
+        let queen = pending ^ rest
+        pending = rest
+        total = wrappingAdd(total, {child}(cols ^ queen, (left | queen) << u32(1), (right | queen) >> u32(1), words))
+    }}
+    return total
+}}""")
     rows = [", ".join(f"u64(0x{mask:x})" for mask in masks[first:first + 8]) for first in range(0, len(masks), 8)]
     template = Path(__file__).with_name("reinas.turi").read_text(encoding="utf-8")
-    return template.replace("TZ_QUEENS_TAIL_TABLE", ",\n        ".join(rows))
+    return (template.replace("TZ_QUEENS_TAIL_TABLE", ",\n        ".join(rows))
+            .replace("TZ_QUEENS_GAP_BASE", str(gap_base))
+            .replace("TZ_QUEENS_THREAT_BASE", str(threat_base))
+            .replace("TZ_QUEENS_SHORT_LEVELS", "\n\n".join(levels)))
 
 
 def queens_parameter(function, occupied):

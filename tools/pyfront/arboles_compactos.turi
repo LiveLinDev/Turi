@@ -1,4 +1,5 @@
-// La posición del nodo i del árbol j es i*treeCount + j.
+// La posición de la rama i del árbol j es i*treeCount + j.
+// Los hijos fuera del plano de ramas son hojas.
 raw fn tzTreeFill(nodes: MutPtr<u64>, planeDepth: int, treeCount: int) {
     let leaves = 1 << planeDepth
     if leaves < 64 {
@@ -7,10 +8,9 @@ raw fn tzTreeFill(nodes: MutPtr<u64>, planeDepth: int, treeCount: int) {
     }
     let words = leaves / 64
     let sentinels = treeCount / 64
-    for block in 0..words {
-        let branches = if block < sentinels { u64(0) } else { ~u64(0) }
-        ptrWrite(ptrAdd(nodes, block), branches)
-        ptrWrite(ptrAdd(nodes, words + block), u64(0))
+    ptrZero(nodes, sentinels)
+    for block in sentinels..words {
+        ptrWrite(ptrAdd(nodes, block), ~u64(0))
     }
     if sentinels == 0 {
         ptrWrite(nodes, ~u64(0) << u64(treeCount))
@@ -27,12 +27,13 @@ raw fn tzTreeCount(nodes: Ptr<u64>, end: int) -> int {
 }
 
 trusted fn tzTreeRun(maxDepth: int, minDepth: int) {
-    let stretchSize = 1 << (maxDepth + 2)
-    let permanentSize = 1 << (maxDepth + 1)
-    var scratch = repeat(u64(0), (stretchSize + 63) / 64)
-    var permanent = repeat(u64(0), (permanentSize + 63) / 64)
-    let work = mutSlicePtr(mut scratch)
-    let saved = mutSlicePtr(mut permanent)
+    let stretchSize = 1 << (maxDepth + 1)
+    let permanentSize = 1 << maxDepth
+    let permanentWords = (permanentSize + 63) / 64
+    // Dos planos contienen el árbol de extensión antes de reutilizar su espacio.
+    var arena = repeat(u64(0), 2 * permanentWords)
+    let work = mutSlicePtr(mut arena)
+    let saved = ptrAdd(work, permanentWords)
     raw { tzTreeFill(work, maxDepth + 1, 1) }
     var stretchCount = 0
     trusted { raw { stretchCount = tzTreeCount(ptrConst(work), stretchSize) } }
@@ -43,13 +44,14 @@ trusted fn tzTreeRun(maxDepth: int, minDepth: int) {
         let depth = minDepth + 2 * block
         let planeDepth = min(maxDepth, depth + 11)
         let treeCount = 1 << (planeDepth - depth)
-        let size = 1 << (planeDepth + 1)
+        let size = 1 << planeDepth
         let words = (size + 63) / 64
+        let alternate = if 2 * words <= permanentWords { words } else { 0 }
         let batches = 1 << (maxDepth - planeDepth + minDepth)
         var total = 0
         for batch in 0..batches {
-            // La arena temporal admite dos lotes de esta longitud.
-            let tree = ptrAdd(work, (batch & 1) * words)
+            // Los dos lotes alternan cuando caben antes del árbol permanente.
+            let tree = ptrAdd(work, (batch & 1) * alternate)
             var count = 0
             raw {
                 tzTreeFill(tree, planeDepth, treeCount)

@@ -183,7 +183,35 @@ static inline int next_encoded(uint64_t *permutation, uint64_t *inverse, uint64_
     CARD_BITS*(a), CARD_BITS*(b), CARD_BITS*(c), CARD_BITS*(d), \
     CARD_BITS*(e), CARD_BITS*(f), CARD_BITS*(g), CARD_BITS*(h))
 
+#ifdef TZ_FANNKUCH_PARCIALES
+#include "fannkuch_parciales.h"
+#endif
+
 static void fannkuch(int n, int64_t *checksum, int *maximum) {
+#ifdef TZ_FANNKUCH_PARCIALES
+    if (n >= 7 && n <= 10) {
+        *maximum = 0;
+#ifdef TZ_FANNKUCH_INVERSO_PARCIAL
+#ifdef TZ_FANNKUCH_CINCO_BITS
+        uint64_t open = UINT64_C(0x2108421084210) & ((UINT64_C(1) << (5 * n)) - 1) & ~UINT64_C(16);
+        uint64_t result = partial_inverse(10, UINT64_C(0x5000000000000000), open, open, 0);
+        *checksum = (int64_t)result >> 32;
+        *maximum = (int)(uint32_t)result;
+#else
+        uint64_t open = UINT64_C(0x0820820820820820) & ((UINT64_C(1) << (6 * n)) - 1) & ~UINT64_C(32);
+        *checksum = partial_inverse(58, UINT64_C(0xe800000000000000), open, open, 0, maximum);
+#endif
+#else
+#ifdef TZ_FANNKUCH_FICHAS
+        const uint64_t direct = UINT64_C(0x01c71c71c71c50c1), reverse = UINT64_C(0x0431471c71c71c70);
+#else
+        const uint64_t direct = UINT64_C(0x0db0aa479848c180), reverse = UINT64_C(0x00631261e92ac360);
+#endif
+        *checksum = partial(direct, reverse, 0, (UINT32_C(1) << n) - 1, 0, maximum);
+#endif
+        return;
+    }
+#endif
     if (n < 4 || n > PACK_LIMIT) {
         fannkuch_shuffle(n, checksum, maximum);
         return;

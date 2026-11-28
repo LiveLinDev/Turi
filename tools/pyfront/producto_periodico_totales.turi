@@ -1,70 +1,113 @@
+raw fn tzPeriodicSeed(checkpoint: [u64], row: int, col: int, period: int, stride: int) -> Simd<float, 8> {
+    let phaseStart = 2 * period + 8
+    let phase = int(checkpoint[phaseStart + row])
+    let reference = simdFromArray<Simd<u64, 8>>(checkpoint, phase + col)
+    let record = checkpoint[phaseStart + period + (row * stride + col) / 8]
+    let shifts = simdFromArray<Simd<u64, 8>>([
+        u64(0), u64(8), u64(16), u64(24), u64(32), u64(40), u64(48), u64(56)
+    ], 0)
+    let delta = (simdSplat<Simd<u64, 8>>(record) >> shifts) & simdSplat<Simd<u64, 8>>(u64(255))
+    return bitcast<Simd<float, 8>>(reference + delta - simdSplat<Simd<u64, 8>>(u64(128)))
+}
+
 fn tzPeriodicTotals(n: int, width: int, aRow: int, aCol: int, aMod: int, aSeed: int,
                     bRow: int, bCol: int, bMod: int, bSeed: int) -> (float, float) {
-    let period = min(width, n)
-    let stride = ((period + 7) / 8) * 8
-    let cells = period * stride
-    var a = repeat(0.0, cells)
-    var b = repeat(0.0, cells)
-    var c = repeat(0.0, cells)
-    let aDivisor = float(aMod)
-    let bDivisor = float(bMod)
-    for i in 0..period {
-        for j in 0..period {
-            let at = i * stride + j
-            a[at] = float((i * aRow + j * aCol + aSeed) % aMod) / aDivisor
-            b[at] = float((i * bRow + j * bCol + bSeed) % bMod) / bDivisor
+    let empty: [u64] = []
+    return tzPeriodicCompute(n, width, aRow, aCol, aMod, aSeed, bRow, bCol, bMod, bSeed, empty)
+}
+
+// Solo se llama con un arreglo de rows * stride y columns <= stride.
+// Los pasos y la semilla son no negativos y el módulo está entre 1 y 256.
+trusted fn tzPeriodicFactor(out: mut [float], rows: int, columns: int, stride: int,
+                            rowAdvance: int, colAdvance: int, modulus: int, seed: int) {
+    var ratios = repeat(0.0, modulus)
+    for i in 0..modulus {
+        ratios[i] = float(i) / float(modulus)
+    }
+    let rowStep = rowAdvance % modulus
+    let colStep = colAdvance % modulus
+    var rowDigit = seed % modulus
+    raw {
+        for i in 0..rows {
+            var digit = rowDigit
+            for j in 0..columns {
+                out[i * stride + j] = ratios[digit]
+                let next = digit + colStep
+                digit = if next >= modulus { next - modulus } else { next }
+            }
+            let next = rowDigit + rowStep
+            rowDigit = if next >= modulus { next - modulus } else { next }
         }
     }
+}
+
+fn tzPeriodicCompute(n: int, width: int, aRow: int, aCol: int, aMod: int, aSeed: int,
+                      bRow: int, bCol: int, bMod: int, bSeed: int, checkpoint: [u64]) -> (float, float) {
+    let period = min(width, n)
+    let stride = ((period + 7) / 8) * 8
+    let prefix = if checkpoint.len() > 0 && n >= TZ_CHECKPOINT_CYCLES * width { TZ_CHECKPOINT_CYCLES } else { 0 }
+    let cycles = n / period
+    let rest = n - cycles * period
+    let inner = if cycles == prefix { rest } else { period }
+    var a = repeat(0.0, period * inner)
+    var b = repeat(0.0, inner * stride)
+    var stripe = repeat(0.0, 4 * stride)
+    if inner == period {
+        let aDivisor = float(aMod)
+        let bDivisor = float(bMod)
+        for i in 0..period {
+            for j in 0..period {
+                let at = i * stride + j
+                a[i * inner + j] = float((i * aRow + j * aCol + aSeed) % aMod) / aDivisor
+                b[at] = float((i * bRow + j * bCol + bSeed) % bMod) / bDivisor
+            }
+        }
+    } else if inner > 0 {
+        tzPeriodicFactor(mut a, period, inner, inner, aRow, aCol, aMod, aSeed)
+        tzPeriodicFactor(mut b, inner, period, stride, bRow, bCol, bMod, bSeed)
+    }
+    var sums = repeat(0.0, period)
+    var diagonal = repeat(0.0, period)
     var row = 0
-    // Las teselas se acotan a period filas y stride columnas. En el eje
-    // interior cada tramo recorre a lo sumo period términos desde cero.
+    // Las teselas recorren inner términos como máximo. Cuando queda un
+    // solo tramo, el prefijo ya contiene todos los ciclos completos.
     while row + 4 <= period {
         var col = 0
         while col + 32 <= stride {
-            trusted { raw { tzTileLarge(a, b, mut c, row, col, n, period, stride) } }
+            trusted { raw { tzTileLarge(a, b, mut stripe, row, col, n, period, stride, inner, checkpoint, prefix) } }
             col = col + 32
         }
         while col < stride {
-            trusted { raw { tzTileTail(a, b, mut c, row, col, n, period, stride) } }
+            trusted { raw { tzTileTail(a, b, mut stripe, row, col, n, period, stride, inner, checkpoint, prefix) } }
             col = col + 8
+        }
+        // Cada carril acumula una fila en el orden de sum() de Python.
+        var total = simdSplat<Simd<float, 4>>(0.0)
+        trusted { raw { total = tzPeriodicSum4(stripe, period, cycles, rest) } }
+        for lane in 0..4 {
+            sums[row + lane] = simdGet(total, lane)
+            diagonal[row + lane] = stripe[(row + lane) * 4 + lane]
         }
         row = row + 4
     }
     while row < period {
         for column in 0..(stride / 8) {
-            trusted { raw { tzTileSingle(a, b, mut c, row, column * 8, n, period, stride) } }
+            trusted { raw { tzTileSingle(a, b, mut stripe, row, column * 8, n, period, stride, inner, checkpoint, prefix) } }
         }
+        diagonal[row] = stripe[row]
+        trusted { raw { sums[row] = tzPeriodicSum1(stripe, period, cycles, rest) } }
         row = row + 1
-    }
-    // Restaurar el orden original conserva el resultado de sum() de esta versión de Python.
-    let cycles = n / period
-    let rest = n - cycles * period
-    var sums = repeat(0.0, period)
-    var unique = repeat(0.0, n)
-    for i in 0..period {
-        let at = i * stride
-        for cycle in 0..cycles {
-            let start = cycle * period
-            for j in 0..period {
-                unique[start + j] = c[at + j]
-            }
-        }
-        let start = cycles * period
-        for j in 0..rest {
-            unique[start + j] = c[at + j]
-        }
-        sums[i] = SUM(unique)
     }
     var trace = 0.0
     var total = 0.0
     for cycle in 0..cycles {
         for k in 0..period {
-            trace = trace + c[k * stride + k]
+            trace = trace + diagonal[k]
             total = total + sums[k]
         }
     }
     for k in 0..rest {
-        trace = trace + c[k * stride + k]
+        trace = trace + diagonal[k]
         total = total + sums[k]
     }
     return (trace, total)

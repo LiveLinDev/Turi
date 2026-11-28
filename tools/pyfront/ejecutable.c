@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __SSE2__
+#include <xmmintrin.h>
+#endif
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -47,6 +51,14 @@ static _Noreturn void fallback(tz_i64 argc);
 
 _Noreturn void turi_embed_abort(void) {
     fallback(process_argc);
+}
+
+int tzx_orbit_traps_masked(void) {
+#ifdef __SSE2__
+    return (_mm_getcsr() & _MM_MASK_MASK) == _MM_MASK_MASK;
+#else
+    return 0;
+#endif
 }
 
 /* La rama nativa solo tiene efectos de salida. Se confirma al terminar.

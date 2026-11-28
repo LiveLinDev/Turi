@@ -7,7 +7,9 @@
     "variantes": {
       "cubetas": [],
       "diagonales": ["-DTZ_DIJKSTRA_DIAGONALES", "-DTZ_DIJKSTRA_LINEAL"],
-      "suma cerrada": ["-DTZ_DIJKSTRA_DIAGONALES"]
+      "suma cerrada": ["-DTZ_DIJKSTRA_DIAGONALES"],
+      "diagonales con salida agrupada": ["-DTZ_DIJKSTRA_DIAGONALES", "-DTZ_DIJKSTRA_LINEAL", "-DTZ_C_EXTREMO_SALIDA_ENTERA"],
+      "suma cerrada con salida agrupada": ["-DTZ_DIJKSTRA_DIAGONALES", "-DTZ_C_EXTREMO_SALIDA_ENTERA"]
     }
   }
 }

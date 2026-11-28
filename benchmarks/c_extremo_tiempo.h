@@ -15,6 +15,13 @@
 #include <time.h>
 #endif
 
+#ifdef TZ_C_EXTREMO_SALIDA_ENTERA
+#include "c_extremo_salida.h"
+#define c_extremo_pareja(format, first, second) c_extremo_escribir_pareja((int64_t)(first), (int64_t)(second))
+#else
+#define c_extremo_pareja(format, first, second) printf(format, first, second)
+#endif
+
 static double c_extremo_ahora(void) {
 #ifdef _WIN32
     LARGE_INTEGER counter, frequency;

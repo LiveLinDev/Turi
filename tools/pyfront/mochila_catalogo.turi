@@ -1,0 +1,100 @@
+fn TZ_KNAPSACK_NAMEWeight(item: u32) -> int {
+    return int((item >> u32(9)) & u32(63))
+}
+
+fn TZ_KNAPSACK_NAMEItem(best: mut [u16], capacity: int, weight: int, value: int) {
+    let added = simdSplat<Simd<u16, 32>>(u16(value))
+    var end = capacity + 1
+    while end >= weight + 32 {
+        let start = end - 32
+        let skip = simdFromArray<Simd<u16, 32>>(best, start)
+        let take = simdFromArray<Simd<u16, 32>>(best, start - weight) + added
+        simdToArray(simdMax(skip, take), mut best, start)
+        end = start
+    }
+    while end > weight {
+        end = end - 1
+        let candidate = best[end - weight] + u16(value)
+        if candidate > best[end] {
+            best[end] = candidate
+        }
+    }
+}
+
+fn TZ_KNAPSACK_NAME(n: int, capacity: int) -> int {
+    if n == 0 || capacity == 0 {
+        return 0
+    }
+    let catalog = [
+        TZ_KNAPSACK_ITEMS
+    ]
+    var remaining = capacity
+    var lower = 0
+    var critical = -1
+    for i in 0..catalog.len() {
+        let item = catalog[i]
+        if int(item & u32(511)) >= n {
+            continue
+        }
+        let weight = TZ_KNAPSACK_NAMEWeight(item)
+        if remaining < weight {
+            critical = i
+            break
+        }
+        remaining = remaining - weight
+        lower = lower + int(item >> u32(15))
+    }
+    if critical < 0 || remaining == 0 {
+        return lower
+    }
+    let pivot = catalog[critical]
+    let q = TZ_KNAPSACK_NAMEWeight(pivot)
+    let p = int(pivot >> u32(15))
+    let upper = q * lower + p * remaining
+    if remaining >= TZ_KNAPSACK_MIN_WEIGHT {
+        for i in (critical + 1)..catalog.len() {
+            let item = catalog[i]
+            let weight = TZ_KNAPSACK_NAMEWeight(item)
+            if int(item & u32(511)) < n && weight <= remaining {
+                remaining = remaining - weight
+                lower = lower + int(item >> u32(15))
+                if remaining < TZ_KNAPSACK_MIN_WEIGHT {
+                    break
+                }
+            }
+        }
+    }
+    let gap = upper - q * lower
+    if gap < q {
+        return lower
+    }
+    var bound = capacity
+    var forced = 0
+    var core = repeat(u32(0), n)
+    var used = 0
+    for item in catalog {
+        let weight = TZ_KNAPSACK_NAMEWeight(item)
+        let value = int(item >> u32(15))
+        let gain = q * value - p * weight
+        // Las densidades restantes solo bajan y todos los pesos tienen esta cota inferior.
+        if -gain * TZ_KNAPSACK_MIN_WEIGHT > gap * weight {
+            break
+        }
+        if int(item & u32(511)) < n {
+            if gain > gap {
+                bound = bound - weight
+                forced = forced + value
+            } else if gain >= -gap {
+                core[used] = item
+                used = used + 1
+            }
+        }
+    }
+    // La suma de valores de todo el catálogo cabe en u16.
+    var best = repeat(u16(0), bound + 1)
+    for i in 0..used {
+        let item = core[i]
+        TZ_KNAPSACK_NAMEItem(mut best, bound, TZ_KNAPSACK_NAMEWeight(item), int(item >> u32(15)))
+    }
+    return forced + int(best[bound])
+}

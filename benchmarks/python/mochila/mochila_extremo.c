@@ -131,6 +131,10 @@ static int knapsack_bound(const int* weights, const int* values, int n, int capa
 }
 #endif
 
+#ifdef TZ_MOCHILA_CATALOGO
+#include "mochila_catalogo.h"
+#endif
+
 int main(int argc, char **argv) {
     long requested = argc > 1 ? strtol(argv[1], NULL, 10) : 100;
     if (requested > 100000) return EXIT_FAILURE;
@@ -139,12 +143,16 @@ int main(int argc, char **argv) {
     double start = c_extremo_inicio();
 #ifdef TZ_MOCHILA_COTA
     if (n <= 440) {
+#ifdef TZ_MOCHILA_CATALOGO
+        int result = knapsack_catalog(n);
+#else
         int weights[440], values[440];
         for (int i = 0; i < n; i++) {
             weights[i] = 5 + (i * 37) % 41;
             values[i] = 10 + (i * 53) % 97;
         }
         int result = knapsack_bound(weights, values, n, capacity);
+#endif
         if (result < 0) return EXIT_FAILURE;
         printf("%d\n", result);
         c_extremo_fin(start);

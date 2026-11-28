@@ -11,7 +11,11 @@
       "cuatro rondas": ["-DTZ_CUERPOS_RONDAS"],
       "masas por ronda": ["-DTZ_CUERPOS_PESO_TEMPRANO"],
       "diferencias por ronda": ["-DTZ_CUERPOS_PESO_TEMPRANO", "-DTZ_CUERPOS_DELTA_POSICIONES"],
-      "última pareja corta": ["-DTZ_CUERPOS_PESO_TEMPRANO", "-DTZ_CUERPOS_PAR_CORTO"]
+      "última pareja corta": ["-DTZ_CUERPOS_PESO_TEMPRANO", "-DTZ_CUERPOS_PAR_CORTO"],
+      "quinto cuerpo aislado": ["-DTZ_CUERPOS_ESTRECHO"],
+      "primer cuerpo aislado": ["-DTZ_CUERPOS_ESTRECHO", "-DTZ_CUERPOS_PRIMERO"],
+      "primer cuerpo y rondas juntas": ["-DTZ_CUERPOS_ESTRECHO", "-DTZ_CUERPOS_PRIMERO", "-DTZ_CUERPOS_PRIMERO_RONDAS"],
+      "primer cuerpo y carriles reordenados": ["-DTZ_CUERPOS_ESTRECHO", "-DTZ_CUERPOS_PRIMERO", "-DTZ_CUERPOS_CARRILES_REORDENADOS"]
     }
   }
 }

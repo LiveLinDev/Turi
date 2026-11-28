@@ -10,10 +10,10 @@ fn tzComposite(out: TzPrimeTotals, source: TzPrimeTotals, before: TzPrimeTotals,
     }
 }
 
-fn tzPrimeWheel(n: int, prefix: [TzPrimeTotals]) -> TzPrimeTotals {
+fn tzPrimeWheel(n: int, prefix: [u64]) -> TzPrimeTotals {
     let cycles = n / 210
     let offset = n % 210
-    let tail = prefix[offset]
+    let tail = tzPrimeUnpack(prefix[offset])
     let two = if n >= 2 { 1 } else { 0 }
     let three = if n >= 3 { 1 } else { 0 }
     let five = if n >= 5 { 1 } else { 0 }
@@ -26,8 +26,12 @@ fn tzPrimeWheel(n: int, prefix: [TzPrimeTotals]) -> TzPrimeTotals {
     }
 }
 
-fn tzPrimeRank(n: int, prefix: [TzPrimeTotals]) -> int {
-    return 48 * (n / 210) + prefix[n % 210].size
+fn tzPrimeRank(n: int, prefix: [u64]) -> int {
+    // La raíz es menor que 32768. El error de 19973/2^22 queda por debajo de 1/210.
+    let value = u32(n)
+    let quotient = (value * u32(19973)) >> u32(22)
+    let remainder = value - quotient * u32(210)
+    return int(u32(48) * quotient) + int(prefix[int(remainder)] & u64(0xffffffff))
 }
 
 fn tzPrimePack(cell: TzPrimeTotals) -> u64 {
@@ -38,38 +42,32 @@ fn tzPrimeUnpack(cell: u64) -> TzPrimeTotals {
     return TzPrimeTotals { size: int(cell & u64(0xffffffff)), total: int(cell >> u64(32)) }
 }
 
+fn tzPrimeFreeze(active: mut [u64], rank: int) {
+    let word = rank / 64
+    active[word] = active[word] & ~(u64(1) << u64(rank & 63))
+}
+
 fn tzPrimeTotals(n: int) -> (int, int) {
     let root = int(sqrt(float(n)))
     let high = n / (root + 1)
     let zero = TzPrimeTotals { size: 0, total: 0 }
     // La tabla pequeña llega hasta 32767. El recuento y la suma caben en 32 bits.
     var small = repeat(u64(0), root + 1)
-    var inverse = repeat(0.0, root + 8)
-    var prefix = repeat(zero, 210)
-    var residues = repeat(u16(0), 48)
-    var count = 0
-    var total = 0
-    for j in 1..210 {
-        if j % 2 != 0 && j % 3 != 0 && j % 5 != 0 && j % 7 != 0 {
-            residues[count] = u16(j)
-            count = count + 1
-            total = total + j
-        }
-        prefix[j] = TzPrimeTotals { size: count, total: total }
-    }
+    let prefix = [
+        TZ_PRIME_WHEEL_PREFIX
+    ]
+    let residues = [
+        TZ_PRIME_WHEEL_RESIDUES
+    ]
     // Los divisores grandes alcanzables desde 1 son productos de primos >= 11.
     // Solo se guardan en orden creciente los divisores coprimos con la rueda.
     let members = tzPrimeRank(root, prefix)
     let bigCount = tzPrimeRank(high, prefix)
-    var positions = repeat(u16(0), members + 1)
-    for rank in 1..(members + 1) {
-        let index = rank - 1
-        positions[rank] = u16((index / 48) * 210 + int(residues[index % 48]))
-    }
+    let wheelBlocks = (members + 47) / 48
+    var inverse = repeat(0.0, wheelBlocks * 48 + 1)
+    var positions = repeat(u16(0), wheelBlocks * 48 + 1)
     var big = repeat(zero, bigCount + 1)
-    let wheel = [
-        TZ_PRIME_WHEEL_PREFIX
-    ]
+    var active = repeat(~u64(0), (bigCount + 64) / 64)
     for value in 1..min(210, root + 1) {
         small[value] = tzPrimePack(tzPrimeWheel(value, prefix))
     }
@@ -85,30 +83,42 @@ fn tzPrimeTotals(n: int) -> (int, int) {
         let shifts = simdSplat<Simd<u64, 8>>(shift)
         var at = 0
         while at + 8 <= width {
-            let packed = simdFromArray<Simd<u64, 8>>(wheel, at)
+            let packed = simdFromArray<Simd<u64, 8>>(prefix, at)
             simdToArray(packed + biases + (packed & low) * shifts, mut small, from + at)
             at = at + 8
         }
         for offset in at..width {
-            let packed = wheel[offset]
+            let packed = prefix[offset]
             small[from + offset] = wrappingAdd(wrappingAdd(packed, bias),
                                                wrappingMul(packed & u64(0xffffffff), shift))
         }
     }
-    let lanes = simdFromArray<Simd<float, 8>>([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], 0)
+    for block in 0..wheelBlocks {
+        let shift = simdSplat<Simd<u16, 16>>(u16(block * 210))
+        for group in 0..3 {
+            let first = group * 16
+            let ids = simdFromArray<Simd<u16, 16>>(residues, first) + shift
+            simdToArray(ids, mut positions, block * 48 + first + 1)
+        }
+    }
+    let divisors = [
+        TZ_PRIME_WHEEL_DIVISORS
+    ]
     let one = simdSplat<Simd<float, 8>>(1.0)
     let increment = simdSplat<Simd<u64, 8>>(u64(1))
-    var place = 1
-    while place <= root {
-        // El recíproco redondeado hacia arriba conserva el cociente entero hasta 2^30.
-        let divisors = simdSplat<Simd<float, 8>>(float(place)) + lanes
-        let bits = bitcast<Simd<u64, 8>>(one / divisors) + increment
-        simdToArray(bitcast<Simd<float, 8>>(bits), mut inverse, place)
-        place = place + 8
+    // Los recíprocos comparten los índices de positions. El redondeo hacia
+    // arriba conserva el cociente entero hasta 2^30.
+    for block in 0..wheelBlocks {
+        let delta = simdSplat<Simd<float, 8>>(float(block * 210))
+        for group in 0..6 {
+            let row = group * 8
+            let number = simdFromArray<Simd<float, 8>>(divisors, row) + delta
+            let bits = bitcast<Simd<u64, 8>>(one / number) + increment
+            simdToArray(bitcast<Simd<float, 8>>(bits), mut inverse, block * 48 + row + 1)
+        }
     }
     for rank in 1..(bigCount + 1) {
-        let i = int(positions[rank])
-        let value = int(float(n) * inverse[i])
+        let value = int(float(n) * inverse[rank])
         big[rank] = tzPrimeWheel(value, prefix)
     }
     for primeRank in 2..(members + 1) {
@@ -118,20 +128,41 @@ fn tzPrimeTotals(n: int) -> (int, int) {
             continue
         }
         let square = prime * prime
-        let invPrime = inverse[prime]
+        let invPrime = inverse[primeRank]
         let scaled = float(int(float(n) * invPrime))
         let last = min(high, int(scaled * invPrime))
         let split = min(last, int(float(high) * invPrime))
         let firstEnd = tzPrimeRank(split, prefix) + 1
         let lastEnd = tzPrimeRank(last, prefix) + 1
-        for rank in 1..firstEnd {
-            let i = int(positions[rank])
-            big[rank] = tzComposite(big[rank], big[tzPrimeRank(i * prime, prefix)], before, prime)
+        // Si se consulta un divisor compuesto, se lee con el estado anterior a
+        // su menor factor primo. Sus actualizaciones posteriores ya sobran.
+        if prime <= high {
+            tzPrimeFreeze(mut active, primeRank)
+            for index in primeRank..firstEnd {
+                let multiple = int(positions[index]) * prime
+                tzPrimeFreeze(mut active, tzPrimeRank(multiple, prefix))
+            }
         }
-        for rank in firstEnd..lastEnd {
-            let i = int(positions[rank])
-            let previous = tzPrimeUnpack(small[int(scaled * inverse[i])])
-            big[rank] = tzComposite(big[rank], previous, before, prime)
+        let head = if prime <= high { big[primeRank] } else { tzPrimeUnpack(small[int(scaled)]) }
+        big[1] = tzComposite(big[1], head, before, prime)
+        let begin = primeRank + 1
+        if begin < lastEnd {
+            for word in (begin / 64)..((lastEnd + 63) / 64) {
+                let base = word * 64
+                let left = max(0, begin - base)
+                let right = min(64, lastEnd - base)
+                let lowerMask = ~u64(0) << u64(left)
+                let upperMask = ~u64(0) >> u64(64 - right)
+                var pending = active[word] & lowerMask & upperMask
+                while pending != u64(0) {
+                    let rank = base + int(ctz(pending))
+                    pending = pending & wrappingSub(pending, u64(1))
+                    let i = int(positions[rank])
+                    let source = if rank < firstEnd { big[tzPrimeRank(i * prime, prefix)] }
+                                 else { tzPrimeUnpack(small[int(scaled * inverse[rank])]) }
+                    big[rank] = tzComposite(big[rank], source, before, prime)
+                }
+            }
         }
         var value = root
         if value >= square {

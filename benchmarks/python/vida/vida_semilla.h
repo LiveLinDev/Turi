@@ -1,5 +1,5 @@
 /* Salta las transiciones afines para construir cada fila de la semilla. */
-static uint64_t seed_rows(uint64_t *live, size_t stride, unsigned origin) {
+static uint64_t seed_rows(VidaWord *live, size_t stride, unsigned origin) {
     __m256i scales[8], offsets[8];
     uint32_t power = 1, constant = 0;
     for (unsigned i = 0; i < 8; i++) {
@@ -15,7 +15,11 @@ static uint64_t seed_rows(uint64_t *live, size_t stride, unsigned origin) {
     }
     uint32_t seed = 7;
     uint64_t count = 0;
+#ifdef TZ_VIDA_PALABRA32
+    unsigned shift = origin & 31;
+#else
     unsigned shift = origin & 63;
+#endif
     for (unsigned row = origin; row < origin + 64; row++) {
         __m256i base = _mm256_set1_epi32((int32_t)seed);
         uint64_t living = 0;
@@ -28,6 +32,14 @@ static uint64_t seed_rows(uint64_t *live, size_t stride, unsigned origin) {
             living |= (uint64_t)_mm256_movemask_ps(_mm256_castsi256_ps(masks)) << (8 * group);
             if (group == 7) seed = (uint32_t)_mm256_extract_epi32(states, 7);
         }
+#if defined(TZ_VIDA_PALABRA32)
+        size_t at = (1 + origin / 32) * stride + row + 16;
+        uint32_t low = (uint32_t)living;
+        uint32_t high = (uint32_t)(living >> 32);
+        live[at] = low << shift;
+        live[at + stride] = (high << shift) | (shift ? low >> (32 - shift) : 0);
+        if (shift) live[at + 2 * stride] = high >> (32 - shift);
+#else
 #ifdef TZ_VIDA_COLUMNAS
         size_t at = (1 + origin / 64) * stride + row + 8;
         size_t next_word = stride;
@@ -37,6 +49,7 @@ static uint64_t seed_rows(uint64_t *live, size_t stride, unsigned origin) {
 #endif
         live[at] = living << shift;
         if (shift) live[at + next_word] = living >> (64 - shift);
+#endif
         count += (unsigned)__builtin_popcountll(living);
     }
     return count;

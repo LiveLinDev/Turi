@@ -46,6 +46,9 @@ static unsigned count_transition(uint64_t *counts, const uint32_t *codes,
 #endif
 }
 
+#if defined(TZ_PALABRAS_ESTRECHAS) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__)
+#include "palabras_estrechas.h"
+#else
 static void count_words(uint64_t *counts, long long n) {
     enum { BLOCK = TZ_PALABRAS_BLOQUE, LANES = 8 };
 #ifdef TZ_PALABRAS_DOBLE
@@ -180,6 +183,7 @@ static void count_words(uint64_t *counts, long long n) {
         at -= BLOCK;
     }
 }
+#endif
 #else
 static void count_words(uint64_t *counts, long long n) {
     /* Formas afines de uno, dos, tres y cuatro pasos del generador. */

@@ -2,6 +2,30 @@
 #if defined(__AVX512F__) && defined(__FMA__)
 #include <xmmintrin.h>
 #endif
+#if defined(__BMI2__) && (defined(__x86_64__) || defined(_M_X64))
+#include <immintrin.h>
+#endif
+
+int32_t tzx_queens_has_bmi2(void) {
+#if defined(__BMI2__) && (defined(__x86_64__) || defined(_M_X64))
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+uint64_t tzx_queens_grid(uint64_t data, uint64_t selected) {
+#if defined(__BMI2__) && (defined(__x86_64__) || defined(_M_X64))
+    return _pext_u64(data, selected);
+#else
+    uint64_t result = 0, place = 1;
+    for (; selected; selected &= selected - 1, place <<= 1) {
+        uint64_t picked = selected & (UINT64_C(0) - selected);
+        if (data & picked) result |= place;
+    }
+    return result;
+#endif
+}
 
 tz_i64 tzx_wide_simd(void) {
 #if defined(__AVX512F__) && defined(__FMA__)

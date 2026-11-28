@@ -123,11 +123,11 @@ static uint64_t count_tree(const NodeWord *nodes, int depth) {
 #endif
 
 static size_t storage_size(int depth) {
-    size_t nodes = (size_t)1 << (depth + 1);
 #ifdef TZ_ARBOLES_BITS
+    size_t nodes = (size_t)1 << (depth + LEAF_BITS);
     return (nodes + 63) / 64;
 #else
-    return nodes;
+    return (size_t)1 << (depth + 1);
 #endif
 }
 
@@ -149,8 +149,12 @@ int main(int argc, char **argv) {
     for (int depth = 4; depth <= max_depth; depth += 2) {
         uint64_t total = 0;
 #ifdef TZ_ARBOLES_PLANOS
+#ifdef TZ_ARBOLES_PLANO_COMPLETO
+        int plane_depth = max_depth;
+#else
         int plane_depth = depth + TZ_ARBOLES_PLANOS;
         if (plane_depth > max_depth) plane_depth = max_depth;
+#endif
         size_t trees = (size_t)1 << (plane_depth - depth);
         size_t words = storage_size(plane_depth);
         uint64_t batches = UINT64_C(1) << (max_depth - plane_depth + 4);

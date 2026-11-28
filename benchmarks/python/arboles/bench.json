@@ -16,7 +16,9 @@
       "un bit por nodo": ["-DTZ_ARBOLES_BITS"],
       "lotes por posición hasta 32 árboles": ["-DTZ_ARBOLES_BITS", "-DTZ_ARBOLES_PLANOS=5"],
       "lotes por posición hasta 256 árboles": ["-DTZ_ARBOLES_BITS", "-DTZ_ARBOLES_PLANOS=8"],
-      "lotes por posición hasta 2048 árboles": ["-DTZ_ARBOLES_BITS", "-DTZ_ARBOLES_PLANOS=11"]
+      "lotes por posición hasta 2048 árboles": ["-DTZ_ARBOLES_BITS", "-DTZ_ARBOLES_PLANOS=11"],
+      "ramas por posición hasta 2048 árboles": ["-DTZ_ARBOLES_BITS", "-DTZ_ARBOLES_PLANOS=11", "-DTZ_ARBOLES_RAMAS"],
+      "ramas por posición en plano completo": ["-DTZ_ARBOLES_BITS", "-DTZ_ARBOLES_PLANOS=11", "-DTZ_ARBOLES_RAMAS", "-DTZ_ARBOLES_PLANO_COMPLETO"]
     }
   }
 }

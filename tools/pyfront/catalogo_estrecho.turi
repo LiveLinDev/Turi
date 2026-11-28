@@ -1,0 +1,90 @@
+    if n > 0 {
+        let high = simdSplat<Simd<u32, 16>>(u32(16))
+        let keep = simdSplat<Simd<u32, 16>>(u32(32767))
+        let magic = simdSplat<Simd<u32, 16>>(u32(21846))
+        let lanes = simdFromArray<Simd<u32, 16>>([
+            u32(0), u32(1), u32(2), u32(3), u32(4), u32(5), u32(6), u32(7),
+            u32(8), u32(9), u32(10), u32(11), u32(12), u32(13), u32(14), u32(15)
+        ], 0)
+        let four = simdSplat<Simd<u32, 16>>(u32(4))
+        let keyBits = simdSplat<Simd<u32, 16>>(u32(CAT_CODE_BITS))
+        let pairBits = simdSplat<Simd<u32, 16>>(u32(CAT_PAIR_BITS))
+        let zero = simdSplat<Simd<u16, 16>>(u16(0))
+        let one = simdSplat<Simd<u16, 16>>(u16(1))
+        let three = simdSplat<Simd<u16, 16>>(u16(3))
+        let codeBits = simdSplat<Simd<u16, 16>>(u16(CAT_CODE_BITS))
+        let codeMask = simdSplat<Simd<u16, 16>>(u16(CAT_CODE_MASK))
+        let zero32 = simdSplat<Simd<u16, 32>>(u16(0))
+        let one32 = simdSplat<Simd<u16, 32>>(u16(1))
+        let radix32 = simdSplat<Simd<u16, 32>>(u16(CAT_RADIX))
+        let codeBits32 = simdSplat<Simd<u16, 32>>(u16(CAT_CODE_BITS))
+CAT_VECTORS
+        var symbols = repeat(u16(0), CAT_LOOKAHEAD)
+        var lengths = repeat(u16(0), CAT_TRANSITIONS)
+        var single = repeat(u16(0), CAT_BLOCK + 8)
+        var pairs = repeat(u32(0), CAT_BLOCK)
+        var state = u32(CAT_SEED)
+        var remaining = n
+        var at = 0
+        while remaining > 0 {
+            let seed = simdSplat<Simd<u32, 16>>(state)
+CAT_SAMPLES
+            for group in 0..(CAT_GROUPS / 2) {
+                let offset = group * 32
+                let length = simdFromArray<Simd<u16, 32>>(lengths, offset)
+                let a = simdFromArray<Simd<u16, 32>>(symbols, offset + 1)
+                let b = (a + one32) * radix32 + simdFromArray<Simd<u16, 32>>(symbols, offset + 2)
+                let c = (b + one32) * radix32 + simdFromArray<Simd<u16, 32>>(symbols, offset + 3)
+                let longer = simdSelect(simdCmpEq(length, one32), b, c)
+                let code = simdSelect(simdCmpEq(length, zero32), a, longer)
+                simdToArray((length << codeBits32) | code, mut single, offset)
+            }
+            // Ocho transiciones de adelanto cubren los pares que cruzan el borde.
+            let tailZero = simdSplat<Simd<u16, 8>>(u16(0))
+            let tailOne = simdSplat<Simd<u16, 8>>(u16(1))
+            let tailRadix = simdSplat<Simd<u16, 8>>(u16(CAT_RADIX))
+            let tailBits = simdSplat<Simd<u16, 8>>(u16(CAT_CODE_BITS))
+            let tailLength = simdFromArray<Simd<u16, 8>>(lengths, CAT_BLOCK)
+            let tailA = simdFromArray<Simd<u16, 8>>(symbols, CAT_BLOCK + 1)
+            let tailB = (tailA + tailOne) * tailRadix + simdFromArray<Simd<u16, 8>>(symbols, CAT_BLOCK + 2)
+            let tailC = (tailB + tailOne) * tailRadix + simdFromArray<Simd<u16, 8>>(symbols, CAT_BLOCK + 3)
+            let tailLong = simdSelect(simdCmpEq(tailLength, tailOne), tailB, tailC)
+            let tailCode = simdSelect(simdCmpEq(tailLength, tailZero), tailA, tailLong)
+            simdToArray((tailLength << tailBits) | tailCode, mut single, CAT_BLOCK)
+            if remaining >= CAT_HALF {
+                for group in 0..CAT_GROUPS {
+                    let offset = group * 16
+                    let first = simdFromArray<Simd<u16, 16>>(single, offset)
+                    let length = first >> codeBits
+                    let a = simdFromArray<Simd<u16, 16>>(single, offset + 2)
+                    let b = simdFromArray<Simd<u16, 16>>(single, offset + 3)
+                    let c = simdFromArray<Simd<u16, 16>>(single, offset + 4)
+                    let next = simdSelect(simdCmpEq(length, zero), a, simdSelect(simdCmpEq(length, one), b, c))
+                    let jump = CAT_WIDEN(length) + lanes + simdSplat<Simd<u32, 16>>(u32(offset)) + four
+                    // La longitud de la segunda palabra se suma en el campo de salto.
+                    let high = (jump << pairBits) + (CAT_WIDEN(next) << keyBits)
+                    let pair = high | CAT_WIDEN(first & codeMask)
+                    simdToArray(pair, mut pairs, offset)
+                }
+                // Cada par salta como máximo ocho muestras. Hay sitio para leer el segundo.
+                while at < CAT_BLOCK - 8 {
+                    at = CAT_COUNT_PAIR(pairs[at], mut counts)
+                    at = CAT_COUNT_PAIR(pairs[at], mut counts)
+                    remaining = wrappingSub(remaining, 4)
+                }
+                while at < CAT_BLOCK {
+                    at = CAT_COUNT_PAIR(pairs[at], mut counts)
+                    remaining = wrappingSub(remaining, 2)
+                }
+            } else {
+                while at < CAT_BLOCK && remaining > 0 {
+                    let word = single[at]
+                    let index = int(word & u16(CAT_CODE_MASK))
+                    counts[index] = wrappingAdd(counts[index], 1)
+                    at = at + int(word >> u16(CAT_CODE_BITS)) + 2
+                    remaining = remaining - 1
+                }
+            }
+            at = at - CAT_BLOCK
+        }
+    }

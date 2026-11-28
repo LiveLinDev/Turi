@@ -171,12 +171,24 @@ static void advance_vector(long steps, double seconds) {
     }
 }
 
+#ifdef TZ_CUERPOS_ESTRECHO
+#ifdef TZ_CUERPOS_PRIMERO
+#include "nbody_primero.h"
+#else
+#include "nbody_estrecho.h"
+#endif
+#endif
+
 int main(int argc, char **argv) {
     long steps = argc > 1 ? strtol(argv[1], NULL, 10) : 1000;
     double start = c_extremo_inicio();
     offset_momentum();
     printf("%.9f\n", energy());
+#ifdef TZ_CUERPOS_ESTRECHO
+    advance_narrow(steps, 0.01);
+#else
     advance_vector(steps, 0.01);
+#endif
     printf("%.9f\n", energy());
     c_extremo_fin(start);
     return EXIT_SUCCESS;

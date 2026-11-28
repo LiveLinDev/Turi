@@ -1753,7 +1753,7 @@ def ejecutable_contadores(folder):
         (ROOT / "benchmarks/python/palabras/palabras.py",
          b"seed * 1103515245 + 12345", b"seed * 1103515245 + 12347", (0, 1, 7, 47, 48, 49, 127, 128, 129, 233, 4117)),
         (ROOT / "benchmarks/python/criba/criba.py",
-         b"is_prime[0] = False", b"is_prime[0] = True", (2, 3, 7, 8, 49, 50, 51, 121, 122, 210, 211, 4531)),
+         b"is_prime[0] = False", b"is_prime[0] = True", (2, 3, 7, 8, 49, 50, 51, 121, 122, 210, 211, 1330, 1331, 1332, 4531)),
         (ROOT / "tools/pyfront/examples/fannkuch.py",
          b"checksum += flips", b"checksum += flips + 1", (1, 3, 4, 5, 6, 7, 8)),
         (ROOT / "benchmarks/python/dijkstra/dijkstra.py",
@@ -1794,6 +1794,27 @@ def ejecutable_contadores(folder):
                 if result.returncode or result.stdout != expected or not result.stderr.startswith(b"TURI_EXE_MS="):
                     print("FALLA contadores en nativo", name, suffix, n, result.stderr)
                     return False
+    source = ROOT / "tools/pyfront/examples/nbody.py"
+    program = source.read_bytes()
+    advance = b"    advance(x, y, z, vx, vy, vz, mass, 0.01, steps)"
+    assert program.count(advance) == 1
+    for name, delta in (("colision", b""), ("subdesbordamiento", b" + 1e-200")):
+        path = Path(folder) / f"nbody_{name}.py"
+        positions = b"    x[1] = x[0]\n    y[1] = y[0]\n    z[1] = z[0]" + delta + b"\n"
+        path.write_bytes(program.replace(advance, positions + advance, 1))
+        binary = path.with_suffix(".exe" if os.name == "nt" else ".bin")
+        build = run([sys.executable, str(LAUNCHER), "--veloz", str(Path(CLI).resolve()),
+                     "--exe", str(binary), str(path)], ENV_BASE)
+        if build.returncode or not binary.is_file():
+            print("FALLA ejecutable de órbitas al compilar", name, build.stderr)
+            return False
+        expected = subprocess.run([sys.executable, str(path), "1"], capture_output=True, timeout=45, env=ENV_BASE)
+        result = subprocess.run([str(binary), "1"], capture_output=True, timeout=45,
+                                env=dict(ENV_BASE, TURIPY_EXE_TIME="1"))
+        if (not expected.returncode or b"ZeroDivisionError" not in expected.stderr
+                or (result.returncode, result.stdout, result.stderr) != (expected.returncode, expected.stdout, expected.stderr)):
+            print("FALLA recuperación de órbitas", name, result.stderr)
+            return False
     print("ok ejecutable de contadores: formas originales y alteradas coinciden con CPython")
     return True
 
@@ -1812,6 +1833,13 @@ def ejecutable_texto(folder):
         (b"", True),
         (b"Ford! ford\r\nFORD\tbar\r  ,. bar bar\n", True),
         (b"One two PalabraLarga!\r\n" * 4500 + b"one two palabraLarga", True),
+        (b"a" * 62 + b"\n" + b"b\n" * 35000 + b"c" * 62 + b"\n" + b"d" * 63 + b"\n" + b"e" * 63, True),
+        (b"ab\n" * 21845 + b"\r\nOne\rTwo\r\nThree", True),
+        (b"  x\n" * 16384, True),
+        (b"  x\n" * 16384 + b"Z", True),
+        (b"?! ! a!? ab.cd 0, 0! !aa b,; 1234567? 12345678! ?ab c ,!\n" * 1500, True),
+        ((b"x" * 63 + b"! a a\r\n" + b"y" * 30 + b".\tB b\n") * 650, True),
+        (b"city tower tower! city city, TOWER city\tTOWER\r\n" * 1600, True),
         (vocabulary + b"\n" + vocabulary.upper() + b"\nA A a", True),
         ("Vía vía\r\nárbol, árbol\n".encode("utf-8"), False),
     )

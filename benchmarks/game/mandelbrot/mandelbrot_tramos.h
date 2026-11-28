@@ -1,7 +1,25 @@
-/* Franjas de 1024 generadas por tools/pyfront/fractales.py. */
+/* Franjas certificadas de 2048 y 4096, y referencia anterior de 1024. */
 #include <math.h>
 
+#if defined(TZ_MANDEL_TRAMOS_4096) || defined(TZ_MANDEL_TRAMOS_FILTRADOS)
+#define REGION_RESOLUTION 4096
+#define REGION_SHIFT 13
+static const uint16_t zones[] = {
+#ifdef TZ_MANDEL_TRAMOS_FILTRADOS
+#include "../../../tools/pyfront/mandel_zonas.inc"
+#else
+#include "mandelbrot_zonas_4096.inc"
+#endif
+};
+#elif defined(TZ_MANDEL_TRAMOS_2048)
+#define REGION_RESOLUTION 2048
+#define REGION_SHIFT 12
+static const uint16_t zones[] = {
+#include "mandelbrot_zonas_2048.inc"
+};
+#else
 #define REGION_RESOLUTION 1024
+#define REGION_SHIFT 11
 
 static const uint16_t zones[] = {
     0, 3, 7, 11, 13, 15, 18, 20, 23, 26, 28, 30, 32, 36, 39, 42,
@@ -911,6 +929,12 @@ static const uint16_t zones[] = {
     2738, 1373, 2748, 1376, 2762, 1425, 2918, 1542, 4096,
 };
 
+#endif
+
+#ifdef TZ_MANDEL_FACTORES
+#include "mandelbrot_factores.h"
+#endif
+
 static uint64_t factor_of(unsigned bytes) {
     uint64_t base = 31, result = 1;
     for (; bytes; bytes >>= 1) {
@@ -924,35 +948,85 @@ static uint64_t gap(int x, int end, int n, double inverse, double imaginary,
                     uint64_t *inside, uint64_t checksum) {
     for (; x + 32 <= end; x += 32)
         checksum = (checksum * 923521 + pixels(x, n, 4, inverse, imaginary, inside)) % 1000000007;
+#ifdef TZ_MANDEL_HUECOS_16
+    for (; x + 16 <= end; x += 16)
+        checksum = (checksum * 961 + pixels(x, n, 2, inverse, imaginary, inside)) % 1000000007;
+#endif
     for (; x < end; x += 8)
         checksum = (checksum * 31 + pixels(x, n, 1, inverse, imaginary, inside)) % 1000000007;
     return checksum;
 }
 
+#ifdef TZ_MANDEL_EXTREMOS
+static uint64_t region_bounds[2 * REGION_RESOLUTION + 1];
+
+static void initialize_bounds(int n, double inverse) {
+    const int aligned = n & ~7;
+    const double stride = 1.0 / REGION_RESOLUTION;
+    for (unsigned cell = 0; cell <= 2 * REGION_RESOLUTION; ++cell) {
+        int index = (int)(((uint64_t)cell * n) >> REGION_SHIFT);
+        double edge = cell * stride - 1.5;
+        int first = index & ~7;
+        if (first * inverse - 1.5 < edge) first += 8;
+        int stop = (index + 1) & ~7;
+        if (stop > aligned) stop = aligned;
+        if (stop > 0 && (stop - 1) * inverse - 1.5 > edge) stop -= 8;
+        region_bounds[cell] = (uint64_t)first | ((uint64_t)stop << 32);
+    }
+}
+#endif
+
 static uint64_t row(int n, double inverse, double imaginary, uint64_t *inside) {
     unsigned band = (unsigned)(fabs(imaginary) * REGION_RESOLUTION);
     if (band >= REGION_RESOLUTION) band = REGION_RESOLUTION - 1;
-    const double stride = 1.0 / REGION_RESOLUTION, unit = stride / inverse;
+#ifndef TZ_MANDEL_EXTREMOS
+    const double stride = 1.0 / REGION_RESOLUTION;
+#ifndef TZ_MANDEL_FACTORES
+    const double unit = stride / inverse;
+#endif
     const int aligned = n & ~7;
+#endif
     uint64_t checksum = 0;
     int x = 0;
     for (unsigned run = zones[band]; run < zones[band + 1]; ++run) {
         unsigned at = REGION_RESOLUTION + 1 + 2 * run;
         int start = zones[at], last = zones[at + 1], end = last >> 1;
+#ifdef TZ_MANDEL_EXTREMOS
+        int first = (int)(region_bounds[start] & UINT32_MAX);
+        int stop = (int)(region_bounds[end] >> 32);
+        if (first < x) first = x;
+        if (first >= stop) continue;
+#else
         double left = start * stride - 1.5, right = end * stride - 1.5;
+#ifdef TZ_MANDEL_FACTORES
+        int first = (int)(((uint64_t)start * n) >> REGION_SHIFT) & ~7;
+        int stop = ((int)(((uint64_t)end * n) >> REGION_SHIFT) + 1) & ~7;
+#else
         int first = (int)(start * unit) & ~7;
+        int stop = ((int)(end * unit) + 1) & ~7;
+#endif
         if (first < x) first = x;
         if (first * inverse - 1.5 < left) first += 8;
-        int stop = ((int)(end * unit) + 1) & ~7;
         if (stop > aligned) stop = aligned;
         while (stop > first && (stop - 1) * inverse - 1.5 > right) stop -= 8;
         if (first >= stop || first * inverse - 1.5 < left) continue;
+#endif
         checksum = gap(x, first, n, inverse, imaginary, inside, checksum);
-        uint64_t factor = factor_of((stop - first) / 8), bytes = 0;
-        if (last & 1) {
-            *inside += (uint64_t)(stop - first);
-            bytes = UINT64_C(255) * ((factor + 1000000006) * 233333335 % 1000000007);
+        unsigned width = (unsigned)(stop - first) / 8;
+        uint64_t factor, bytes = 0;
+        int full = last & 1;
+#ifdef TZ_MANDEL_FACTORES
+        if (width < sizeof(powers) / sizeof(powers[0])) {
+            uint64_t packed = powers[width];
+            factor = packed & UINT32_MAX;
+            if (full) bytes = packed >> 32;
+        } else
+#endif
+        {
+            factor = factor_of(width);
+            if (full) bytes = UINT64_C(255) * ((factor + 1000000006) * 233333335 % 1000000007);
         }
+        if (full) *inside += (uint64_t)(stop - first);
         checksum = (checksum * factor + bytes) % 1000000007;
         x = stop;
     }

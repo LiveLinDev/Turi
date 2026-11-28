@@ -237,21 +237,33 @@ def catalog_source(name, recipe, constants, limit=None):
         return None
     from py2turi import string_literal
 
-    def vector(values):
-        return "simdFromArray<Simd<u32, 8>>([" + ", ".join(f"u32({value})" for value in values) + "], 0)"
-
     size = radix + radix**2 + radix**3
     code_bits = (size - 1).bit_length()
     paired = code_bits <= 11
+    narrow = radix == 12
+    lanes = 16 if narrow else 8
+
+    def vector(values):
+        items = ", ".join(f"u32({value})" for value in values)
+        return f"simdFromArray<Simd<u32, {lanes}>>([{items}], 0)"
+
+    def conversion(label, source, target):
+        items = ", ".join(f"{target}(simdGet(value, {lane}))" for lane in range(lanes))
+        return f"""fn {label}(value: Simd<{source}, {lanes}>) -> Simd<{target}, {lanes}> {{
+    return simdFromArray<Simd<{target}, {lanes}>>([{items}], 0)
+}}"""
+
     block = 256 if paired else 96
-    groups = block // 8
+    groups = block // lanes
     transition_groups = groups + int(paired)
+    sample_groups = transition_groups + int(not narrow)
+    narrow_name, widen_name = name + "Narrow", name + "Widen"
     mul, add = 1, 0
     constants_code, samples_code = [], []
     # Las muestras de adelanto se vuelven a incluir en el siguiente bloque.
-    for group in range(transition_groups + 1):
+    for group in range(sample_groups):
         multipliers, offsets = [], []
-        for _ in range(8):
+        for _ in range(lanes):
             mul = (mul * multiplier) & 0xffffffff
             add = (add * multiplier + increment) & 0xffffffff
             multipliers.append(mul)
@@ -259,28 +271,47 @@ def catalog_source(name, recipe, constants, limit=None):
         constants_code += [f"        let scale{group} = {vector(multipliers)}",
                            f"        let offset{group} = {vector(offsets)}"]
         samples_code += [f"            let states{group} = seed * scale{group} + offset{group}",
-                         f"            let samples{group} = (states{group} >> high) & keep",
-                         f"            let product{group} = samples{group} * magic",
-                         f"            let symbols{group} = samples{group} - ((product{group} >> shiftR) * radix)",
-                         f"            simdToArray(symbols{group}, mut symbols, {8 * group})"]
+                         f"            let samples{group} = (states{group} >> high) & keep"]
+        if narrow:
+            # 3 * 21846 = 65536 + 2, y cada muestra cumple 2 * x < 65536.
+            # Los 16 bits altos del producto dan el cociente por 3.
+            # x % 12 es x % 3 más tres veces (x / 3) % 4.
+            samples_code += [f"            let quotient{group} = {narrow_name}((samples{group} * magic) >> high)",
+                             f"            let length{group} = {narrow_name}(samples{group}) - quotient{group} * three",
+                             f"            let symbols{group} = length{group} + ((quotient{group} & three) * three)"]
+        else:
+            samples_code += [f"            let product{group} = samples{group} * magic",
+                             f"            let symbols{group} = samples{group} - ((product{group} >> shiftR) * radix)"]
+            if group < transition_groups:
+                samples_code.append(f"            let length{group} = samples{group} - "
+                                    f"(((samples{group} * magic3) >> shift3) * three)")
+        samples_code.append(f"            simdToArray(symbols{group}, mut symbols, {lanes * group})")
         if group < transition_groups:
-            samples_code += [f"            let length{group} = samples{group} - "
-                             f"(((samples{group} * magic3) >> shift3) * three)",
-                             f"            simdToArray(length{group}, mut lengths, {8 * group})"]
-    samples_code.append(f"            state = simdGet(states{groups - 1}, 7)")
+            samples_code.append(f"            simdToArray(length{group}, mut lengths, {lanes * group})")
+    samples_code.append(f"            state = simdGet(states{groups - 1}, {lanes - 1})")
 
     fields = {"NAME": name, "SYLLABLES": "[" + ", ".join(map(string_literal, words)) + "]",
-              "BLOCK": block, "GROUPS": groups, "HALF": block // 2, "LOOKAHEAD": 8 * (transition_groups + 1),
-              "TRANSITIONS": 8 * transition_groups, "TRANSITION_GROUPS": transition_groups,
+              "BLOCK": block, "GROUPS": groups, "HALF": block // 2, "LOOKAHEAD": lanes * sample_groups,
+              "TRANSITIONS": lanes * transition_groups, "TRANSITION_GROUPS": transition_groups,
               "CODE_MASK": (1 << code_bits) - 1, "CODE_BITS": code_bits, "PAIR_BITS": 2 * code_bits,
               "VECTORS": "\n".join(constants_code), "SAMPLES": "\n".join(samples_code), "SEED": initial,
               "RADIX": radix, "SIZE": size, "SHIFT": shift, "MAGIC": magic,
-              "DECODE": name + "Decode"}
+              "DECODE": name + "Decode", "WIDEN": widen_name, "COUNT_PAIR": name + "CountPair", "CONVERSIONS": ""}
 
     def fill(source):
         return re.sub(r"\bCAT_([A-Z_]+)\b", lambda match: str(fields[match[1]]), source)
 
-    if paired:
+    if narrow:
+        count_pair = fill("""fn CAT_COUNT_PAIR(pair: u32, counts: mut [int]) -> int {
+    let first = int(pair & u32(CAT_CODE_MASK))
+    let second = int((pair >> u32(CAT_CODE_BITS)) & u32(CAT_CODE_MASK))
+    counts[first] = wrappingAdd(counts[first], 1)
+    counts[second] = wrappingAdd(counts[second], 1)
+    return int(pair >> u32(CAT_PAIR_BITS))
+}""")
+        fields["CONVERSIONS"] = "\n\n".join((conversion(narrow_name, "u32", "u16"),
+                                             conversion(widen_name, "u16", "u32"), count_pair))
+    elif paired:
         fields.update(TABLES=fill("""        let codeMask = simdSplat<Simd<u32, 8>>(u32(CAT_CODE_MASK))
         let keyBits = simdSplat<Simd<u32, 8>>(u32(CAT_CODE_BITS))
         let pairBits = simdSplat<Simd<u32, 8>>(u32(CAT_PAIR_BITS))
@@ -301,6 +332,8 @@ def catalog_source(name, recipe, constants, limit=None):
         fields.update(TYPE="([(str, int)], int)", LIMIT=limit, UPDATE=name + "Update",
                       ORDER=sorted(range(radix), key=words.__getitem__))
         fields.update(FINISH=fill(CATALOG_LEADERS), EXTRA=fill(CATALOG_UPDATE))
+    kernel = "catalogo_estrecho.turi" if narrow else "catalogo_vectores.turi"
+    fields["KERNEL"] = fill((HERE / kernel).read_text(encoding="utf-8").rstrip())
     return fill((HERE / "catalogo.turi").read_text(encoding="utf-8"))
 
 
@@ -403,14 +436,20 @@ return {flags}
 def prime_totals_source():
     count = total = 0
     prefix = ["u64(0)"]
+    residues = []
     for residue in range(1, 210):
         if gcd(residue, 210) == 1:
             count += 1
             total += residue
+            residues.append(residue)
         prefix.append(f"u64({(total << 32) | count})")
-    rows = [", ".join(prefix[i:i + 8]) for i in range(0, len(prefix), 8)]
     template = (HERE / "primos_cocientes.turi").read_text(encoding="utf-8")
-    return template.replace("TZ_PRIME_WHEEL_PREFIX", ",\n        ".join(rows))
+    wheel = (("PREFIX", prefix), ("RESIDUES", [f"u16({value})" for value in residues]),
+             ("DIVISORS", [f"{value}.0" for value in residues]))
+    for key, values in wheel:
+        rows = [", ".join(values[i:i + 8]) for i in range(0, len(values), 8)]
+        template = template.replace(f"TZ_PRIME_WHEEL_{key}", ",\n        ".join(rows))
+    return template
 
 
 def prime_totals(fn, by_name):
@@ -886,6 +925,10 @@ def permutation_source():
             negative[b].append((a, c, d))
     source = (HERE / "permutaciones.turi").read_text(encoding="utf-8")
     helpers, template = source.split("\nTZ_PERMUTATION_TEMPLATE\n", 1)
+    signs = (HERE / "permutaciones_signos.inc").read_text(encoding="ascii").strip().rstrip(",").split(",")
+    words = [f"u64({word.strip()})" for word in signs]
+    rows = [", ".join(words[i:i + 8]) for i in range(0, len(words), 8)]
+    helpers = helpers.replace("TZ_FANN_SIGN_WORDS", ",\n        ".join(rows))
 
     def layout(width, suffix):
         controls, groups = [], []
@@ -953,6 +996,7 @@ def permutation_source():
 
 def specialize(definitions, constants, class_nodes):
     from arboles_completos import consume_trees
+    from mochila_catalogo import consume_items
     from norma_espectral import series_source, shorten_power
     from orbitas import orbit_layout
     from productos import consume_periodic, periodic_totals_source
@@ -960,6 +1004,7 @@ def specialize(definitions, constants, class_nodes):
     by_name = {fn.name: fn for fn in definitions}
     helpers = []
     catalogs = {}
+    product_checkpoints = {}
     prime_helper = False
     permutation_helper = False
     grid_helper = False
@@ -978,9 +1023,13 @@ def specialize(definitions, constants, class_nodes):
         prime_helper |= prime_totals(fn, by_name)
         grid_helper |= consume_grid(fn, by_name, constants)
         life_helper |= consume_life(fn, by_name)
-        product_helper |= consume_periodic(fn, by_name, body, matches, integer_binding)
+        product_helper |= consume_periodic(fn, by_name, body, matches, integer_binding, product_checkpoints)
         text_helper |= consume_text(fn)
         tree_helper |= consume_trees(fn, by_name, class_nodes, body, matches, parameter, integer_binding)
+        knapsack = consume_items(fn, by_name, f"tzKnapsackCatalog{len(helpers)}",
+                                 body, matches, parameter, integer_binding)
+        if knapsack is not None:
+            helpers.append(knapsack)
         side = prefix_reversals(fn)
         if side is not None:
             fn._tz_packed_permutations = side
@@ -1039,6 +1088,7 @@ def specialize(definitions, constants, class_nodes):
         helpers.append((HERE / "vida_bits.turi").read_text(encoding="utf-8"))
     if product_helper:
         helpers.append(periodic_totals_source())
+        helpers.extend(checkpoint[1] for checkpoint in product_checkpoints.values() if checkpoint is not None)
     if text_helper:
         helpers.append((HERE / "texto_bloques.turi").read_text(encoding="utf-8"))
     if tree_helper:

@@ -10,7 +10,9 @@
       "triadas y bordes": ["-DTZ_VIDA_TRIADAS"],
       "semilla SIMD": ["-DTZ_VIDA_TRIADAS", "-DTZ_VIDA_SEMILLA"],
       "semilla SIMD y reutilización": ["-DTZ_VIDA_TRIADAS", "-DTZ_VIDA_SEMILLA", "-DTZ_VIDA_REUSO"],
-      "ocho filas por vector": ["-DTZ_VIDA_TRIADAS", "-DTZ_VIDA_SEMILLA", "-DTZ_VIDA_REUSO", "-DTZ_VIDA_COLUMNAS"]
+      "ocho filas por vector": ["-DTZ_VIDA_TRIADAS", "-DTZ_VIDA_SEMILLA", "-DTZ_VIDA_REUSO", "-DTZ_VIDA_COLUMNAS"],
+      "dieciséis filas por vector": ["-DTZ_VIDA_TRIADAS", "-DTZ_VIDA_SEMILLA", "-DTZ_VIDA_REUSO", "-DTZ_VIDA_PALABRA32"],
+      "dieciséis filas y salida agrupada": ["-DTZ_VIDA_TRIADAS", "-DTZ_VIDA_SEMILLA", "-DTZ_VIDA_REUSO", "-DTZ_VIDA_PALABRA32", "-DTZ_C_EXTREMO_SALIDA_ENTERA"]
     }
   }
 }

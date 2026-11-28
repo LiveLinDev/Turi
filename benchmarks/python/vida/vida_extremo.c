@@ -155,11 +155,19 @@ static uint64_t step(const uint64_t *restrict before, uint64_t *restrict after,
 }
 #endif
 
+#ifdef TZ_VIDA_PALABRA32
+typedef uint32_t VidaWord;
+#else
+typedef uint64_t VidaWord;
+#endif
+
 #ifdef TZ_VIDA_SEMILLA
 #include "vida_semilla.h"
 #endif
 
-#ifdef TZ_VIDA_COLUMNAS
+#if defined(TZ_VIDA_PALABRA32)
+#include "vida_columnas32.h"
+#elif defined(TZ_VIDA_COLUMNAS)
 #include "vida_columnas.h"
 #endif
 
@@ -169,7 +177,11 @@ int main(int argc, char **argv) {
     unsigned generations = requested > 0 ? (unsigned)requested : 0;
     unsigned origin = generations + 1;
     unsigned side = SEED_SIDE + 2 * origin;
-#ifdef TZ_VIDA_COLUMNAS
+#if defined(TZ_VIDA_PALABRA32)
+    size_t stride = ((side + 15) / 16 + 2) * 16;
+    size_t columns = (side + 31) / 32;
+    size_t words = (columns + 2) * stride;
+#elif defined(TZ_VIDA_COLUMNAS)
     size_t stride = ((side + 7) / 8 + 2) * 8;
     size_t columns = (side + 63) / 64;
     size_t words = (columns + 2) * stride;
@@ -178,10 +190,13 @@ int main(int argc, char **argv) {
     size_t words = side * stride;
 #endif
     double start = c_extremo_inicio();
-    uint64_t *storage = calloc(2 * words, sizeof(*storage));
+    VidaWord *storage = calloc(2 * words, sizeof(*storage));
     if (!storage) return EXIT_FAILURE;
-    uint64_t *live = storage, *buffer = storage + words;
-#ifdef TZ_VIDA_COLUMNAS
+    VidaWord *live = storage, *buffer = storage + words;
+#if defined(TZ_VIDA_PALABRA32)
+    Active active = {(origin + 15) / 16, (origin + SEED_SIDE + 16) / 16,
+                     1 + (origin - 1) / 32, 1 + (origin + SEED_SIDE) / 32};
+#elif defined(TZ_VIDA_COLUMNAS)
     Active active = {(origin + 7) / 8, (origin + SEED_SIDE + 8) / 8,
                      1 + (origin - 1) / 64, 1 + (origin + SEED_SIDE) / 64};
 #else
@@ -204,19 +219,21 @@ int main(int argc, char **argv) {
     }
 #endif
     for (unsigned g = 0; g < generations; g++) {
-        if (g % 10 == 0) printf("%u %llu\n", g, (unsigned long long)count);
-#if defined(TZ_VIDA_COLUMNAS)
+        if (g % 10 == 0) c_extremo_pareja("%u %llu\n", g, (unsigned long long)count);
+#if defined(TZ_VIDA_PALABRA32)
+        count = step_columns32(live, buffer, stride, columns, &active, (g + 1) % 10 == 0 || g + 1 == generations);
+#elif defined(TZ_VIDA_COLUMNAS)
         count = step_columns(live, buffer, stride, columns, &active, (g + 1) % 10 == 0 || g + 1 == generations);
 #elif defined(TZ_VIDA_TRIADAS)
         count = step(live, buffer, stride, &active, (g + 1) % 10 == 0 || g + 1 == generations);
 #else
         count = step(live, buffer, stride, origin - g - 1, origin + SEED_SIDE + g + 1, &active);
 #endif
-        uint64_t *swap = live;
+        VidaWord *swap = live;
         live = buffer;
         buffer = swap;
     }
-    printf("%ld %llu\n", requested, (unsigned long long)count);
+    c_extremo_pareja("%ld %llu\n", requested, (unsigned long long)count);
     free(storage);
     c_extremo_fin(start);
     return EXIT_SUCCESS;

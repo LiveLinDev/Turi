@@ -37,7 +37,152 @@ fn tzPackHigherSix(initial: u64, reverse: u64, counts: u64, n: int) -> (u64, u64
     return (value, inverted, digits, false)
 }
 
+// El signo depende del orden relativo de las primeras tres fichas.
+// Las fichas pendientes se cuentan por combinaciones sin materializar permutaciones.
+raw fn tzFannInverseWeight(first: u64, unused: u64, factorial: [int]) -> int {
+    let a = first & u64(15)
+    let b = (first >> u64(5)) & u64(15)
+    let c = (first >> u64(10)) & u64(15)
+    let missing = (if a == u64(0) { 1 } else { 0 }) + (if b == u64(0) { 1 } else { 0 }) + (if c == u64(0) { 1 } else { 0 })
+    if missing >= 2 {
+        return 0
+    }
+    let left = int(popcnt(unused))
+    let sign = if ((a > b) != (b > c)) != (a > c) { 1 } else { -1 }
+    if missing == 0 {
+        return sign * factorial[left]
+    }
+    let highest = max(a, max(b, c))
+    let lowest = a + b + c - highest
+    let lowShift = u64(9) + lowest * u64(5)
+    let highShift = u64(9) + highest * u64(5)
+    let interior = ((~u64(0)) >> (lowShift + u64(1))) & ~((~u64(0)) >> highShift)
+    let middle = int(popcnt(unused & interior))
+    return sign * (left - 2 * middle) * factorial[left - 1]
+}
+
+// Cada campo usa cuatro bits para la ficha y uno para detectar el cero.
+raw fn tzFannMissing(fields: u64) -> u64 {
+    let low = u64(0x1ef7bdef7bdef)
+    return ~wrappingAdd(fields, low) & u64(0x2108421084210)
+}
+
+raw fn tzFannKnown(order: u64, backwards: u64, depth: int, signs: Ptr<u64>) -> (int, int) {
+    var direct = order
+    var reverse = backwards
+    var levels = depth
+    var sum = 0
+    var best = depth
+    while true {
+        // Las tres fichas completas caben en los primeros quince bits.
+        let head = int(direct & u64(32767))
+        let positive = ((ptrRead(ptrAdd(signs, head / 64)) >> u64(head & 63)) & u64(1)) != u64(0)
+        sum = if positive { wrappingAdd(sum, levels) } else { wrappingSub(sum, levels) }
+        // El 15 excluye la primera posición. El relleno cero tampoco coincide.
+        var possible = tzFannMissing(direct ^ u64(0x22190a63a12f))
+        if possible == u64(0) {
+            return (sum, max(best, levels))
+        }
+        levels = wrappingAdd(levels, 1)
+        while true {
+            let shift = u64(63) - u64(ctz(possible))
+            let next = (direct & ~((~u64(0)) >> shift)) | (reverse >> shift)
+            let previous = (reverse & ~((~u64(0)) << shift)) | (direct << shift)
+            possible = possible & wrappingSub(possible, u64(1))
+            if possible == u64(0) {
+                direct = next
+                reverse = previous
+                break
+            }
+            let branch = tzFannKnown(next, previous, levels, signs)
+            sum = wrappingAdd(sum, branch.0)
+            best = max(best, branch.1)
+        }
+    }
+    return (0, 0)
+}
+
+// Una inversión de longitud k puede deshacerse cuando la posición k contiene
+// k, o cuando aún se pueden asignar esa ficha y esa posición.
+trusted fn tzFannInverse(order: u64, backwards: u64, open: u64, selected: u64, depth: int,
+                            factorial: [int], signs: Ptr<u64>) -> (int, int) {
+    raw {
+        var direct = order
+        var reverse = backwards
+        var unused = selected
+        var levels = depth
+        var sum = 0
+        var best = depth
+        while true {
+            // Dos huecos admiten exactamente las dos asignaciones completas.
+            if int(popcnt(unused)) == 2 {
+                let missing = open & tzFannMissing(direct)
+                let left = u64(ctz(missing)) - u64(4)
+                let right = u64(ctz(missing & wrappingSub(missing, u64(1)))) - u64(4)
+                let first = (u64(0x22190a63a12a) >> (u64(ctz(unused)) - u64(4))) & u64(15)
+                let second = (u64(0x22190a63a12a) >> (u64(ctz(unused & wrappingSub(unused, u64(1)))) - u64(4))) & u64(15)
+                let ab = tzFannKnown(direct | (first << left) | (second << right),
+                                     reverse | (first << (u64(59) - left)) | (second << (u64(59) - right)), levels, signs)
+                let ba = tzFannKnown(direct | (second << left) | (first << right),
+                                     reverse | (second << (u64(59) - left)) | (first << (u64(59) - right)), levels, signs)
+                return (wrappingAdd(sum, wrappingAdd(ab.0, ba.0)), max(best, max(ab.1, ba.1)))
+            }
+            // Si queda una ficha, su posición es la única que aún está vacía.
+            if (unused & wrappingSub(unused, u64(1))) == u64(0) {
+                if unused != u64(0) {
+                    let position = u64(ctz(open & tzFannMissing(direct))) - u64(4)
+                    let value = (u64(0x22190a63a12a) >> (u64(ctz(unused)) - u64(4))) & u64(15)
+                    direct = direct | (value << position)
+                    reverse = reverse | (value << (u64(59) - position))
+                }
+                let done = tzFannKnown(direct, reverse, levels, signs)
+                return (wrappingAdd(sum, done.0), max(best, done.1))
+            }
+            sum = wrappingAdd(sum, wrappingMul(levels, tzFannInverseWeight(direct, unused, factorial)))
+            var possible = open & (tzFannMissing(direct ^ u64(0x22190a63a12a)) | (tzFannMissing(direct) & unused))
+            if possible == u64(0) {
+                return (sum, max(best, levels))
+            }
+            levels = wrappingAdd(levels, 1)
+            while true {
+                let position = u64(ctz(possible))
+                let shift = u64(63) - position
+                let value = (u64(0x22190a63a12a) >> (position - u64(4))) & u64(15)
+                let next = (direct & ~((~u64(0)) >> shift)) | (reverse >> shift) | value
+                let previous = (reverse & ~((~u64(0)) << shift)) | (direct << shift) | (value << u64(59))
+                let tail = possible & wrappingSub(possible, u64(1))
+                let available = unused & ~(possible ^ tail)
+                if tail == u64(0) {
+                    direct = next
+                    reverse = previous
+                    unused = available
+                    break
+                }
+                possible = tail
+                let branch = tzFannInverse(next, previous, open, available, levels, factorial, signs)
+                sum = wrappingAdd(sum, branch.0)
+                best = max(best, branch.1)
+            }
+        }
+        return (0, 0)
+    }
+}
+
+trusted fn tzFannReveal(n: int) -> (int, int) {
+    let factorial = [1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800]
+    // Las fichas ocupan los cuatro bits bajos con valores de 10 a 1.
+    let used = u64(0x2108421084210) & ((u64(1) << u64(5 * n)) - u64(1)) & ~u64(16)
+    let knownSign = [
+        TZ_FANN_SIGN_WORDS
+    ]
+    let signs = slicePtr(knownSign)
+    return tzFannInverse(u64(10), u64(0x5000000000000000), used, used, 0, factorial, signs)
+}
+
 fn tzPairsFannkuch(n: int) -> (int, int) {
+    if n >= 7 && n <= 10 {
+        return tzFannReveal(n)
+    }
     if n <= 10 {
         return tzPairsFannkuchSix(n)
     }

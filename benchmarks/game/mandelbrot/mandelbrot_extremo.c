@@ -19,13 +19,19 @@ static uint64_t pixels(int x, int width, int vectors, double inverse, double ima
     if ((vertical <= 0.06 && left * left + vertical <= 0.06 && right * right + vertical <= 0.06) ||
         (vertical <= 0.009 && a * a + vertical <= 0.009 && b * b + vertical <= 0.009)) {
         *inside += (uint64_t)size;
-        return vectors == 1 ? (255u & (255u << (8 - size))) : 255u * (1 + 31 + 961 + 29791);
+        if (vectors == 1) return 255u & (255u << (8 - size));
+        return 255u * (vectors == 2 ? 1 + 31 : 1 + 31 + 961 + 29791);
     }
 #endif
     const __m512d inv = _mm512_set1_pd(inverse), ci = _mm512_set1_pd(imaginary);
     __m512d cr[4], zr[4], zi[4];
     const __m512d lanes = _mm512_setr_pd(0, 1, 2, 3, 4, 5, 6, 7);
     const __m512d offset = _mm512_set1_pd(1.5);
+#ifdef TZ_MANDEL_NORMA
+    const __m512d escape_limit = _mm512_set1_pd(12.5);
+#elif defined(TZ_MANDEL_ESCAPE)
+    const __m512d escape_limit = _mm512_set1_pd(32.0);
+#endif
     for (int k = 0; k < vectors; k++) {
         __m512d columns = _mm512_add_pd(_mm512_set1_pd(x + 8 * k), lanes);
         cr[k] = _mm512_sub_pd(_mm512_mul_pd(columns, inv), offset);
@@ -46,7 +52,7 @@ static uint64_t pixels(int x, int width, int vectors, double inverse, double ima
             __mmask8 live = 0;
             for (int k = 0; k < vectors; k++) {
                 __m512d magnitude = _mm512_add_pd(_mm512_mul_pd(zr[k], zr[k]), _mm512_mul_pd(zi[k], zi[k]));
-                live |= _mm512_cmp_pd_mask(magnitude, _mm512_set1_pd(32.0), _CMP_LE_OQ);
+                live |= _mm512_cmp_pd_mask(magnitude, escape_limit, _CMP_LE_OQ);
             }
             if (!live) return 0;
         }
@@ -67,6 +73,9 @@ static uint64_t pixels(int x, int width, int vectors, double inverse, double ima
 #ifdef TZ_MANDEL_SIMETRIA
 #ifdef TZ_MANDEL_TRAMOS
 #include "mandelbrot_tramos.h"
+#ifdef TZ_MANDEL_PAREJAS
+#include "mandelbrot_parejas.h"
+#endif
 #elif defined(TZ_MANDEL_REGIONES)
 #include "mandelbrot_regiones.h"
 #else
@@ -88,6 +97,9 @@ int main(int argc, char **argv) {
     int n = (int)requested;
     double start = c_extremo_inicio();
     double inverse = 2.0 / n;
+#ifdef TZ_MANDEL_EXTREMOS
+    initialize_bounds(n, inverse);
+#endif
     const uint64_t modulus = 1000000007;
     uint64_t inside = 0, factor = 1;
     for (int block = 0; block < (n + 7) / 8; block++)
@@ -96,11 +108,17 @@ int main(int argc, char **argv) {
     for (int y = 1; y < (n + 1) / 2; y++) {
         double ci = y * inverse - 1.0;
         double other = (n - y) * inverse - 1.0;
+#ifdef TZ_MANDEL_PAREJAS
+        uint64_t pair[2];
+        mirrored_rows(n, inverse, ci, other, &inside, pair);
+        uint64_t a = pair[0], b = pair[1];
+#else
         uint64_t count = 0;
         uint64_t a = row(n, inverse, ci, &count), b = a;
         inside += count;
         if (ci == -other) inside += count;
         else b = row(n, inverse, other, &inside);
+#endif
         top = (top * factor + a) % modulus;
         bottom = (shift * b + bottom) % modulus;
         shift = shift * factor % modulus;

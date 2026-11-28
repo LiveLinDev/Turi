@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
     int64_t repeated = (full * n * (n + 1) - 10 * (2 * n + 1) * full_sum + 100 * full_squares) / 2;
     total = 12 * diagonals - 10 * repeated + 5 * squares;
 #endif
-    printf("%lld %lld\n", (long long)(5 * m), (long long)total);
+    c_extremo_pareja("%lld %lld\n", (long long)(5 * m), (long long)total);
     c_extremo_fin(start);
     return EXIT_SUCCESS;
 }
@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
     }
     free(next);
     free(weights);
-    printf("%u %llu\n", last, (unsigned long long)total);
+    c_extremo_pareja("%u %llu\n", last, (unsigned long long)total);
     c_extremo_fin(start);
     return EXIT_SUCCESS;
 }
