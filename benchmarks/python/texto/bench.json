@@ -11,7 +11,9 @@
       "bytes en orden nativo": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_NATIVO"],
       "filas SIMD": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_FILAS_SIMD"],
       "filas SIMD y bytes en orden nativo": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_NATIVO", "-DTZ_TEXTO_FILAS_SIMD"],
-      "filas y bytes nulos SIMD": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_NATIVO", "-DTZ_TEXTO_FILAS_SIMD", "-DTZ_TEXTO_FILAS_NUL"]
+      "filas y bytes nulos SIMD": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_NATIVO", "-DTZ_TEXTO_FILAS_SIMD", "-DTZ_TEXTO_FILAS_NUL"],
+      "pares en la tabla compacta": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_NATIVO", "-DTZ_TEXTO_FILAS_SIMD", "-DTZ_TEXTO_FILAS_NUL", "-DTZ_TEXTO_PAREJAS"],
+      "pares con clave provisional": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_NATIVO", "-DTZ_TEXTO_FILAS_SIMD", "-DTZ_TEXTO_FILAS_NUL", "-DTZ_TEXTO_PAREJAS", "-DTZ_TEXTO_CLAVE_PROVISIONAL"]
     }
   }
 }

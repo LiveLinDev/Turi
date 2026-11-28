@@ -1,8 +1,6 @@
 extern "C" {
     fn tzx_text_file_chunk(handle: int) -> int
-    fn tzx_text_rows(address: int, length: int) -> int
-    fn tzx_text_fold_breaks(address: int) -> int
-    fn tzx_text_casefold(address: int, length: int)
+    fn tzx_text_prepare(address: int, length: int, lower: int, flags: int) -> int
 }
 
 fn tzTextPunctuation(c: u8) -> bool {
@@ -47,6 +45,44 @@ raw fn tzTextToken(base: Ptr<u8>, start: int, end: int,
     let count = if extra.has(word) { extra[word] } else { 0 }
     extra[word] = wrappingAdd(count, 1)
     return 1
+}
+
+raw fn tzTextPacked(base: Ptr<u8>, start: int, end: int) -> u64 {
+    let length = end - start
+    if length < 1 || length > 8 {
+        return u64(0)
+    }
+    // El bloque en minúsculas tiene ocho bytes de margen y contiene ASCII sin NUL.
+    let bytes = ptrRead(ptrCast<u64>(ptrAdd(base, start)))
+    let last = ((bytes >> u64(8 * (length - 1))) & u64(255))
+    if (bytes & u64(255)) < u64(64) {
+        return u64(0)
+    }
+    var size = length
+    if last < u64(64) {
+        if length == 1 || !tzTextPunctuation(u8(last)) ||
+           ((bytes >> u64(8 * (length - 2))) & u64(255)) < u64(64) {
+            return u64(0)
+        }
+        size = size - 1
+    }
+    return bytes & (~u64(0) >> u64(8 * (8 - size)))
+}
+
+raw fn tzTextPair(base: Ptr<u8>, start: int, middle: int, end: int, keys: Ptr<u64>, scores: MutPtr<int>) -> bool {
+    let first = tzTextPacked(base, start, middle)
+    let second = tzTextPacked(base, middle + 1, end)
+    if first == u64(0) || second == u64(0) {
+        return false
+    }
+    let a = int(wrappingMul(first, u64(0x9e3779b185ebca87)) >> u64(56))
+    let b = int(wrappingMul(second, u64(0x9e3779b185ebca87)) >> u64(56))
+    if ptrRead(ptrAdd(keys, a)) != first || ptrRead(ptrAdd(keys, b)) != second {
+        return false
+    }
+    ptrWrite(ptrAdd(scores, a), wrappingAdd(ptrRead(ptrAdd(scores, a)), 1))
+    ptrWrite(ptrAdd(scores, b), wrappingAdd(ptrRead(ptrAdd(scores, b)), 1))
+    return true
 }
 
 trusted fn tzTextLongest(base: Ptr<u8>, at: int, length: int, limit: int, longest: mut int, prefix: mut str) {
@@ -105,6 +141,14 @@ fn tzTextPrintTop(keys: [u64], scores: [int], extra: Map<str, int>, limit: int, 
 trusted fn tzTextReport(path: str, prefixSize: int, limit: int, width: int) {
     var keys = repeat(u64(0), 256)
     var scores = repeat(0, 256)
+    let keyView = slicePtr(keys)
+    let scoreView = mutSlicePtr(mut scores)
+    var folded = repeat(u8(0), 65544)
+    var separators = repeat(u64(0), 1024)
+    let lower = mutSlicePtr(mut folded)
+    let marks = mutSlicePtr(mut separators)
+    let lowerAddress = bitcast<int>(ptrAddr(lower))
+    let marksAddress = bitcast<int>(ptrAddr(marks))
     var extra: Map<str, int> = mapNew()
     var lines = 0
     var words = 0
@@ -119,21 +163,32 @@ trusted fn tzTextReport(path: str, prefixSize: int, limit: int, width: int) {
         if length == 0 {
             break
         }
-        // La vista queda dentro del bloque de lectura hasta la siguiente llamada al lector.
-        let base = ptrFromAddr<u8>(u64(address))
+        let original = ptrFromAddr<u8>(u64(address))
+        let base = ptrConst(lower)
         size = size + length
-        // Guarda el prefijo original antes de convertir a minúsculas.
-        let rows = tzx_text_rows(address, length)
+        let rows = tzx_text_prepare(address, length, lowerAddress, marksAddress)
         assert rows >= 0
         lines = lines + (rows & 131071)
-        tzTextLongest(base, rows >> 34, (rows >> 17) & 131071, prefixSize, mut longest, mut prefix)
+        tzTextLongest(original, rows >> 34, (rows >> 17) & 131071, prefixSize, mut longest, mut prefix)
         var token = 0
-        let blocks = length / 64
+        let blocks = (length + 63) / 64
         for block in 0..blocks {
             let from = block * 64
-            var flags = bitcast<u64>(tzx_text_fold_breaks(address + from))
+            var flags = ptrRead(ptrAdd(marks, block))
             while flags != u64(0) {
                 let i = from + int(ctz(flags))
+                let rest = flags & wrappingSub(flags, u64(1))
+                if rest != u64(0) {
+                    let end = from + int(ctz(rest))
+                    var paired = false
+                    raw { paired = tzTextPair(base, token, i, end, keyView, scoreView) }
+                    if paired {
+                        words = wrappingAdd(words, 2)
+                        token = end + 1
+                        flags = rest & wrappingSub(rest, u64(1))
+                        continue
+                    }
+                }
                 if i > token {
                     var count = 0
                     raw { count = tzTextToken(base, token, i, mut keys, mut scores, mut extra) }
@@ -141,19 +196,6 @@ trusted fn tzTextReport(path: str, prefixSize: int, limit: int, width: int) {
                 }
                 token = i + 1
                 flags = flags & wrappingSub(flags, u64(1))
-            }
-        }
-        let tail = blocks * 64
-        tzx_text_casefold(address + tail, length - tail)
-        for i in tail..length {
-            let c = ptrRead(ptrAdd(base, i))
-            if c == u8(32) || c == u8(10) || c == u8(9) {
-                if i > token {
-                    var count = 0
-                    raw { count = tzTextToken(base, token, i, mut keys, mut scores, mut extra) }
-                    words = wrappingAdd(words, count)
-                }
-                token = i + 1
             }
         }
         if token < length {

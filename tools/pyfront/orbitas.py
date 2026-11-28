@@ -7,6 +7,7 @@ from itertools import combinations
 AXES = "x", "y", "z"
 FIELDS = (*AXES, "vx", "vy", "vz")
 VECTOR = "Simd<float, 8>"
+HALF_VECTOR = "Simd<float, 4>"
 TAIL_VECTOR = "Simd<float, 2>"
 PAIRS = list(combinations(range(5), 2))
 GROUPS = (PAIRS[:8], PAIRS[8:])
@@ -114,6 +115,7 @@ def orbit_kernel():
              f"fn tzAdvanceFive(state: TzOrbitState, mass: {VECTOR}, seconds: float, steps: int) -> TzOrbitState {{"]
     lines.extend(f"    var {field}Vec = state.{field}" for field in FIELDS)
     lines += [f"    let dt = simdSplat<{VECTOR}>(seconds)", f"    let zero = simdSplat<{VECTOR}>(0.0)",
+              f"    let dtHalf = simdSplat<{HALF_VECTOR}>(seconds)",
               f"    let dtTail = simdSplat<{TAIL_VECTOR}>(seconds)", f"    let zeroTail = simdSplat<{TAIL_VECTOR}>(0.0)"]
     for round_number, stage in enumerate(ROUNDS):
         weights = []
@@ -135,7 +137,11 @@ def orbit_kernel():
     lines += ["        let zeroGuard = simdReduceMax(simdCmpEq(denominator0, zero)) | "
               "simdReduceMax(simdCmpEq(denominator1, zeroTail))",
               "        assert zeroGuard == u64(0)",
-              "        let mag0 = dt / denominator0", "        let mag1 = dtTail / denominator1"]
+              f"        let magLow = dtHalf / {gather('denominator0', range(4), HALF_VECTOR)}",
+              f"        let magHigh = dtHalf / {gather('denominator0', range(4, 8), HALF_VECTOR)}",
+              "        let mag0 = " + vector(f"simdGet({half}, {lane})" for half in ("magLow", "magHigh")
+                                             for lane in range(4)),
+              "        let mag1 = dtTail / denominator1"]
     for round_number, stage in enumerate(ROUNDS):
         # La misma permutación de la magnitud sirve para los tres ejes. Cada
         # carril recibe sus cuatro impulsos en el orden original de Python.

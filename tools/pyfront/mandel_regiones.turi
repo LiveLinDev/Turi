@@ -12,42 +12,64 @@ fn tzMandelFactor(bytes: int) -> int {
     return result
 }
 
-TZ_ROW_SCAN
-    let resolution = TZ_REGION_RESOLUTION
-    let band = min(resolution - 1, int(abs(imaginary) * float(resolution)))
-    let end = int(zones[band + 1])
-    var run = int(zones[band])
-    let stride = 1.0 / float(resolution)
-    while x + 32 <= n {
-        let left = float(x) * inverse - 1.5
-        let right = float(x + 31) * inverse - 1.5
-        while run < end && left >= float(zones[resolution + 2 + 3 * run]) * stride - 1.5 {
-            run = run + 1
-        }
-        if run < end {
-            let at = resolution + 1 + 3 * run
-            let begin = float(zones[at]) * stride - 1.5
-            let stop = float(zones[at + 1]) * stride - 1.5
-            if left >= begin && right <= stop {
-                let bound = int((stop + 1.5) / inverse) + 1
-                var blocks = max(1, min(n - x, bound - x) / 32)
-                while blocks > 1 && float(x + blocks * 32 - 1) * inverse - 1.5 > stop {
-                    blocks = blocks - 1
-                }
-                let factor = tzMandelFactor(4 * blocks)
-                var bytes = 0
-                if zones[at + 2] != u16(0) {
-                    count = wrappingAdd(count, blocks * 32)
-                    // (factor - 1) / (31 - 1), usando el inverso de 30 módulo M.
-                    bytes = wrappingMul(255, wrappingMul(factor + 1000000006, 233333335) % 1000000007)
-                }
-                checksum = wrappingAdd(wrappingMul(checksum, factor), bytes) % 1000000007
-                x = x + blocks * 32
-                continue
-            }
-        }
+fn tzMandelGap(begin: int, end: int, n: int, inverse: float, imaginary: float,
+                  base: int, seed: int) -> (int, int) {
+    var x = begin
+    var count = base
+    var checksum = seed
+    while x + 32 <= end {
         let result = tzMandelPixels4(x, n, inverse, imaginary)
         count = wrappingAdd(count, result.0)
         checksum = wrappingAdd(wrappingMul(checksum, 923521), result.1) % 1000000007
         x = x + 32
     }
+    while x < end {
+        let result = tzMandelPixels1(x, n, inverse, imaginary)
+        count = wrappingAdd(count, result.0)
+        checksum = wrappingAdd(wrappingMul(checksum, 31), result.1) % 1000000007
+        x = x + 8
+    }
+    return (count, checksum)
+}
+
+fn tzMandelRow(n: int, inverse: float, imaginary: float, zones: [u16]) -> (int, int) {
+    let band = min(TZ_REGION_RESOLUTION - 1, int(abs(imaginary) * float(TZ_REGION_RESOLUTION)))
+    let end = int(zones[band + 1])
+    let stride = 1.0 / float(TZ_REGION_RESOLUTION)
+    let unit = stride / inverse
+    let aligned = n & ~7
+    var x = 0
+    var count = 0
+    var checksum = 0
+    for run in int(zones[band])..end {
+        let at = TZ_REGION_RESOLUTION + 1 + 2 * run
+        let startCell = int(zones[at])
+        let last = int(zones[at + 1])
+        let stopCell = last >> 1
+        let left = float(startCell) * stride - 1.5
+        let right = float(stopCell) * stride - 1.5
+        var first = max(x, int(float(startCell) * unit) & ~7)
+        if float(first) * inverse - 1.5 < left {
+            first = first + 8
+        }
+        var stop = min(aligned, (int(float(stopCell) * unit) + 1) & ~7)
+        while stop > first && float(stop - 1) * inverse - 1.5 > right {
+            stop = stop - 8
+        }
+        if first >= stop || float(first) * inverse - 1.5 < left {
+            continue
+        }
+        let gap = tzMandelGap(x, first, n, inverse, imaginary, count, checksum)
+        count = gap.0
+        checksum = gap.1
+        let factor = tzMandelFactor((stop - first) / 8)
+        var bytes = 0
+        if (last & 1) != 0 {
+            count = wrappingAdd(count, stop - first)
+            bytes = wrappingMul(255, wrappingMul(factor + 1000000006, 233333335) % 1000000007)
+        }
+        checksum = wrappingAdd(wrappingMul(checksum, factor), bytes) % 1000000007
+        x = stop
+    }
+    return tzMandelGap(x, n, n, inverse, imaginary, count, checksum)
+}

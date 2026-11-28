@@ -65,7 +65,9 @@ static uint64_t pixels(int x, int width, int vectors, double inverse, double ima
 }
 
 #ifdef TZ_MANDEL_SIMETRIA
-#ifdef TZ_MANDEL_REGIONES
+#ifdef TZ_MANDEL_TRAMOS
+#include "mandelbrot_tramos.h"
+#elif defined(TZ_MANDEL_REGIONES)
 #include "mandelbrot_regiones.h"
 #else
 static uint64_t row(int n, double inverse, double imaginary, uint64_t *inside) {

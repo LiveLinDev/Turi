@@ -146,9 +146,43 @@ fn tzSeriesFromSeed(source: [float], projected: mut [float], n: int, steps: int,
                            sqrt(above * (1.0 + roundoff)))
 }
 
+fn tzSeriesFourthTail(left: float, right: float) -> (float, float) {
+    let a = 1.0 / (left - 0.5)
+    let b = 1.0 / (right - 0.5)
+    let a3 = a * a * a
+    // La integral por celdas centradas acota por arriba la suma de j^-4.
+    // La segunda derivada acota el error de punto medio de cada celda.
+    let high = (a3 - b * b * b) / 3.0
+    let error = (20.0 / 24.0) * (a3 * a3 + a3 * a * a * 0.2) + 1e-22
+    return (max(0.0, high - error), high)
+}
+
+fn tzSeriesFiniteTail(n: int, steps: int) -> (bool, float) {
+    let fixed = float(TZ_SERIES_TAIL_SIZE)
+    let tail = tzSeriesFourthTail(fixed, float(n))
+    let scaled = tzSeriesFourthTail(fixed + TZ_SERIES_SEED_SHIFT, float(n) + TZ_SERIES_SEED_SHIFT)
+    let scale = TZ_SERIES_SEED_SCALE
+    let squareLow = TZ_SERIES_TAIL_SQUARE + (scale * scale) * scaled.0
+    let squareHigh = TZ_SERIES_TAIL_SQUARE + (scale * scale) * scaled.1
+    let cross = (2.0 * scale) * tail.1
+    let energyLow = TZ_SERIES_TAIL_ENERGY + TZ_SERIES_TAIL_GAIN_LOW * tail.0
+    let energyHigh = TZ_SERIES_TAIL_ENERGY + TZ_SERIES_TAIL_GAIN_HIGH * tail.1 + fixed * cross * cross
+    let below = (energyLow / squareHigh) * (1.0 - 5e-13)
+    let above = (energyHigh / squareLow) * (1.0 + 5e-13) + TZ_SERIES_RESIDUAL_SQUARED / (2.0 * below - 1.9)
+    let roundoff = float((16 * steps + 16) * (n + 3)) * 1.1102230246251565e-16
+    return tzSeriesDecimal(sqrt(tzSeriesOriginalFloor(below, n, steps) * (1.0 - roundoff)),
+                           sqrt(above * (1.0 + roundoff)))
+}
+
 fn tzSeriesSolve(n: int, steps: int) -> (bool, float) {
     if n < 32 || n > 8192 {
         return (false, 0.0)
+    }
+    if n >= TZ_SERIES_TAIL_SIZE && steps >= 7 {
+        let estimate = tzSeriesFiniteTail(n, steps)
+        if estimate.0 {
+            return estimate
+        }
     }
     // Los siete ceros de margen permiten cargar la última tira completa de ocho.
     var u = repeat(0.0, n + 7)

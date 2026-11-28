@@ -1,12 +1,12 @@
 """Genera aritmética SIMD para píxeles independientes con sumas estrictas."""
 
 from functools import lru_cache
-from math import hypot, sqrt
+from math import hypot
 from pathlib import Path
 
 VECTOR = "Simd<float, 8>"
 MASK = "Simd<u64, 8>"
-REGION_RESOLUTION = 512
+REGION_RESOLUTION = 1024
 
 
 def region_certificate(real, imaginary, uncertainty):
@@ -27,20 +27,28 @@ def region_certificate(real, imaginary, uncertainty):
 @lru_cache(maxsize=2)
 def mandel_regions(resolution=REGION_RESOLUTION):
     offsets, runs = [0], []
-    uncertainty = sqrt(2) / (2 * resolution) + 2 ** -33
     for row in range(resolution):
         imaginary = (row + 0.5) / resolution
-        current = -1
-        for column in range(2 * resolution + 1):
-            tag = (region_certificate((column + 0.5) / resolution - 1.5, imaginary, uncertainty)
-                   if column < 2 * resolution else -1)
-            if tag == current:
-                continue
-            if current >= 0:
-                runs.extend((first, column, current))
-            current = tag
-            first = column
-        offsets.append(len(runs) // 3)
+        band = []
+
+        def visit(left, right):
+            radius = hypot(right - left, 1) / (2 * resolution) + 2 ** -33
+            tag = region_certificate((left + right) / (2 * resolution) - 1.5, imaginary, radius)
+            if tag >= 0:
+                if band and band[-1][1] == left and band[-1][2] == tag:
+                    band[-1] = (band[-1][0], right, tag)
+                else:
+                    band.append((left, right, tag))
+            elif right - left > 1:
+                center = (left + right) // 2
+                visit(left, center)
+                visit(center, right)
+
+        visit(0, 2 * resolution)
+        for left, right, tag in band:
+            runs.extend((left, 2 * right + tag))
+        offsets.append(len(runs) // 2)
+    assert offsets[-1] <= 65535 and 4 * resolution + 1 <= 65535
     return tuple(offsets + runs)
 
 
@@ -111,12 +119,10 @@ def vector_mandelbrot(name, iterations):
         data = mandel_regions()
         lines = [", ".join(f"u16({value})" for value in data[i:i + 12]) for i in range(0, len(data), 12)]
         state = "    let zones = [\n        " + ",\n        ".join(lines) + "\n    ]"
-        scan = Path(__file__).with_name("mandel_regiones.turi").read_text(encoding="utf-8")
-        factor, scan = scan.split("\nTZ_ROW_SCAN\n", 1)
-        scan = scan.replace("TZ_REGION_RESOLUTION", str(REGION_RESOLUTION))
-        row = ROW.replace("TZ_REGION_PARAM", ", zones: [u16]").replace("TZ_SCAN", scan.rstrip())
+        row = Path(__file__).with_name("mandel_regiones.turi").read_text(encoding="utf-8")
+        row = row.replace("TZ_REGION_RESOLUTION", str(REGION_RESOLUTION))
         mirrors = MIRRORS.replace("TZ_REGION_INIT", state).replace("TZ_REGION_ARG", ", zones")
-        elements.append((factor + "\n\n" + row + mirrors).replace("tzMandel", name))
+        elements.append((row + mirrors).replace("tzMandel", name))
     else:
         row = ROW.replace("TZ_REGION_PARAM", "").replace("TZ_SCAN", ROW_SCAN)
         mirrors = MIRRORS.replace("TZ_REGION_INIT\n", "").replace("TZ_REGION_ARG", "")

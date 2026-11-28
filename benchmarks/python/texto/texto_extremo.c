@@ -115,6 +115,39 @@ static int count_word(Dictionary *dict, const char *word, size_t length) {
     return 1;
 }
 
+#ifdef TZ_TEXTO_PAREJAS
+static inline uint64_t pair_key(const char *data, size_t start, size_t stop) {
+    size_t width = stop - start;
+    if (!width || width > 8) return 0;
+    uint64_t bytes;
+    memcpy(&bytes, data + start, sizeof(bytes));
+#ifdef TZ_TEXTO_CLAVE_PROVISIONAL
+    unsigned shift = (unsigned)(8 * (width - 1));
+    uint64_t last = (bytes >> shift) & 255u;
+    /* Solo cuenta si la clave provisional aparece en la tabla de palabras ya recortadas. */
+    uint64_t punctuation = (UINT64_C(0x8c00500200000000) >> (last & 63u)) & 1u;
+    uint64_t trim = punctuation & (last < 64u);
+    uint64_t key = bytes & (UINT64_MAX >> (8 * (8 - width)));
+    return key ^ ((UINT64_C(0) - trim) & (last << shift));
+#else
+    if ((bytes & 255u) < 64u || ((bytes >> (8 * (width - 1))) & 255u) < 64u) return 0;
+    return bytes & (UINT64_MAX >> (8 * (8 - width)));
+#endif
+}
+
+static inline int count_pair(Dictionary *dict, const char *data, size_t start, size_t mid, size_t end) {
+    uint64_t a = pair_key(data, start, mid), b = pair_key(data, mid + 1, end);
+    if (!a || !b) return 0;
+    size_t i = (a * UINT64_C(0x9e3779b185ebca87)) >> 56;
+    size_t j = (b * UINT64_C(0x9e3779b185ebca87)) >> 56;
+    if (dict->packed[i] != a || dict->packed[j] != b) return 0;
+    dict->packed_count[i]++;
+    dict->packed_count[j]++;
+    dict->words += 2;
+    return 1;
+}
+#endif
+
 static int tokenize(Dictionary *dict, char *data, size_t size) {
     const __m512i space = _mm512_set1_epi8(' ');
     size_t start = 0;
@@ -134,6 +167,17 @@ static int tokenize(Dictionary *dict, char *data, size_t size) {
                & _mm512_cmp_epu8_mask(bytes, _mm512_set1_epi8(31), _MM_CMPINT_LE))) & valid;
         while (separators) {
             size_t end = i + (unsigned)__builtin_ctzll(separators);
+#ifdef TZ_TEXTO_PAREJAS
+            uint64_t rest = separators & (separators - 1);
+            if (rest && dict->allow_packed) {
+                size_t after = i + (unsigned)__builtin_ctzll(rest);
+                if (count_pair(dict, data, start, end, after)) {
+                    start = after + 1;
+                    separators = rest & (rest - 1);
+                    continue;
+                }
+            }
+#endif
             if (!count_word(dict, data + start, end - start)) return 0;
             start = end + 1;
             separators &= separators - 1;

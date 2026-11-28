@@ -15,6 +15,9 @@
 #ifdef TZ_ESPECTRAL_SERIE
 #include "spectralnorm_series.h"
 #endif
+#ifdef TZ_ESPECTRAL_COLA
+#include "spectralnorm_cola.h"
+#endif
 
 /* Para divisores enteros positivos de hasta 2^31, la estimación por producto
    tiene error relativo menor que 4 * 2^-53. El primer FMA da el residuo exacto.
@@ -79,6 +82,14 @@ int main(int argc, char **argv) {
     /* En este intervalo los denominadores enteros caben exactamente en f64. */
     if (n <= 0 || n > (1L << 25)) return EXIT_FAILURE;
     double start = c_extremo_inicio();
+#ifdef TZ_ESPECTRAL_COLA
+    double bounded;
+    if (finite_tail(n, &bounded)) {
+        c_extremo_fin(start);
+        printf("%.9f\n", bounded);
+        return EXIT_SUCCESS;
+    }
+#endif
     double *storage = malloc(3 * (size_t)n * sizeof(double));
     if (!storage) return EXIT_FAILURE;
     double *u = storage, *v = storage + n, *tmp = storage + 2 * n;

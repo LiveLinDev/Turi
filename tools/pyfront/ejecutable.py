@@ -228,11 +228,13 @@ def c_string(name, data):
 
 
 def build(program, destination):
-    path = Path(program).resolve()
+    real_path = Path(program).resolve()
+    # CPython conserva la grafía del argumento en Windows, incluidos los nombres 8.3.
+    path = Path(os.path.abspath(program)) if os.name == "nt" else real_path
     output = Path(destination).absolute()
-    if output.resolve() == path or output.exists() and output.samefile(path):
+    if output.resolve() == real_path or output.exists() and output.samefile(real_path):
         raise turipy.BuildError("el ejecutable no puede sustituir el archivo Python")
-    source = path.read_bytes()
+    source = real_path.read_bytes()
     compile(source, str(path), "exec", dont_inherit=True)
     code, uses_files = generate(path, source)
     host = Path(__file__).parent

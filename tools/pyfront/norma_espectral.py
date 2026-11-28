@@ -10,6 +10,7 @@ SERIES_DEGREE = 22
 SERIES_VECTOR = "Simd<float, 8>"
 SERIES_SEED_TERMS = 192
 SERIES_CERTIFIED_SIZE = 512
+SERIES_TAIL_SIZE = 1024
 
 
 def arguments(function, count):
@@ -138,6 +139,29 @@ def section_seed():
     return prefix, scale, shift, (hypot(head, tail) + 2e-10) ** 2
 
 
+@lru_cache(maxsize=1)
+def section_tail_coefficients():
+    """Acota la energía que añade la cola a la sección de referencia."""
+    order = SERIES_TAIL_SIZE
+    prefix, scale, shift, _ = section_seed()
+    seed = [*prefix, *(scale / (j + shift) ** 2 for j in range(len(prefix), order))]
+    projected = [fsum(value / ((i + j) * (i + j + 1) // 2 + i + 1) for j, value in enumerate(seed))
+                 for i in range(order)]
+    square = fsum(value * value for value in seed)
+    energy = fsum(value * value for value in projected)
+
+    # Para j >= order, j²*A[i,j] aumenta hasta 2. Esta cota también
+    # se aplica a las nuevas filas al intercambiar los índices del denominador.
+    columns_low = 2 * scale / (1 + shift / order) ** 2 * fsum(
+        value / (1 + (2 * i + 1) / order + (i + 1) * (i + 2) / order**2)
+        for i, value in enumerate(projected))
+    columns_high = 2 * scale * fsum(projected)
+    rows_low = 2 * fsum(value / (1 + (2 * j + 3) / order + (j * j + j + 2) / order**2)
+                        for j, value in enumerate(seed))
+    rows_high = 2 * (fsum(seed) + scale / (order - 1))
+    return square, energy, 2 * columns_low + rows_low**2, 2 * columns_high + rows_high**2
+
+
 def series_source():
     # d(i,j)/d(center,j) = 1 + a*t + b*t² = (1 + λ*t)(1 + μ*t).
     # En una capa s>=32, el radio es s/4, center+j>=5*s/4 y |t|<=1.
@@ -183,6 +207,7 @@ def series_source():
                   "            simdToArray(value, mut out, j)", "            j = j + 8", "        }"]
     template = Path(__file__).with_name("series_espectrales.turi").read_text(encoding="utf-8")
     values, scale, shift, residual = section_seed()
+    square, energy, low_gain, high_gain = section_tail_coefficients()
     seeds = ",\n            ".join(", ".join(map(repr, values[i:i + 6])) for i in range(0, len(values), 6))
     return (template.replace("TZ_SERIES_FORWARD", "\n".join(forward))
             .replace("TZ_SERIES_TRANSPOSE", "\n".join(transpose))
@@ -191,6 +216,11 @@ def series_source():
             .replace("TZ_SERIES_SEED_SCALE", repr(scale))
             .replace("TZ_SERIES_SEED_SHIFT", repr(shift))
             .replace("TZ_SERIES_CERTIFIED_SIZE", str(SERIES_CERTIFIED_SIZE))
+            .replace("TZ_SERIES_TAIL_SIZE", str(SERIES_TAIL_SIZE))
+            .replace("TZ_SERIES_TAIL_SQUARE", repr(square))
+            .replace("TZ_SERIES_TAIL_ENERGY", repr(energy))
+            .replace("TZ_SERIES_TAIL_GAIN_LOW", repr(low_gain))
+            .replace("TZ_SERIES_TAIL_GAIN_HIGH", repr(high_gain))
             .replace("TZ_SERIES_RESIDUAL_SQUARED", repr(residual)))
 
 

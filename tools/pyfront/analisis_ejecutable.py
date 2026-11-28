@@ -874,30 +874,81 @@ if True:
 def permutation_source():
     positive = [[] for _ in range(4)]
     negative = [[] for _ in range(4)]
+    traversal = []
     # El recorrido original alterna intercambio de dos posiciones y giros de tres y cuatro.
     for rotate_four in range(4):
         order = [(k + rotate_four) % 4 for k in range(4)]
         for rotate_three in range(3):
             a, b, c = [order[(k + rotate_three) % 3] for k in range(3)]
             d = order[3]
+            traversal.extend(((a, b, c, d), (b, a, c, d)))
             positive[a].append((b, c, d))
             negative[b].append((a, c, d))
-    controls, groups = [], []
-    for first, (plus, minus) in enumerate(zip(positive, negative)):
-        orders = [order for pair in zip(plus, minus) for order in pair]
-        columns = zip(*(orders + orders[:2]))
-        names = []
-        for member, column in enumerate(columns):
-            name = f"control{first}{member}"
-            names.append(name)
-            shifts = ", ".join(f"u64({4 * index})" for index in column)
-            controls.append(f"    let {name} = simdFromArray<Simd<u64, 8>>([{shifts}], 0)")
-        args = ", ".join(names)
-        groups += [f"        let score{first} = tzLeadingFlips(permutation, inverted, u64({4 * first}), {args})",
-                   f"        flips = flips + score{first}", f"        records = simdMax(records, score{first})"]
-    template = (HERE / "permutaciones.turi").read_text(encoding="utf-8")
-    return template.replace("TZ_PERMUTATION_CONTROLS", "\n".join(controls)).replace(
-        "TZ_PERMUTATION_GROUPS", "\n".join(groups))
+    source = (HERE / "permutaciones.turi").read_text(encoding="utf-8")
+    helpers, template = source.split("\nTZ_PERMUTATION_TEMPLATE\n", 1)
+
+    def layout(width, suffix):
+        controls, groups = [], []
+        full = width == 6
+        if full:
+            batches = [traversal[start:start + 8] for start in range(0, len(traversal), 8)]
+        else:
+            batches = []
+            for plus, minus in zip(positive, negative):
+                alternating = [order for pair in zip(plus, minus) for order in pair]
+                batches.append(alternating + alternating[:2])
+        for group, orders in enumerate(batches):
+            names = []
+            for member, column in enumerate(zip(*orders)):
+                name = f"control{group}{member}"
+                names.append(name)
+                shifts = ", ".join(f"u64({width * index})" for index in column)
+                controls.append(f"    let {name} = simdFromArray<Simd<u64, 8>>([{shifts}], 0)")
+            args = ", ".join(names if full else [f"u64({width * group})", *names])
+            groups += [f"        let score{group} = tzLeadingFlips{suffix}(permutation, inverted, {args})",
+                       f"        flips = flips + score{group}", f"        records = simdMax(records, score{group})"]
+        direct_mask = (1 << (4 * width)) - 1
+        inverse_mask = (1 << (64 - 4 * width)) - 1
+        fields = dict(SUFFIX=suffix, WIDTH=width, MASK=(1 << width) - 1, THIRD=2 * width, FOURTH=3 * width,
+                      REV_SECOND=64 - 2 * width, REV_THIRD=64 - 3 * width,
+                      REV_FOURTH=64 - 4 * width, PERMUTATION_CONTROLS="\n".join(controls),
+                      PERMUTATION_GROUPS="\n".join(groups))
+        if full:
+            # La ficha k lleva el desplazamiento 64 - 6*(k+1). Diez fichas caben en una palabra.
+            values = [64 - width * (i + 1) for i in range(64 // width)]
+            direct = sum(card << (width * i) for i, card in enumerate(values))
+            inverse = sum(card << (64 - width * (i + 1)) for i, card in enumerate(values))
+            end = f"simdSplat<Simd<u64, 8>>(u64({values[0]}))"
+            fields.update(LEADING_PARAMETER="aShift: Simd<u64, 8>", LEADING="    let a = (starts >> aShift) & last",
+                          DIRECT_HEAD=f"simdSplat<Simd<u64, 8>>(initial & ~u64({direct_mask})) | a",
+                          REVERSE_HEAD=f"simdSplat<Simd<u64, 8>>(inverse & u64({inverse_mask})) | (a << {end})",
+                          INITIAL_SHIFT="a", SHIFT="first", ACTIVE=f"simdCmpLt(first, {end})",
+                          FIRST_FLIPS=f"zero - simdCmpLt(a, {end})", FINAL_FLIPS="flips",
+                          CHECKSUM="    let gh = wrappingSub(simdGet(flips, 6), simdGet(flips, 7))\n"
+                                   "    let sum = wrappingAdd(wrappingAdd(ab, cd), wrappingAdd(ef, gh))",
+                          PERMUTATION_INITIAL=f"u64({direct:#x})", PERMUTATION_REVERSE="",
+                          PERMUTATION_INVERSE=f"    var inverted = u64({inverse:#x})",
+                          PERMUTATION_ROTATE="tzPackHigherSix(permutation, inverted, digits, n)",
+                          PERMUTATION_READY=3, PERMUTATION_ADVANCE="        inverted = next.1\n        digits = next.2")
+        else:
+            fields.update(LEADING_PARAMETER="leading: u64",
+                          LEADING="    let a = (initial >> leading) & u64(15)\n"
+                                  "    if a == u64(0) {\n        return zero\n    }",
+                          DIRECT_HEAD=f"simdSplat<Simd<u64, 8>>((initial & ~u64({direct_mask})) | a)",
+                          REVERSE_HEAD=f"simdSplat<Simd<u64, 8>>((inverse & u64({inverse_mask})) | (a << u64(60)))",
+                          INITIAL_SHIFT="simdSplat<Simd<u64, 8>>(u64(60) - a * u64(4))",
+                          SHIFT="simdSplat<Simd<u64, 8>>(u64(60)) - first * width", ACTIVE="simdCmpGt(first, zero)",
+                          FIRST_FLIPS="zero", FINAL_FLIPS="flips + simdSplat<Simd<u64, 8>>(u64(1))",
+                          CHECKSUM="    let sum = wrappingAdd(wrappingAdd(ab, cd), ef)",
+                          PERMUTATION_INITIAL="u64(0xfedcba9876543210)", PERMUTATION_INVERSE="",
+                          PERMUTATION_REVERSE="""        let bytes = bswap(permutation)
+        let nibble = u64(0x0f0f0f0f0f0f0f0f)
+        let inverted = ((bytes & nibble) << u64(4)) | ((bytes >> u64(4)) & nibble)""",
+                          PERMUTATION_ROTATE="tzPackHigher(permutation, digits, n)",
+                          PERMUTATION_READY=2, PERMUTATION_ADVANCE="        digits = next.1")
+        return re.sub(r"TZ_([A-Z_]+)", lambda match: str(fields[match[1]]), template)
+
+    return helpers + layout(6, "Six") + "\n" + layout(4, "Four")
 
 
 def specialize(definitions, constants, class_nodes):

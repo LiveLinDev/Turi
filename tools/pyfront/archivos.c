@@ -188,19 +188,50 @@ static void tz_text_line(uint64_t stop, uint64_t *begin, uint64_t *lines, uint64
 }
 
 /* Tres campos de 17 bits cubren los recuentos y las posiciones de 64 KiB. */
-tz_i64 tzx_text_rows(tz_i64 address, tz_i64 length) {
+tz_i64 tzx_text_prepare(tz_i64 address, tz_i64 length, tz_i64 copy, tz_i64 separators) {
     const unsigned char *text = (const unsigned char *)(uintptr_t)address;
+    unsigned char *lower = (unsigned char *)(uintptr_t)copy;
+    uint64_t *flags = (uint64_t *)(uintptr_t)separators;
     uint64_t lines = 0, begin = 0, longest = 0, offset = 0;
     uint64_t at = 0, end = (uint64_t)length;
 #ifdef __AVX512BW__
     const __m512i newline = _mm512_set1_epi8('\n');
+    const __m512i tab = _mm512_set1_epi8('\t'), space = _mm512_set1_epi8(' ');
     for (; at + 64 <= end; at += 64) {
         __m512i bytes = _mm512_loadu_si512(text + at);
         uint64_t breaks = _mm512_cmpeq_epi8_mask(bytes, newline);
-        uint64_t tabs = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\t'));
-        uint64_t control = _mm512_cmp_epu8_mask(bytes, _mm512_set1_epi8(32), _MM_CMPINT_LT);
+        uint64_t tabs = _mm512_cmpeq_epi8_mask(bytes, tab);
+        uint64_t control = _mm512_cmp_epu8_mask(bytes, space, _MM_CMPINT_LT);
         uint64_t outside = _mm512_cmp_epu8_mask(bytes, _mm512_set1_epi8(127), _MM_CMPINT_GE);
         if (outside || (control & ~(breaks | tabs))) return -1;
+        flags[at / 64] = breaks | tabs | _mm512_cmpeq_epi8_mask(bytes, space);
+        __mmask64 capitals = _mm512_cmp_epu8_mask(bytes, _mm512_set1_epi8('A'), _MM_CMPINT_GE) &
+                             _mm512_cmp_epu8_mask(bytes, _mm512_set1_epi8('Z'), _MM_CMPINT_LE);
+        _mm512_storeu_si512(lower + at, _mm512_mask_add_epi8(bytes, capitals, bytes, _mm512_set1_epi8('a' - 'A')));
+        while (breaks) {
+            uint64_t stop = at + (unsigned)__builtin_ctzll(breaks);
+            tz_text_line(stop, &begin, &lines, &longest, &offset);
+            breaks &= breaks - 1;
+        }
+    }
+#elif defined(__AVX2__)
+    for (; at + 32 <= end; at += 32) {
+        __m256i bytes = _mm256_loadu_si256((const __m256i *)(text + at));
+        __m256i newlines = _mm256_cmpeq_epi8(bytes, _mm256_set1_epi8('\n'));
+        __m256i tabs = _mm256_cmpeq_epi8(bytes, _mm256_set1_epi8('\t'));
+        __m256i spaces = _mm256_cmpeq_epi8(bytes, _mm256_set1_epi8(' '));
+        __m256i control = _mm256_cmpgt_epi8(_mm256_set1_epi8(32), bytes);
+        __m256i invalid = _mm256_or_si256(_mm256_cmpeq_epi8(bytes, _mm256_set1_epi8(127)),
+                                         _mm256_andnot_si256(_mm256_or_si256(newlines, tabs), control));
+        if (_mm256_movemask_epi8(invalid)) return -1;
+        uint32_t breaks = (uint32_t)_mm256_movemask_epi8(newlines);
+        uint64_t marks = (uint32_t)_mm256_movemask_epi8(_mm256_or_si256(newlines, _mm256_or_si256(spaces, tabs)));
+        if (at & 32) flags[at / 64] |= marks << 32;
+        else flags[at / 64] = marks;
+        __m256i capitals = _mm256_and_si256(_mm256_cmpgt_epi8(bytes, _mm256_set1_epi8('A' - 1)),
+                                            _mm256_cmpgt_epi8(_mm256_set1_epi8('Z' + 1), bytes));
+        __m256i folded = _mm256_or_si256(bytes, _mm256_and_si256(capitals, _mm256_set1_epi8('a' - 'A')));
+        _mm256_storeu_si256((__m256i *)(lower + at), folded);
         while (breaks) {
             uint64_t stop = at + (unsigned)__builtin_ctzll(breaks);
             tz_text_line(stop, &begin, &lines, &longest, &offset);
@@ -209,58 +240,14 @@ tz_i64 tzx_text_rows(tz_i64 address, tz_i64 length) {
     }
 #endif
     for (; at < end; ++at) {
+        if ((at & 63) == 0) flags[at / 64] = 0;
         unsigned c = text[at];
         if (c >= 127 || (c < 32 && c != '\n' && c != '\t')) return -1;
         if (c == '\n') tz_text_line(at, &begin, &lines, &longest, &offset);
+        if (c == ' ' || c == '\n' || c == '\t') flags[at / 64] |= UINT64_C(1) << (at & 63);
+        lower[at] = (unsigned char)(c + (c >= 'A' && c <= 'Z' ? 'a' - 'A' : 0));
     }
     if (begin < end) tz_text_line(end, &begin, &lines, &longest, &offset);
+    memset(lower + end, 0, 8);
     return (tz_i64)(lines | (longest << 17) | (offset << 34));
-}
-
-void tzx_text_casefold(tz_i64 address, tz_i64 length) {
-    unsigned char *data = (unsigned char *)(uintptr_t)address;
-    for (tz_i64 i = 0; i < length; i++) {
-        if (data[i] >= 'A' && data[i] <= 'Z') data[i] += 'a' - 'A';
-    }
-}
-
-#if defined(__AVX2__) && !defined(__AVX512BW__)
-static uint32_t tz_fold_breaks32(unsigned char *data) {
-    __m256i bytes = _mm256_loadu_si256((const __m256i *)data);
-    __m256i capitals = _mm256_and_si256(_mm256_cmpgt_epi8(bytes, _mm256_set1_epi8('A' - 1)),
-                                         _mm256_cmpgt_epi8(_mm256_set1_epi8('Z' + 1), bytes));
-    __m256i lower = _mm256_or_si256(bytes, _mm256_and_si256(capitals, _mm256_set1_epi8('a' - 'A')));
-    _mm256_storeu_si256((__m256i *)data, lower);
-    __m256i spaces = _mm256_cmpeq_epi8(bytes, _mm256_set1_epi8(' '));
-    __m256i lines = _mm256_cmpeq_epi8(bytes, _mm256_set1_epi8('\n'));
-    __m256i tabs = _mm256_cmpeq_epi8(bytes, _mm256_set1_epi8('\t'));
-    return (uint32_t)_mm256_movemask_epi8(_mm256_or_si256(spaces, _mm256_or_si256(lines, tabs)));
-}
-#endif
-
-tz_i64 tzx_text_fold_breaks(tz_i64 address) {
-    unsigned char *data = (unsigned char *)(uintptr_t)address;
-    uint64_t mask;
-#ifdef __AVX512BW__
-    __m512i bytes = _mm512_loadu_si512(data);
-    __mmask64 capitals = _mm512_cmp_epu8_mask(bytes, _mm512_set1_epi8('A'), _MM_CMPINT_GE) &
-                         _mm512_cmp_epu8_mask(bytes, _mm512_set1_epi8('Z'), _MM_CMPINT_LE);
-    _mm512_storeu_si512(data, _mm512_mask_add_epi8(bytes, capitals, bytes, _mm512_set1_epi8('a' - 'A')));
-    mask = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8(' ')) |
-           _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n')) |
-           _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\t'));
-#elif defined(__AVX2__)
-    mask = tz_fold_breaks32(data);
-    mask |= (uint64_t)tz_fold_breaks32(data + 32) << 32;
-#else
-    tzx_text_casefold(address, 64);
-    mask = 0;
-    for (unsigned i = 0; i < 64; i++) {
-        unsigned c = data[i];
-        mask |= (uint64_t)(c == ' ' || c == '\n' || c == '\t') << i;
-    }
-#endif
-    tz_i64 signed_mask;
-    memcpy(&signed_mask, &mask, sizeof(mask));
-    return signed_mask;
 }

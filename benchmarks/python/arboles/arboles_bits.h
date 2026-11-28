@@ -19,3 +19,19 @@ static uint64_t count_tree(const uint64_t *nodes, int depth) {
     for (size_t i = 0; i < words; i++) total += __builtin_popcountll(nodes[i]);
     return 2 * total + 1;
 }
+
+#ifdef TZ_ARBOLES_PLANOS
+/* El nodo i del árbol j ocupa el bit i*trees+j. */
+static void build_forest(uint64_t *nodes, int depth, size_t trees) {
+    size_t leaves = (size_t)1 << depth;
+    if (leaves < 64) {
+        nodes[0] = (UINT64_C(1) << leaves) - (UINT64_C(1) << trees);
+        return;
+    }
+    size_t words = leaves / 64, sentinels = trees / 64;
+    memset(nodes, 0, sentinels * sizeof(*nodes));
+    memset(nodes + sentinels, 0xff, (words - sentinels) * sizeof(*nodes));
+    memset(nodes + words, 0, words * sizeof(*nodes));
+    if (!sentinels) nodes[0] = UINT64_MAX << trees;
+}
+#endif

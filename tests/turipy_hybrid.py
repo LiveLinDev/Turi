@@ -1692,6 +1692,7 @@ import sys
 
 def main():
     n = int(sys.argv[1])
+    print(sys.argv[0])
     print(f"{n:0600d}")
     print("estado", file=sys.stderr)
     if n != 8:
@@ -1714,10 +1715,13 @@ if __name__ == "__main__":
     trap_case = (["0", "cero"], False)
     cases = [(["7", 'bytes con espacios "y comillas"\\'], True), (["8", "ocho"], True), (["7", "árbol"], False),
              trap_case, (["-1", str(plain)], True), (["-1", str(unicode)], False)]
-    expected = [subprocess.run([sys.executable, str(source), *args], capture_output=True, env=ENV_BASE, timeout=45)
+    # Una grafía alternativa prueba la ruta aun en volúmenes sin nombres cortos.
+    upper = source.with_name(source.name.upper())
+    invocation_source = upper if os.name == "nt" and upper.exists() else source
+    expected = [subprocess.run([sys.executable, str(invocation_source), *args], capture_output=True, env=ENV_BASE, timeout=45)
                 for args, _ in cases]
     build = run([sys.executable, str(LAUNCHER), "--veloz", str(Path(CLI).resolve()),
-                 "--exe", str(binary), str(source)], ENV_BASE)
+                 "--exe", str(binary), str(invocation_source)], ENV_BASE)
     if build.returncode or not binary.is_file():
         print("FALLA ejecutable independiente al compilar", build.stderr)
         return False

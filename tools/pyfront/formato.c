@@ -120,6 +120,49 @@ static int tz_group(const char* digits, int n, int every, char sep, char* out) {
     }
     return k;
 }
+
+#ifdef __SIZEOF_INT128__
+/* Redondea la mantisa multiplicada por 10^p sin un redondeo f64 intermedio.
+   El llamador da un f64 positivo o cero, menor que 2^20, y p entre 0 y 9. */
+static int tz_fixed_short(double x, int precision, int alternate, char *digits) {
+    __extension__ typedef unsigned __int128 UInt128;
+    static const uint32_t powers[] = {1, 10, 100, 1000, 10000, 100000,
+                                     1000000, 10000000, 100000000, 1000000000};
+    uint64_t bits;
+    memcpy(&bits, &x, sizeof(bits));
+    unsigned exponent = (unsigned)(bits >> 52);
+    uint64_t mantissa = bits & UINT64_C(0xfffffffffffff);
+    if (exponent) mantissa |= UINT64_C(1) << 52;
+    unsigned shift = exponent ? 1075 - exponent : 1074;
+    uint32_t scale = powers[precision];
+    uint64_t rounded = 0;
+    if (shift < 128) {
+        UInt128 product = (UInt128)mantissa * scale;
+        UInt128 half = (UInt128)1 << (shift - 1);
+        UInt128 remainder = product & ((half << 1) - 1);
+        rounded = (uint64_t)(product >> shift);
+        rounded += remainder > half || (remainder == half && (rounded & 1));
+    }
+    uint64_t whole = rounded / scale, fraction = rounded % scale;
+    unsigned chars = 0;
+    do {
+        digits[chars++] = (char)('0' + whole % 10);
+        whole /= 10;
+    } while (whole);
+    for (unsigned i = 0; i < chars / 2; ++i) {
+        char digit = digits[i];
+        digits[i] = digits[chars - i - 1];
+        digits[chars - i - 1] = digit;
+    }
+    if (precision || alternate) digits[chars++] = '.';
+    for (int i = precision; i > 0; --i) {
+        digits[chars + i - 1] = (char)('0' + fraction % 10);
+        fraction /= 10;
+    }
+    return (int)chars + precision;
+}
+#endif
+
 TZ_EXPORT tz_i64 tzx_fmt(tz_i64 kind, tz_i64 iv, double fv, tz_i64 fill, tz_i64 align, tz_i64 sign,
                           tz_i64 alt, tz_i64 width, tz_i64 group, tz_i64 prec, tz_i64 type) {
     char body[400], tmp[400], prefix[4] = {0};
@@ -177,11 +220,18 @@ TZ_EXPORT tz_i64 tzx_fmt(tz_i64 kind, tz_i64 iv, double fv, tz_i64 fill, tz_i64 
             }
         } else {
             int p = prec < 0 ? 6 : (int)prec;
-            char spec[16];
             int c = t == '%' ? 'f' : t;
-            snprintf(spec, sizeof spec, alt ? "%%#.*%c" : "%%.*%c", c);
-            blen = snprintf(body, sizeof body, spec, p, a);
-            if (blen < 0 || blen >= (int)sizeof body) { turi_embed_abort(); return 0; }
+#ifdef __SIZEOF_INT128__
+            if ((c == 'f' || c == 'F') && p >= 0 && p <= 9 && a < 1048576.0) {
+                blen = tz_fixed_short(a, p, alt != 0, body);
+            } else
+#endif
+            {
+                char spec[16];
+                snprintf(spec, sizeof spec, alt ? "%%#.*%c" : "%%.*%c", c);
+                blen = snprintf(body, sizeof body, spec, p, a);
+                if (blen < 0 || blen >= (int)sizeof body) { turi_embed_abort(); return 0; }
+            }
             if (t == '%') body[blen++] = '%';
         }
         if (group) {

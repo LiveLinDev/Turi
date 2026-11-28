@@ -11,7 +11,10 @@
       "seis permutaciones": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_SEIS"],
       "permutación inversa": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_SEIS", "-DTZ_FANNKUCH_INVERSAS"],
       "grupos por primer valor": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_CUATRO"],
-      "dos grupos entrelazados": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_CUATRO", "-DTZ_FANNKUCH_DOS_GRUPOS"]
+      "dos grupos entrelazados": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_CUATRO", "-DTZ_FANNKUCH_DOS_GRUPOS"],
+      "desplazamientos por ficha": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_CUATRO", "-DTZ_FANNKUCH_DOS_GRUPOS", "-DTZ_FANNKUCH_CODIFICADO"],
+      "tres vectores completos": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_CUATRO", "-DTZ_FANNKUCH_CODIFICADO", "-DTZ_FANNKUCH_OCHO_CARRILES"],
+      "tres vectores por raíz": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_CUATRO", "-DTZ_FANNKUCH_CODIFICADO", "-DTZ_FANNKUCH_OCHO_CARRILES", "-DTZ_FANNKUCH_ORDEN_RAICES"]
     }
   }
 }

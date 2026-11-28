@@ -1,16 +1,19 @@
-// Cada posición representa un nodo. En una rama i, los hijos están en 2*i y 2*i+1.
-raw fn tzTreeFill(nodes: MutPtr<u64>, depth: int) {
-    let leaves = 1 << depth
+// La posición del nodo i del árbol j es i*treeCount + j.
+raw fn tzTreeFill(nodes: MutPtr<u64>, planeDepth: int, treeCount: int) {
+    let leaves = 1 << planeDepth
     if leaves < 64 {
-        ptrWrite(nodes, wrappingSub(u64(1) << u64(leaves), u64(2)))
+        ptrWrite(nodes, wrappingSub(u64(1) << u64(leaves), u64(1) << u64(treeCount)))
         return
     }
     let words = leaves / 64
-    ptrWrite(nodes, ~u64(1))
-    ptrWrite(ptrAdd(nodes, words), u64(0))
-    for block in 1..words {
-        ptrWrite(ptrAdd(nodes, block), ~u64(0))
+    let sentinels = treeCount / 64
+    for block in 0..words {
+        let branches = if block < sentinels { u64(0) } else { ~u64(0) }
+        ptrWrite(ptrAdd(nodes, block), branches)
         ptrWrite(ptrAdd(nodes, words + block), u64(0))
+    }
+    if sentinels == 0 {
+        ptrWrite(nodes, ~u64(0) << u64(treeCount))
     }
 }
 
@@ -26,28 +29,33 @@ raw fn tzTreeCount(nodes: Ptr<u64>, end: int) -> int {
 trusted fn tzTreeRun(maxDepth: int, minDepth: int) {
     let stretchSize = 1 << (maxDepth + 2)
     let permanentSize = 1 << (maxDepth + 1)
-    var scratch = repeat(u64(0), (stretchSize + 63) / 64 + 15)
+    var scratch = repeat(u64(0), (stretchSize + 63) / 64)
     var permanent = repeat(u64(0), (permanentSize + 63) / 64)
     let work = mutSlicePtr(mut scratch)
     let saved = mutSlicePtr(mut permanent)
-    trusted { raw { tzTreeFill(work, maxDepth + 1) } }
+    raw { tzTreeFill(work, maxDepth + 1, 1) }
     var stretchCount = 0
     trusted { raw { stretchCount = tzTreeCount(ptrConst(work), stretchSize) } }
     pyOutI(stretchCount, false)
     write("\n")
-    trusted { raw { tzTreeFill(saved, maxDepth) } }
+    raw { tzTreeFill(saved, maxDepth, 1) }
     for block in 0..((maxDepth - minDepth) / 2 + 1) {
         let depth = minDepth + 2 * block
-        let size = 1 << (depth + 1)
-        let iterations = 1 << (maxDepth - depth + minDepth)
+        let planeDepth = min(maxDepth, depth + 11)
+        let treeCount = 1 << (planeDepth - depth)
+        let size = 1 << (planeDepth + 1)
+        let words = (size + 63) / 64
+        let batches = 1 << (maxDepth - planeDepth + minDepth)
         var total = 0
-        for i in 0..iterations {
-            // Los árboles de una palabra recorren las ranuras de la arena.
-            let tree = if size <= 64 { ptrAdd(work, i & 15) } else { work }
-            trusted { raw { tzTreeFill(tree, depth) } }
-            var treeCount = 0
-            trusted { raw { treeCount = tzTreeCount(ptrConst(tree), size) } }
-            total = wrappingAdd(total, treeCount)
+        for batch in 0..batches {
+            // La arena temporal admite dos lotes de esta longitud.
+            let tree = ptrAdd(work, (batch & 1) * words)
+            var count = 0
+            raw {
+                tzTreeFill(tree, planeDepth, treeCount)
+                count = tzTreeCount(ptrConst(tree), size)
+            }
+            total = wrappingAdd(total, wrappingAdd(count, treeCount - 1))
         }
         pyOutI(total, false)
         write("\n")

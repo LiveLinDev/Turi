@@ -147,12 +147,25 @@ int main(int argc, char **argv) {
     printf("%llu\n", (unsigned long long)count_tree(scratch, max_depth + 1));
     build(long_tree, max_depth);
     for (int depth = 4; depth <= max_depth; depth += 2) {
-        uint64_t iterations = UINT64_C(1) << (max_depth - depth + 4);
         uint64_t total = 0;
+#ifdef TZ_ARBOLES_PLANOS
+        int plane_depth = depth + TZ_ARBOLES_PLANOS;
+        if (plane_depth > max_depth) plane_depth = max_depth;
+        size_t trees = (size_t)1 << (plane_depth - depth);
+        size_t words = storage_size(plane_depth);
+        uint64_t batches = UINT64_C(1) << (max_depth - plane_depth + 4);
+        for (uint64_t batch = 0; batch < batches; batch++) {
+            NodeWord *forest = scratch + (batch & 1) * words;
+            build_forest(forest, plane_depth, trees);
+            total += count_tree(forest, plane_depth) + trees - 1;
+        }
+#else
+        uint64_t iterations = UINT64_C(1) << (max_depth - depth + 4);
         for (uint64_t i = 0; i < iterations; i++) {
             build(scratch, depth);
             total += count_tree(scratch, depth);
         }
+#endif
         printf("%llu\n", (unsigned long long)total);
     }
     printf("%llu\n", (unsigned long long)count_tree(long_tree, max_depth));

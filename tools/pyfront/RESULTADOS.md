@@ -502,3 +502,61 @@ Mediana de cinco picos de memoria residente en Windows con los tamaños oficiale
 El C de `arboles` usa un bit por nodo con LTO. El lector de `texto` en Turi conserva su bloque de 64 KiB, mientras que C carga el archivo de entrada.
 
 En un ensayo separado de arranque de `vida` se usó un anfitrión mínimo en ambos ejecutables. Se comparó la salida con CPython en nueve entradas. C extremo obtuvo 3,7771 ms de proceso y 0,0702 ms de cálculo con LTO. Turi obtuvo 4,1523 y 0,0705 ms. El ensayo del anfitrión mínimo queda pendiente de la recuperación de errores del ejecutable general.
+
+### Campaña completa con árboles de un bit y franjas de 512
+
+Se midieron los 14 tamaños oficiales en 13 rondas alternadas en Windows. Todas las salidas coincidieron byte a byte con CPython y se comprobó el marcador de cálculo nativo. Cada tiempo de C es el menor entre sus variantes válidas con LTO y PGO entrenado en entradas distintas. Las razones superiores a 1 indican menor tiempo de Turi.
+
+| Banco | Proceso Turi (ms) | Cálculo Turi (ms) | Proceso C extremo (ms) | Cálculo C extremo (ms) | Proceso C/Turi | Cálculo C/Turi |
+|---|---:|---:|---:|---:|---:|---:|
+| `fannkuch` | 24,1068 | 19,0766 | 23,3592 | 18,6265 | 0,9690× | 0,9764× |
+| `mandelbrot` | 16,9211 | 11,4047 | 16,6935 | 11,2539 | 0,9865× | 0,9868× |
+| `nbody` | 457,4552 | 452,6964 | 470,6658 | 463,4554 | 1,0289× | 1,0238× |
+| `spectralnorm` | 6,1210 | 0,0786 | 5,7960 | 0,0590 | 0,9469× | 0,7506× |
+| `arboles` | 7,9288 | 0,2945 | 6,0661 | 0,2153 | 0,7651× | 0,7311× |
+| `criba` | 5,7288 | 0,1241 | 5,4551 | 0,0904 | 0,9522× | 0,7284× |
+| `cuerpos` | 52,7295 | 46,3849 | 52,4239 | 47,0845 | 0,9942× | 1,0151× |
+| `dijkstra` | 5,5219 | 0,0011 | 5,4385 | 0,0045 | 0,9849× | 4,0909× |
+| `matmul` | 7,5749 | 0,2756 | 6,5081 | 0,2401 | 0,8592× | 0,8712× |
+| `mochila` | 6,6435 | 0,0149 | 5,4686 | 0,0121 | 0,8232× | 0,8121× |
+| `palabras` | 10,1684 | 3,8168 | 9,6632 | 3,3841 | 0,9503× | 0,8866× |
+| `reinas` | 5,3146 | 0,1546 | 5,1881 | 0,1023 | 0,9762× | 0,6617× |
+| `texto` | 41,8924 | 34,3103 | 35,0205 | 28,0157 | 0,8360× | 0,8165× |
+| `vida` | 5,9303 | 0,0708 | 4,8970 | 0,0798 | 0,8258× | 1,1271× |
+
+`nbody` registró el menor tiempo en ambas métricas. Su margen fue de 1,0289× en proceso y 1,0238× en cálculo. Ningún banco alcanzó 1,05× en ambas métricas. Los tiempos de esta tabla corresponden a la misma campaña.
+
+### Lotes de árboles, franjas adaptativas y pares de palabras
+
+Pasaron las 49 pruebas de Windows con las nuevas rutas de `arboles`, `fannkuch`, `mandelbrot`, `nbody`, `cuerpos` y `texto`. La prueba de gramática volvió a verificar 39 entradas válidas, 33 inválidas y 4 secuencias UTF-8 inválidas con Lark 1.3.1 y llguidance 1.9.1. En `nbody` y `cuerpos` coincidieron las 30 posiciones y velocidades con CPython en diez duraciones cada uno.
+
+Los prototipos de árboles agrupados por posición redujeron el cálculo de 0,2123 a 0,0417 ms. El ensamblado de Turi confirmó que cada vuelta escribe el lote y lee sus bits. En Mandelbrot, los tramos adaptativos redujeron el cálculo de 11,3630 a 8,4417 ms y usaron 28.946 bytes de certificados. En Fannkuch, codificar el desplazamiento de inversión en cada ficha redujo el cálculo de 19,2636 a 17,0274 ms. Las referencias C también se midieron con estas tres técnicas.
+
+En la comparación de `texto` por parejas, Turi obtuvo 27,9585 ms de proceso y 22,0671 ms de cálculo. C extremo con parejas obtuvo 28,6442 ms de proceso y 23,2704 ms de cálculo. Se cotejaron los archivos de prueba con CPython, incluida la entrada oficial.
+
+#### Ejecutables integrados en 19 rondas
+
+Las seis salidas oficiales coincidieron byte a byte con CPython y se verificó el tiempo nativo. Se mantuvieron las variantes C anteriores y se añadieron las correspondientes a los nuevos algoritmos.
+
+| Banco | Proceso Turi (ms) | Cálculo Turi (ms) | Proceso C extremo (ms) | Cálculo C extremo (ms) |
+|---|---:|---:|---:|---:|
+| `fannkuch` | 28,3998 | 17,1432 | 24,7416 | 16,0002 |
+| `mandelbrot` | 15,7565 | 8,8635 | 16,6913 | 8,6682 |
+| `nbody` | 483,1576 | 484,3775 | 486,1727 | 483,7131 |
+| `arboles` | 8,9597 | 0,0555 | 6,4798 | 0,0496 |
+| `cuerpos` | 55,2160 | 45,4405 | 53,8714 | 47,6529 |
+| `texto` | 36,4654 | 29,1098 | 34,5893 | 27,8220 |
+
+`mandelbrot` alcanzó 1,0593× en proceso y 0,9780× en cálculo. `cuerpos` alcanzó 1,0487× en cálculo y 0,9756× en proceso. La ventaja de `texto` del ensayo previo no se repitió en esta tanda.
+
+La réplica Ubuntu 24.04 con Clang 23 y Python 3.12 pasó el ejecutable independiente, los contadores, el lector de texto, las máscaras de reinas y la gramática con las dependencias de CI.
+
+Mediana de cinco picos de memoria residente. `texto` usó 3,74 MiB en Turi, 9,66 MiB en CPython y 25,05 MiB en C extremo con pares. `arboles` usó 3,66 MiB en Turi, 33,63 MiB en CPython y 3,63 MiB en C extremo con lotes de 2048.
+
+### Lector fusionado y tres vectores completos
+
+En 23 rondas alternadas, `texto` obtuvo 23,7 ms de proceso y 19,3 ms de cálculo. Los mínimos de C extremo fueron 26,7 y 23,2 ms. Se repitió con la variante C de claves provisionales entrenada con archivos distintos al oficial. Turi obtuvo 25,0395 y 21,0311 ms frente a 26,4901 y 22,6445 ms. La mejora fue de 1,05793× en proceso y 1,07671× en cálculo, con la misma salida que CPython. La mediana de cinco picos de memoria residente fue 3,74 MiB en Turi, 9,67 MiB en CPython y 25,05 MiB en C extremo.
+
+`fannkuch` bajó a 20,4 ms de proceso y 14,6 ms de cálculo con tres vectores de ocho carriles. La referencia C de tres vectores por raíz obtuvo 19,5 y 14,3 ms. La salida oficial coincidió con CPython en las 23 rondas.
+
+En Windows se reprodujo el fallo de la traza con un directorio temporal 8.3. La prueba pasó tras conservar la grafía de la ruta del programa. Con CPython 3.14.5 y un directorio 8.3 pasaron el ejecutable independiente, los contadores y el lector de texto.

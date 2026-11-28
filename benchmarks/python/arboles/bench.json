@@ -13,7 +13,10 @@
       "bloques con popcnt": ["-DTZ_ARBOLES_COMPACTOS", "-DTZ_ARBOLES_LINEAL", "-DTZ_ARBOLES_BLOQUES", "-DTZ_ARBOLES_POPCNT"],
       "enlaces de un byte": ["-DTZ_ARBOLES_BYTES"],
       "enlaces de un byte con acumulación": ["-DTZ_ARBOLES_BYTES", "-DTZ_ARBOLES_ACUMULADOS"],
-      "un bit por nodo": ["-DTZ_ARBOLES_BITS"]
+      "un bit por nodo": ["-DTZ_ARBOLES_BITS"],
+      "lotes por posición hasta 32 árboles": ["-DTZ_ARBOLES_BITS", "-DTZ_ARBOLES_PLANOS=5"],
+      "lotes por posición hasta 256 árboles": ["-DTZ_ARBOLES_BITS", "-DTZ_ARBOLES_PLANOS=8"],
+      "lotes por posición hasta 2048 árboles": ["-DTZ_ARBOLES_BITS", "-DTZ_ARBOLES_PLANOS=11"]
     }
   }
 }
