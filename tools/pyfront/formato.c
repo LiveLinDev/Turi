@@ -146,8 +146,14 @@ static int tz_group(const char* digits, int n, int every, char sep, char* out) {
 }
 
 #ifdef __SIZEOF_INT128__
+/* La escala decimal de cada precisión deja el resultado redondeado en u64.
+   El exponente binario también deja al menos un bit fraccionario en la mantisa. */
+static const double tz_fixed_limit[] = {
+    0x1p52, 0x1p52, 0x1p52, 0x1p52, 0x1p50, 0x1p47, 0x1p44, 0x1p40, 0x1p37, 0x1p34
+};
+
 /* Redondea la mantisa multiplicada por 10^p sin un redondeo f64 intermedio.
-   El llamador da un f64 positivo o cero, menor que 2^20, y p entre 0 y 9. */
+   El valor absoluto es menor que la cota de su precisión entre cero y nueve. */
 static int tz_fixed_short(double x, int precision, int alternate, char *digits) {
     __extension__ typedef unsigned __int128 UInt128;
     static const uint32_t powers[] = {1, 10, 100, 1000, 10000, 100000,
@@ -246,7 +252,7 @@ TZ_EXPORT tz_i64 tzx_fmt(tz_i64 kind, tz_i64 iv, double fv, tz_i64 fill, tz_i64 
             int p = prec < 0 ? 6 : (int)prec;
             int c = t == '%' ? 'f' : t;
 #ifdef __SIZEOF_INT128__
-            if ((c == 'f' || c == 'F') && p >= 0 && p <= 9 && a < 1048576.0) {
+            if ((c == 'f' || c == 'F') && p >= 0 && p <= 9 && a < tz_fixed_limit[p]) {
                 blen = tz_fixed_short(a, p, alt != 0, body);
             } else
 #endif
@@ -283,4 +289,31 @@ TZ_EXPORT tz_i64 tzx_fmt(tz_i64 kind, tz_i64 iv, double fv, tz_i64 fill, tz_i64 
     if (align == '<') for (tz_i64 i = 0; i < pad; i++) *o++ = f;
     if (align == '^') for (tz_i64 i = 0; i < pad - pad / 2; i++) *o++ = f;
     return (tz_i64)(o - out);
+}
+
+void tzx_out_pair_six(double first, double second) {
+#ifdef __SIZEOF_INT128__
+    const int first_negative = __builtin_signbit(first) != 0;
+    const int second_negative = __builtin_signbit(second) != 0;
+    const double left = first_negative ? -first : first;
+    const double right = second_negative ? -second : second;
+    if (left < tz_fixed_limit[6] && right < tz_fixed_limit[6]) {
+        char line[64];
+        int used = 0;
+        if (first_negative) line[used++] = '-';
+        used += tz_fixed_short(left, 6, 0, line + used);
+        line[used++] = ' ';
+        if (second_negative) line[used++] = '-';
+        used += tz_fixed_short(right, 6, 0, line + used);
+        line[used++] = '\n';
+        turi_embed_write(line, used, 0);
+        return;
+    }
+#endif
+    tz_i64 used = tzx_fmt(1, 0, first, ' ', '>', 0, 0, 0, 0, 6, 'f');
+    turi_embed_write(tz_scratch(0), used, 0);
+    turi_embed_write(" ", 1, 0);
+    used = tzx_fmt(1, 0, second, ' ', '>', 0, 0, 0, 0, 6, 'f');
+    turi_embed_write(tz_scratch(0), used, 0);
+    turi_embed_write("\n", 1, 0);
 }

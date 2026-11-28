@@ -1694,6 +1694,8 @@ def main():
     n = int(sys.argv[1])
     print(sys.argv[0])
     print(f"{n:0600d}")
+    value = float(n) * 1048576.0 + 0.125
+    print(f"{value:,.6f} {value:.9f} {value * 2097152.0:.6f}")
     print("estado", file=sys.stderr)
     if n != 8:
         print("x" * 9000)
@@ -1769,16 +1771,21 @@ def ejecutable_contadores(folder):
         (ROOT / "benchmarks/python/cuerpos/cuerpos.py",
          b"dt / (d2 * sqrt(d2))", b"dt / (2.0 * d2 * sqrt(d2))", (0, 1, 17, 257, 4099)),
         (ROOT / "benchmarks/python/matmul/matmul.py",
-         b"% 97) / 97.0", b"% 89) / 89.0", (1, 7, 8, 31, 64, 96, 97, 98, 193, 194)),
+         b"% 97) / 97.0", b"% 37) / 37.0", (1, 7, 8, 31, 64, 96, 97, 98, 147, 148, 159, 163, 164, 193, 194)),
         (ROOT / "benchmarks/python/arboles/arboles.py",
          b"1 + check(node.left)", b"2 + check(node.left)", (-1, 6, 7, 9, 11)),
         (ROOT / "benchmarks/python/mochila/mochila.py",
-         b"values.append(10", b"values.append(11", (-1, 0, 6, 23, 63, 129)),
+         b"values.append(10", b"values.append(11", (-1, 0, 6, 23, 63, 129, 400)),
     )
     for source, fragment, replacement, sizes in cases:
         name = source.stem
         data = source.read_bytes()
-        for suffix, program in (("original", data), ("alterado", data.replace(fragment, replacement, 1))):
+        altered = data.replace(fragment, replacement, 1)
+        versions = [("original", data, sizes), ("alterado", altered, sizes)]
+        if name == "matmul":
+            precise = altered.replace(b"{total:.6f}", b"{total:.12f}", 1)
+            versions.append(("precision", precise, (146, 148, 159, 164)))
+        for suffix, program, inputs in versions:
             path = Path(folder) / f"{name}_{suffix}.py"
             path.write_bytes(program)
             binary = path.with_suffix(".exe" if os.name == "nt" else ".bin")
@@ -1787,7 +1794,7 @@ def ejecutable_contadores(folder):
             if build.returncode or not binary.is_file():
                 print("FALLA ejecutable de contadores", name, suffix, build.stderr)
                 return False
-            for n in sizes:
+            for n in inputs:
                 expected = subprocess.check_output([sys.executable, str(path), str(n)], env=ENV_BASE, timeout=45)
                 result = subprocess.run([str(binary), str(n)], capture_output=True, timeout=45,
                                         env=dict(ENV_BASE, TURIPY_EXE_TIME="1"))

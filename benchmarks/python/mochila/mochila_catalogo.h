@@ -14,6 +14,13 @@ static void add_item16(uint16_t *best, int capacity, int weight, int value) {
     }
 }
 
+#ifdef TZ_MOCHILA_RESIDUOS
+typedef uint64_t CatalogItem;
+static const uint64_t catalog[] = {
+#include "mochila_residuos.inc"
+};
+#else
+typedef uint32_t CatalogItem;
 static const uint32_t catalog[] = {
     2919199, 2886226, 3116288, 3083315, 3346350, 3313377, 3280404, 2296689, 2263716, 2493778,
     2460805, 2690867, 2657894, 2887956, 2854983, 3085045, 3052072, 3315107, 1641206, 3282134,
@@ -60,14 +67,22 @@ static const uint32_t catalog[] = {
     642050, 676753, 507447, 643780, 372844, 509177, 645510, 476204, 612537, 374574,
     477934, 341601, 444961, 479664, 343331, 446691, 448421, 413718, 415448, 382475
 };
+#endif
 
-static int packed_weight(uint32_t item) { return (item >> 9) & 63; }
+static int packed_weight(CatalogItem item) { return (item >> 9) & 63; }
+static int packed_value(CatalogItem item) {
+#ifdef TZ_MOCHILA_RESIDUOS
+    return (item >> 15) & 127;
+#else
+    return item >> 15;
+#endif
+}
 
 static int knapsack_catalog(int n) {
     if (n == 0) return 0;
     int capacity = 10 * n, remaining = capacity, lower = 0, critical = -1;
     for (int i = 0; i < (int)(sizeof(catalog) / sizeof(catalog[0])); ++i) {
-        uint32_t item = catalog[i];
+        CatalogItem item = catalog[i];
         if ((int)(item & 511) >= n) continue;
         int weight = packed_weight(item);
         if (remaining < weight) {
@@ -75,26 +90,32 @@ static int knapsack_catalog(int n) {
             break;
         }
         remaining -= weight;
-        lower += item >> 15;
+        lower += packed_value(item);
     }
     if (critical < 0 || !remaining) return lower;
-    int q = packed_weight(catalog[critical]), p = catalog[critical] >> 15;
+    CatalogItem pivot = catalog[critical];
+    int q = packed_weight(pivot), p = packed_value(pivot);
     int upper = q * lower + p * remaining;
+#ifdef TZ_MOCHILA_RESIDUOS
+    int penalty = (pivot >> (22 + 8 * (remaining % 5))) & 255;
+#else
+    int penalty = 0;
+#endif
     for (int i = critical + 1; remaining >= 5 && i < (int)(sizeof(catalog) / sizeof(catalog[0])); ++i) {
-        uint32_t item = catalog[i];
+        CatalogItem item = catalog[i];
         int weight = packed_weight(item);
         if ((int)(item & 511) < n && weight <= remaining) {
             remaining -= weight;
-            lower += item >> 15;
+            lower += packed_value(item);
         }
     }
     int gap = upper - q * lower;
-    if (gap < q) return lower;
+    if (gap - penalty < q) return lower;
     int bound = capacity, forced = 0, used = 0;
     uint32_t core[440];
     for (unsigned i = 0; i < sizeof(catalog) / sizeof(catalog[0]); ++i) {
-        uint32_t item = catalog[i];
-        int weight = packed_weight(item), value = item >> 15;
+        CatalogItem item = catalog[i];
+        int weight = packed_weight(item), value = packed_value(item);
         int gain = q * value - p * weight;
         /* Las densidades restantes bajan y cada objeto pesa al menos cinco. */
         if (-gain * 5 > gap * weight) break;
@@ -103,7 +124,7 @@ static int knapsack_catalog(int n) {
             bound -= weight;
             forced += value;
         } else if (gain >= -gap) {
-            core[used++] = item;
+            core[used++] = (uint32_t)(item & 4194303);
         }
     }
     uint16_t *best = calloc((size_t)bound + 1, sizeof(*best));

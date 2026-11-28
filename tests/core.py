@@ -67,6 +67,21 @@ with tempfile.TemporaryDirectory(prefix="veloz pruebas ") as folder:
     assert diag["id"] == "E_PYTHON_DEF" and diag["example"].startswith("fn ")
     write('fn loop() { loop() }\nfn main() { loop() }')
     reject(p, "run")
+
+    def nested_vectors(depth):
+        expression = "initial"
+        for _ in range(depth):
+            expression = f"simdSet({expression}, 0, simdGet(initial, 1))"
+        return ("fn main() {\n    let initial = simdSplat<Simd<u16, 16>>(u16(9))\n"
+                f"    let result = {expression}\n    print(int(simdGet(result, 0)))\n}}\n")
+
+    write(nested_vectors(32))
+    assert success("check", p) == b""
+    assert success("run", p) == b"9\n"
+    write(nested_vectors(100))
+    diag = reject(p)
+    assert diag["id"] == "E_DEPTH", diag
+
     write('fn main() { let x = 1 }')
     source = p.read_bytes()
     result = invoke("build", p, "-o", p)

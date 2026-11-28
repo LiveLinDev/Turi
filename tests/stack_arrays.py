@@ -31,6 +31,26 @@ CASES = [
 }
 fn main() { print(work(6)) }
 """, None, True),
+    ("vectorScratch", """fn work(n: int) -> int {
+    var a = repeat(2.0, 208)
+    let update = simdSplat<Simd<float, 8>>(float(n))
+    simdToArray(update, mut a, 200)
+    let saved = simdFromArray<Simd<float, 8>>(a, 200)
+    return int(a[0] + simdGet(saved, 0) + simdGet(saved, 7))
+}
+fn main() { print(work(3)) }
+""", "8\n", True),
+    ("returnedVectorScratch", """fn work(n: int) -> [float] {
+    var a = repeat(2.0, 208)
+    let update = simdSplat<Simd<float, 8>>(float(n))
+    simdToArray(update, mut a, 200)
+    return a
+}
+fn main() {
+    let a = work(3)
+    print(int(a[0] + a[207]))
+}
+""", "5\n", False),
     ("intScratch", """fn work(n: int) -> int {
     var acc = 0
     for i in 0..n {

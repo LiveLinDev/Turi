@@ -145,7 +145,15 @@ void tile(const double *restrict a, const double *restrict b, double *restrict c
 }
 #endif
 
+#ifdef TZ_MATMUL_COLA_CORTA
+#include "matmul_cola_corta.h"
+#endif
+
 static int periodic(int n) {
+#ifdef TZ_MATMUL_COLA_CORTA
+    if (n >= 4 * SHORT_PERIOD && n < 4 * SHORT_PERIOD + SHORT_BAND)
+        return short_periodic(n - 4 * SHORT_PERIOD);
+#endif
     /* Los dos generadores se repiten cada 97 índices en los dos ejes. */
     enum { PERIOD = 97 };
     int p = n < PERIOD ? n : PERIOD;

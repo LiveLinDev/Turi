@@ -898,3 +898,77 @@ En `palabras`, preparar treinta y dos transiciones juntas y sumar el salto empaq
 Los quince tamaños de control coincidieron con CPython en la ruta habitual y con BMI2 desactivado. Dos tamaños adicionales coincidieron con la búsqueda independiente anterior en C. Los picos residentes medianos fueron 3,63 MiB en Turi y 3,61 MiB en C. El mínimo de cálculo del prototipo pasó de 0,1146 a 0,0676 ms. En 27 rondas del banco oficial, Turi obtuvo 4,8942 ms de proceso y 0,0675 ms de cálculo frente a 4,4631 y 0,0603 ms de las referencias C más rápidas de cada métrica.
 
 Con esta revisión pasaron las 49 pruebas de Windows. La gramática verificó 39 entradas válidas, 33 inválidas y cuatro secuencias UTF-8 inválidas. En la campaña completa de 13 rondas alternadas, los 14 bancos coincidieron con CPython. `nbody` obtuvo 379,39 ms de proceso y 375,63 ms de cálculo frente a 381,03 y 377,80 ms de C extremo. `cuerpos` obtuvo 41,69 y 36,48 ms frente a 42,19 y 37,35 ms. El margen de 1,05× en ambas medidas sigue pendiente en los 14 bancos.
+
+### Tablas constantes y franja corta de `matmul`
+
+El compilador dejó en el ejecutable tablas de 1965 elementos en `reinas`, 210 en `criba`, 1560 en el prefijo general de `matmul` y 165 en `fannkuch`. La prueba con ASan comprobó la lectura recursiva, la copia que se modifica, la escritura por medio de una vista y la vista devuelta por una función. Los picos residentes medianos de los cuatro bancos se mantuvieron entre 3,60 y 3,67 MiB en esta revisión.
+
+La franja corta de `matmul` coincidió en 27 tamaños con CPython 3.11 y en los mismos 27 con CPython 3.13. Los tamaños cubren tres períodos, los dos extremos de la franja y un generador cuya fase no es invertible. Los dos recorridos C, con LTO y con LTO más PGO, coincidieron en ocho tamaños con las dos versiones de CPython. El pico residente mediano del ejecutable de Turi fue de 3,69 MiB frente a 3,66 MiB de C extremo.
+
+Pasaron 80.260 comparaciones de formato fijo con CPython y comprobación de comportamiento indefinido. Tras ampliar el formato fijo, 31 rondas alternadas de `matmul` dieron 4,2803 ms de proceso y 0,0123 ms de cálculo para Turi frente a 4,2358 y 0,0177 ms de los C más rápidos de cada métrica. El cálculo ganó 1,44× en esta campaña. El proceso completo quedó dentro del margen de empate.
+
+Pasaron las 49 pruebas de Windows. Con Lark 1.3.1 y llguidance 1.9.1 se verificaron 39 entradas válidas, 33 inválidas y cuatro secuencias UTF-8 inválidas. La gramática rechazó `fn main() { let a = 2; }`.
+
+La comparación ampliada de `matmul` validó doce tamaños frente a CPython y entrenó el perfil de C con entradas independientes. En 19 rondas medidas, Turi obtuvo 0,0130 ms de cálculo y el C con formato fijo exacto obtuvo 0,0107 ms. En proceso completo, la entrada con tubería de Turi obtuvo 4,1468 ms y la entrada mínima de C obtuvo 3,5365 ms. Se incorporaron las dos variantes C de formato fijo a la comparación oficial.
+
+### Profundidad de expresiones en Windows
+
+Con la reserva de pila anterior, la comprobación de 32 llamadas SIMD anidadas terminaba con `0xc00000fd`. Los ejecutables del compilador reservan ahora 32 MiB de espacio virtual y declaran 4 KiB de compromiso inicial en la cabecera PE. Pasaron las pruebas de núcleo, semántica, arreglos y gramática. El caso de 32 llamadas se ejecutó correctamente y el de 100 devolvió `E_DEPTH`.
+
+En una copia verificada de Ubuntu 24.04 con Clang 23.1.6 y CPython 3.12.3 pasaron las pruebas dirigidas de ejecutables, contadores, texto, mochila, reinas y productos rectangulares. También pasó la gramática con las dependencias fijadas.
+
+La campaña completa de esta revisión reprodujo las 14 salidas de CPython en 19 rondas alternadas. `nbody` obtuvo 379,8 ms de proceso y 370,4 ms de cálculo frente a 382,9 y 372,9 ms de C extremo. `cuerpos` obtuvo 42,0 y 37,2 ms frente a 42,5 y 37,6 ms. La referencia C de `matmul` con salida fija obtuvo 0,0103 ms de cálculo frente a 0,0133 ms de Turi. El margen del 5 % en ambas medidas sigue pendiente en los 14 bancos.
+
+### Prototipos de intervalos en `matmul` y `spectralnorm`
+
+La factorización de la franja de `matmul` conservó la salida en los 16 tamaños del período oficial y en otros 32 tamaños de control, con CPython 3.11 y 3.13. En cada intérprete, la cota cerró 45 de esos 48 tamaños. Las tres cotas abiertas conservan la evaluación ordenada original. En 19 rondas, el prototipo compacto con entrada por tubería pasó de 0,0139 a 0,0073 ms de cálculo frente a la variante con tubería y sin cota. El mejor C con cota compacta obtuvo 0,0053 ms de cálculo. Los procesos más rápidos de Turi y C obtuvieron 4,4597 y 4,6185 ms. Los ejecutables coincidieron con CPython en 21 tamaños.
+
+El polinomio con un recíproco de `spectralnorm` mantuvo los límites de referencia para todas las combinaciones de dimensión y rondas auditadas. En el ejecutable se comprobaron ocho dimensiones frente a CPython y dos más frente al C de potencia completa. Turi pasó de 0,0042 a 0,0022 ms de cálculo. La nueva variante C alcanzó 0,0006 ms. El reloj nativo de C en este banco se detiene antes de formatear, mientras el de Turi incluye ese paso.
+
+### Intervalo de `matmul` integrado
+
+Coincidieron 33 controles con CPython 3.11 y con CPython 3.13, incluidos tres con doce decimales. En la ruta general, LLVM reagrupaba una suma estricta y alteraba el total en hasta tres unidades del último bit de los casos medidos. Al retirar la indicación de vectorización forzada de ese bucle, los totales de ambos casos coincidieron también bit a bit.
+
+En 31 rondas alternadas con la entrada 400, Turi obtuvo 4,0097 ms de proceso y 0,0069 ms de cálculo. Los mínimos de C extremo con entrada estándar fueron 3,9787 y 0,0049 ms. Con entrada mínima, Turi obtuvo 3,3759 y 0,0075 ms frente a 3,1634 y 0,0052 ms de C. Los ejecutables coincidieron con CPython en veinte tamaños. El pico residente mediano fue de 3,66 MiB para Turi estándar y 3,00 MiB con entrada mínima, frente a 3,60 y 2,96 MiB de C con cota de cuatro grupos.
+
+Pasaron las 49 pruebas de Windows. En Ubuntu 24.04 con Clang 23.1.6 y CPython 3.12.3 pasaron las pruebas dirigidas de ejecutables, contadores, texto, mochila, reinas y productos rectangulares. En ambos sistemas la gramática verificó 39 programas válidos, 33 inválidos y cuatro secuencias UTF-8 inválidas con Lark 1.3.1 y llguidance 1.9.1.
+
+### Ensayos con la cola afín y la consulta por prefijo
+
+La cola de `matmul` se puede evaluar con una expresión afín por fila y una corrección por cada vuelta modular. Las tres variantes en Turi y las dos referencias de C con este método coincidieron con CPython en veinte dimensiones. En 31 rondas, el mejor cálculo de Turi bajó de 7,6 a 6,6 µs. El mejor C con la cola afín tomó 5,9 µs y el mejor C con la cota anterior tomó 4,6 µs.
+
+La consulta de `texto` a partir de los tres primeros bytes conservó la salida de CPython en doce archivos. Su variante más rápida en Turi tomó 13,6640 ms de cálculo, frente a 13,1097 ms en la base y 11,4870 ms en el C extremo más rápido.
+
+### Campaña completa con el intervalo integrado
+
+Los 14 ejecutables coincidieron byte a byte con CPython 3.11 durante 19 rondas alternadas. Cinco quedaron por delante de sus referencias más rápidas en ambas medidas. En `cuerpos`, los mínimos fueron 43,3602 ms de proceso y 38,6079 ms de cálculo en Turi, frente a 47,0706 y 40,1603 ms de C extremo. Los cocientes fueron 1,0856× y 1,0402×. El margen de 1,05× en ambas medidas sigue pendiente en los 14 bancos.
+
+La prueba dirigida reservó una lista de 16.777.217 valores `u8` en el ejecutable, escribió el último elemento y comprobó ambos extremos y la longitud.
+
+Con AddressSanitizer y UBSan pasaron las cinco pruebas dirigidas de arreglos, primera escritura, pila, semántica y límites. Pasaron también los ejecutables instrumentados de contadores y el ejecutable independiente, incluida la recuperación de excepciones y el producto periódico con doce decimales.
+
+### Ejes empaquetados y redondeo de la salida
+
+El modelo Zen 4 estimó una presión alta en la unidad que ejecuta las permutas, raíces y divisiones de `cuerpos`. Las tres disposiciones con dos ejes en un vector conservaron las 30 coordenadas y velocidades en diez duraciones de `nbody` y de `cuerpos`. En 23 rondas, el cálculo de `cuerpos` tomó 42,0115 ms en la base Turi y 48,8297 ms con la disposición nueva más rápida. El C extremo más rápido en cálculo obtuvo 42,5961 ms.
+
+El prototipo de formato redondea el valor escalado en f64 cuando está por debajo de 2⁵² y su parte fraccionaria difiere de 0,5. Los empates y los tamaños mayores se resuelven con la mantisa entera. Pasaron 80.260 formatos frente a CPython con UBSan. En `matmul` coincidieron veinte dimensiones. El cálculo mínimo de Turi pasó de 9,5 a 8,4 µs, frente a 6,6 µs del C extremo más rápido. Los mínimos de proceso pasaron de 6,3727 a 6,6461 ms en Turi.
+
+Se ensayaron 33 disposiciones de carriles en `cuerpos`, incluidas 18 con un ciclo de parejas orientado. La repetición enfrentó cuatro disposiciones y la base a 14 referencias de C extremo. La base Turi dio 45,9703 ms de proceso y 37,8271 ms de cálculo. La disposición más rápida en proceso tomó 45,0684 ms de proceso y 40,0580 ms de cálculo. Los mínimos de C extremo fueron 45,6019 y 39,4279 ms. Los finalistas conservaron las 30 coordenadas y velocidades en diez duraciones de cada programa. El finalista orientado reprodujo cinco casos con ceros de ambos signos.
+
+Seis configuraciones del planificador LLVM conservaron el mismo núcleo de `cuerpos`. En siete duraciones se comprobó la salida byte a byte frente a CPython. En 23 rondas finales, Turi base obtuvo 44,4922 ms de proceso y 38,1977 ms de cálculo. Planificar después de asignar los registros bajó el cálculo a 38,1436 ms y subió el proceso a 46,1581 ms. Los mínimos de C extremo con las mismas opciones disponibles fueron 46,3752 y 39,8663 ms.
+
+### Catálogo y cota integral de `mochila`
+
+El catálogo de solo lectura de 440 elementos se compartió en la imagen del ejecutable. La búsqueda por prefijos usó 4912 sumas parciales adicionales. En 23 rondas alternadas, Turi base y el catálogo compartido obtuvieron 6,3 µs de cálculo. La búsqueda por prefijos tomó 11,0 µs y subió el pico residente mediano de 3,61 a 3,64 MiB. Los trece ejecutables en Turi y C coincidieron con CPython en dieciocho tamaños.
+
+La cota por residuos módulo cinco usa la menor pérdida posible para cada cambio de peso alrededor del pivote fraccionario. Pasó 96.562 combinaciones de catálogo, prefijo y capacidad frente a programación dinámica. Los ejecutables coincidieron con CPython en dieciocho tamaños y las dos variantes con cota reprodujeron la fila completa en los 441 prefijos del catálogo. En 31 rondas, Turi bajó de 8,0 a 4,2 µs de cálculo y mantuvo 3,61 MiB de pico residente mediano. C extremo con el mismo certificado obtuvo 8,0 µs con arranque estándar y 1,7 µs con entrada mínima. Los tiempos de proceso de esta tanda presentaron variación alta entre rondas.
+
+La cota se integró en el catálogo generado por Turi y en la referencia C con LTO y PGO. Pasaron las pruebas de Windows del ejecutable independiente, los contadores con generadores originales y alterados, incluida la entrada 400 de mochila, y la mochila general. Se ensayó buscar el pivote con lotes SIMD de 8, 16 y 32 objetos. En la repetición, Turi escalar obtuvo 3,2 µs de cálculo y el ancho 16 obtuvo 3,6 µs. C extremo con ancho 16 y entrada mínima tomó 0,9 µs de cálculo.
+
+La batería completa de Ubuntu 24.04 pasó las 47 pruebas con Clang 23.1.6 y CPython 3.12.3. El trabajo de gramática con Lark 1.3.1 y llguidance 1.9.1 verificó 39 programas válidos, 33 inválidos y cuatro secuencias UTF-8 inválidas.
+
+Para buscar el pivote por sumas acumuladas, la tabla completa de 14.112 palabras se redujo a 1792 al guardar un prefijo de cada ocho. Una tabla inversa de 440 palabras permite descontar los objetos fuera del prefijo pedido. Este prototipo reprodujo dieciocho salidas de CPython y los 441 tamaños frente a la base Turi. En 27 rondas, el mínimo de cálculo bajó de 3,2 a 2,5 µs. El pico residente mediano pasó de 3,61 a 3,62 MiB. El mínimo de proceso fue 4,9146 ms en la base y 5,1212 ms en el prototipo. C extremo con entrada mínima alcanzó 3,5849 ms de proceso con la tabla compacta y 1,4 µs de cálculo con la búsqueda escalar.
+
+### Conversión decimal del argumento del ejecutable
+
+Las dos rutas de conversión decimal en una pasada coincidieron con CPython en 28 controles de argumentos, errores y codificaciones. En 27 rondas por banco, la variante que lee directamente los bytes en el anfitrión redujo el cálculo de `mochila` de 3,6 a 3,3 µs y el de `dijkstra` de 1,0 a 0,9 µs. `spectralnorm` obtuvo 4,6 µs con la base y 4,8 µs con esa variante. El mínimo de proceso bajó en `mochila` y subió en `dijkstra` y `spectralnorm`.

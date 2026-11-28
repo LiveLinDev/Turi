@@ -8,7 +8,8 @@
       "fila": [],
       "ordenación": ["-DTZ_MOCHILA_COTA"],
       "selección": ["-DTZ_MOCHILA_COTA", "-DTZ_MOCHILA_SELECCION"],
-      "catálogo en orden de densidad": ["-DTZ_MOCHILA_COTA", "-DTZ_MOCHILA_CATALOGO"]
+      "catálogo en orden de densidad": ["-DTZ_MOCHILA_COTA", "-DTZ_MOCHILA_CATALOGO"],
+      "cota integral por residuos": ["-DTZ_MOCHILA_COTA", "-DTZ_MOCHILA_CATALOGO", "-DTZ_MOCHILA_RESIDUOS"]
     }
   }
 }

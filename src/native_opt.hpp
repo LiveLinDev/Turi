@@ -11641,6 +11641,7 @@ inline void tagColdEqualityBranches(FunctionIR& fn) {
 
 inline void tagVectorizableAndUnrollableLoops(FunctionIR& fn) {
     if (fn.blocks.empty()) return;
+    const bool strictFloat = envEnabled("VELOZ_STRICT_FLOAT");
     const detail::CFGInfo cfg = detail::buildCFG(fn);
     std::unordered_map<unsigned, const Operation*> defOp;
     std::unordered_map<unsigned, unsigned> defBlock;
@@ -11739,8 +11740,10 @@ inline void tagVectorizableAndUnrollableLoops(FunctionIR& fn) {
         if (fn.blocks[body].loopHint != LoopHint::None || fn.blocks[body].unrollCount > 1) continue;
 
         bool safe = true;
+        bool floatCarry = false;
         int incCnt = 0;
         std::unordered_set<int> readGroups, writeGroups;
+        std::unordered_set<unsigned> floatWrites, previousFloatReads;
         std::vector<std::size_t> writeIdxPositions, memOpPositions;
         int totalMemOps = 0;
         for (std::size_t oi = 0; oi < fn.blocks[body].ops.size(); ++oi) {
@@ -11782,6 +11785,15 @@ inline void tagVectorizableAndUnrollableLoops(FunctionIR& fn) {
                     safe = false; break;
                 }
             }
+            if (strictFloat && (op.op == Op::Load || op.op == Op::Store) &&
+                op.slot < fn.slots.size() && Program::isFloatType(fn.slots[op.slot])) {
+                if (op.op == Op::Load) {
+                    if (!floatWrites.contains(op.slot)) previousFloatReads.insert(op.slot);
+                } else {
+                    floatCarry |= previousFloatReads.contains(op.slot);
+                    floatWrites.insert(op.slot);
+                }
+            }
         }
         if (!safe || incCnt != 1) continue;
 
@@ -11790,7 +11802,9 @@ inline void tagVectorizableAndUnrollableLoops(FunctionIR& fn) {
             fn.blocks[body].loopHint = LoopHint::FullUnroll;
             continue;
         }
-        if (totalMemOps == 0) continue;
+        // Forzar la vectorización permite que LLVM reagrupe las reducciones f64.
+        // En modo exacto dejamos que LLVM preserve el orden de las sumas.
+        if (totalMemOps == 0 || floatCarry) continue;
         if (writeGroups.empty()) {
             fn.blocks[body].loopHint = LoopHint::Vectorize;
             continue;

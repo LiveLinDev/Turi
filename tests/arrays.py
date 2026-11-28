@@ -1,9 +1,10 @@
-"""Prueba el contrato de [int] con el intérprete, binarios nativos y ASan opcional."""
+"""Prueba arreglos con el intérprete, binarios nativos y ASan opcional."""
 from pathlib import Path
 import argparse
 import json
 import os
 import random
+import re
 import subprocess
 import tempfile
 
@@ -176,6 +177,57 @@ def main():
         generated_source, generated_output = generated(240519)
         for result in execute(generated_source):
             assert result.returncode == 0 and result.stdout == generated_output, result.stderr
+        literal = '[' + ', '.join(f'u64({n})' for n in range(64)) + ']'
+        tables = '''raw fn readAt(data: Ptr<u64>, index: int) -> u64 {
+    if index == 0 { return ptrRead(data) }
+    return readAt(ptrAdd(data, 1), index - 1)
+}
+trusted fn through(values: [u64], index: int) -> u64 {
+    let view = slicePtr(values)
+    var result = u64(0)
+    raw { result = readAt(view, index) }
+    return result
+}
+fn fromConstant(index: int) -> u64 {
+    let table = TABLE
+    var copy = table
+    copy[0] = u64(999)
+    return table[index] + copy[0] + through(table, index)
+}
+raw fn overwrite(data: Ptr<u64>) {
+    ptrWrite(ptrMut(data), u64(200))
+}
+trusted fn fromWritable() -> u64 {
+    var table = TABLE
+    let view = slicePtr(table)
+    raw { overwrite(view) }
+    return table[0]
+}
+raw fn forward(data: Ptr<u64>) -> Ptr<u64> { return data }
+trusted fn fromEscaping(index: int) -> u64 {
+    let table = TABLE
+    let view = slicePtr(table)
+    var result = u64(0)
+    raw { result = ptrRead(ptrAdd(forward(view), index)) }
+    return result
+}
+fn main() {
+    print(int(fromConstant(7)))
+    print(int(fromWritable()))
+    print(int(fromEscaping(9)))
+}
+'''.replace('TABLE', literal)
+        table_output = b"1013\n200\n9\n"
+        for result in execute(tables):
+            assert result.returncode == 0 and result.stdout == table_output, (result.stdout, result.stderr)
+        if not args.interpreter_only:
+            ir = ok([cli, "emit-ir", src])
+            for function, readonly in [("fromConstant", True), ("fromWritable", False), ("fromEscaping", False)]:
+                name = function.encode()
+                bodies = re.findall(rb'define internal [^\n]*@"turi\.' + name + rb'(?:\.fast|\.slow)?"\(.*?\n}', ir, re.S)
+                assert bodies and (b"@tz.constArray." in b"".join(bodies)) == readonly, function
+        if args.clang_asan:
+            sanitized(table_output)
         for body, code in TRAPS:
             source = "fn noisy() -> int { print(42)\nreturn 8 }\nfn main() { " + body + " }"
             outputs = execute(source)

@@ -1,5 +1,9 @@
-fn TZ_KNAPSACK_NAMEWeight(item: u32) -> int {
-    return int((item >> u32(9)) & u32(63))
+fn TZ_KNAPSACK_NAMEWeight(item: u64) -> int {
+    return int((item >> u64(9)) & u64(63))
+}
+
+fn TZ_KNAPSACK_NAMEValue(item: u64) -> int {
+    return int((item >> u64(15)) & u64(127))
 }
 
 fn TZ_KNAPSACK_NAMEItem(best: mut [u16], capacity: int, weight: int, value: int) {
@@ -33,7 +37,7 @@ fn TZ_KNAPSACK_NAME(n: int, capacity: int) -> int {
     var critical = -1
     for i in 0..catalog.len() {
         let item = catalog[i]
-        if int(item & u32(511)) >= n {
+        if int(item & u64(511)) >= n {
             continue
         }
         let weight = TZ_KNAPSACK_NAMEWeight(item)
@@ -42,22 +46,23 @@ fn TZ_KNAPSACK_NAME(n: int, capacity: int) -> int {
             break
         }
         remaining = remaining - weight
-        lower = lower + int(item >> u32(15))
+        lower = lower + TZ_KNAPSACK_NAMEValue(item)
     }
     if critical < 0 || remaining == 0 {
         return lower
     }
     let pivot = catalog[critical]
     let q = TZ_KNAPSACK_NAMEWeight(pivot)
-    let p = int(pivot >> u32(15))
+    let p = TZ_KNAPSACK_NAMEValue(pivot)
     let upper = q * lower + p * remaining
+    let penalty = int((pivot >> u64(22 + 8 * (remaining % 5))) & u64(255))
     if remaining >= TZ_KNAPSACK_MIN_WEIGHT {
         for i in (critical + 1)..catalog.len() {
             let item = catalog[i]
             let weight = TZ_KNAPSACK_NAMEWeight(item)
-            if int(item & u32(511)) < n && weight <= remaining {
+            if int(item & u64(511)) < n && weight <= remaining {
                 remaining = remaining - weight
-                lower = lower + int(item >> u32(15))
+                lower = lower + TZ_KNAPSACK_NAMEValue(item)
                 if remaining < TZ_KNAPSACK_MIN_WEIGHT {
                     break
                 }
@@ -65,7 +70,8 @@ fn TZ_KNAPSACK_NAME(n: int, capacity: int) -> int {
         }
     }
     let gap = upper - q * lower
-    if gap < q {
+    // Cada cambio respecto al prefijo voraz pierde valor dual. El peso libre también tiene un coste.
+    if gap - penalty < q {
         return lower
     }
     var bound = capacity
@@ -74,18 +80,18 @@ fn TZ_KNAPSACK_NAME(n: int, capacity: int) -> int {
     var used = 0
     for item in catalog {
         let weight = TZ_KNAPSACK_NAMEWeight(item)
-        let value = int(item >> u32(15))
+        let value = TZ_KNAPSACK_NAMEValue(item)
         let gain = q * value - p * weight
         // Las densidades restantes solo bajan y todos los pesos tienen esta cota inferior.
         if -gain * TZ_KNAPSACK_MIN_WEIGHT > gap * weight {
             break
         }
-        if int(item & u32(511)) < n {
+        if int(item & u64(511)) < n {
             if gain > gap {
                 bound = bound - weight
                 forced = forced + value
             } else if gain >= -gap {
-                core[used] = item
+                core[used] = u32(item & u64(4194303))
                 used = used + 1
             }
         }
@@ -93,8 +99,8 @@ fn TZ_KNAPSACK_NAME(n: int, capacity: int) -> int {
     // La suma de valores de todo el catálogo cabe en u16.
     var best = repeat(u16(0), bound + 1)
     for i in 0..used {
-        let item = core[i]
-        TZ_KNAPSACK_NAMEItem(mut best, bound, TZ_KNAPSACK_NAMEWeight(item), int(item >> u32(15)))
+        let item = u64(core[i])
+        TZ_KNAPSACK_NAMEItem(mut best, bound, TZ_KNAPSACK_NAMEWeight(item), TZ_KNAPSACK_NAMEValue(item))
     }
     return forced + int(best[bound])
 }

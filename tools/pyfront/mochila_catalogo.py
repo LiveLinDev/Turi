@@ -7,6 +7,32 @@ from pathlib import Path
 from cierres_memo import MAX_FRAMES
 
 
+def packed_catalog(items):
+    """Añade una cota inferior de pérdida para cada residuo del peso libre."""
+    modulus = 5
+    catalog = []
+    for pivot, (index, q, p) in enumerate(items):
+        costs = [0] + [255] * (modulus - 1)
+        for rank, (_, weight, value) in enumerate(items):
+            direction = -1 if rank < pivot else 1
+            residue = direction * weight % modulus
+            loss = direction * (p * weight - q * value)
+            costs[residue] = min(costs[residue], loss)
+
+        # Admitir objetos fuera del prefijo y repetir cambios solo reduce la pérdida mínima.
+        # Un camino mínimo entre residuos tiene como máximo cuatro cambios.
+        distances = costs
+        for _ in range(modulus - 2):
+            distances = [min(distances[src] + costs[(dest - src) % modulus] for src in range(modulus))
+                         for dest in range(modulus)]
+        record = index | (q << 9) | (p << 15)
+        for slack in range(modulus):
+            penalty = min(cost + p * ((slack - residue) % modulus) for residue, cost in enumerate(distances))
+            record |= min(255, penalty) << (22 + 8 * slack)
+        catalog.append(f"u64({record})")
+    return catalog
+
+
 def progression(statement, index, largest):
     match statement:
         case ast.Expr(value=ast.Call(func=ast.Attribute(value=ast.Name(id=output), attr="append"),
@@ -85,7 +111,7 @@ if 0 <= {n} <= {MAX_FRAMES}:
     items = [(i, base_w + i * step_w % mod_w, base_v + i * step_v % mod_v) for i in range(MAX_FRAMES)]
     # El orden es estático. La ejecución recorre solo los índices del prefijo solicitado.
     items.sort(key=lambda item: (Fraction(item[2], item[1]), item[0]), reverse=True)
-    values = [f"u32({i | (weight << 9) | (value << 15)})" for i, weight, value in items]
+    values = packed_catalog(items)
     lines = [", ".join(values[i:i + 10]) for i in range(0, len(values), 10)]
     template = Path(__file__).with_name("mochila_catalogo.turi").read_text(encoding="utf-8")
     return (template.replace("TZ_KNAPSACK_NAME", name)

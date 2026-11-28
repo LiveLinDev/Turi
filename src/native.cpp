@@ -1,5 +1,6 @@
 #include "native_ir.hpp"
 #include "native_opt.hpp"
+#include "native_const_arrays.hpp"
 #include "layout.hpp"
 #include "native_runtime.hpp"
 #include "native_arrays.hpp"
@@ -35,6 +36,7 @@ std::string symbol(std::string_view name) {
 // The emitted module links against the 64-bit host CRT. All Turi call conventions are internal.
 class ModuleWriter {
     const Program& program;
+    const ConstArrayReads& constArrayReads;
     std::map<std::string, unsigned> pool;
     std::map<std::string, unsigned> diagnosticFilePool;
     std::vector<std::string> diagnosticFiles;
@@ -60,6 +62,9 @@ class ModuleWriter {
     // Arreglos pequeños de tamaño constante que no escapan: viven en la pila (alloca), no en el heap.
     std::unordered_map<const Operation*, unsigned> curStackRepeats; // repeat -> nº de elementos
     std::unordered_set<unsigned> curStackSlots;                    // ranuras cuyo Drop se omite
+    std::map<std::vector<std::uint64_t>, unsigned> constArrayPool;
+    std::unordered_map<const Operation*, unsigned> curConstArrays;
+    std::unordered_set<unsigned> curConstArraySlots;
     bool usesSysArgs = false;
     bool usesDropFile = false;
     bool usesDropListener = false;
@@ -2982,17 +2987,9 @@ class ModuleWriter {
         switch (op.op) {
         case Op::Int: {
             if (op.result.type == Type::U64) {
-                std::uint64_t u{};
-                const char* beg = op.data.data();
-                const char* end = beg + op.data.size();
-                int base = 10;
-                if (op.data.starts_with("0x") || op.data.starts_with("0X")) { beg += 2; base = 16; }
-                else if (op.data.starts_with("0b") || op.data.starts_with("0B")) { beg += 2; base = 2; }
-                const auto parsed = std::from_chars(beg, end, u, base);
-                if (parsed.ec != std::errc{} || parsed.ptr != end) {
-                    throw std::logic_error("invalid checked u64 literal");
-                }
-                bodies << "  " << result << " = add i64 0, " << u << "\n";
+                const auto u = unsignedLiteral(op.data);
+                if (!u) throw std::logic_error("invalid checked u64 literal");
+                bodies << "  " << result << " = add i64 0, " << *u << "\n";
                 break;
             }
             std::int64_t n{};
@@ -3061,6 +3058,13 @@ class ModuleWriter {
             const Type elemT = elemOf(op.result.type);
             const std::string elemLlvm = llvmType(elemT);
             const std::size_t n = op.inputs.size();
+            if (auto entry = curConstArrays.find(&op); entry != curConstArrays.end()) {
+                bodies << "  " << result << ".a0 = insertvalue %array zeroinitializer, ptr @tz.constArray."
+                       << entry->second << ", 0\n"
+                       << "  " << result << ".a1 = insertvalue %array " << result << ".a0, i32 " << n << ", 1\n"
+                       << "  " << result << " = insertvalue %array " << result << ".a1, i32 " << n << ", 2\n";
+                break;
+            }
             bodies << "  " << result << ".p = call ptr @tz.allocBuf(i64 " << n << ", i64 " << strideExpr(elemT)
                    << ", " << diagnostic("R_ARRAY_SIZE", op.span) << ", " << diagnostic("R_ALLOC", op.span) << ")\n";
             for (std::size_t i = 0; i < n; ++i) {
@@ -3272,6 +3276,10 @@ class ModuleWriter {
         case Op::Drop: {
             if (curStackSlots.contains(op.slot)) break; // arreglo en la pila: nada que liberar
             const Type slotT = curSlotTypes.at(op.slot);
+            if (curConstArraySlots.contains(op.slot)) {
+                bodies << "  store %array zeroinitializer, ptr " << slotPtr(op.slot) << "\n";
+                break;
+            }
             if (op.regionEnd) {
                 std::set<Type> seen;
                 if (regionContent(slotT, seen)) {
@@ -3826,7 +3834,8 @@ class ModuleWriter {
         }
     }
 public:
-    explicit ModuleWriter(const Program& program, bool audit) : program(program), auditCopies(audit) {}
+    explicit ModuleWriter(const Program& program, const ConstArrayReads& reads, bool audit)
+        : program(program), constArrayReads(reads), auditCopies(audit) {}
     static std::string ffiAttr(Type t) {
         if (t == Type::I8 || t == Type::I16) return "signext ";
         if (t == Type::U8 || t == Type::U16 || t == Type::Bool) return "zeroext ";
@@ -3897,9 +3906,48 @@ public:
         else bodies << "  ret void\n";
         bodies << "}\n";
     }
-    // Un arreglo local creado con repeat(valor, N) con N constante y pequeño, que solo se usa por
-    // índice, longitud o copia, no necesita el heap: C lo declararía como arreglo local. En la pila
-    // LLVM puede además mantenerlo en registros (SROA) y vectorizarlo sin tráfico de memoria.
+    void planConstArrays(const FunctionIR& ir) {
+        curConstArrays.clear();
+        curConstArraySlots.clear();
+        if (auditCopies) return;
+        constexpr std::size_t minElems = 64;
+        std::vector<const Operation*> candidates;
+        for (const auto& block : ir.blocks) {
+            for (const auto& op : block.ops) {
+                if (op.op == Op::ArrayLit && op.inputs.size() >= minElems &&
+                    op.inputs.size() <= static_cast<std::size_t>(maxArrayLength) && elemOf(op.result.type) == Type::U64)
+                    candidates.push_back(&op);
+            }
+        }
+        if (candidates.empty()) return;
+        std::unordered_map<unsigned, std::uint64_t> constants;
+        for (const auto& block : ir.blocks) {
+            for (const auto& op : block.ops) {
+                if (op.op == Op::Int && op.result.type == Type::U64) {
+                    if (const auto number = unsignedLiteral(op.data)) constants.emplace(op.result.id, *number);
+                }
+            }
+        }
+        for (const auto* literal : candidates) {
+            std::vector<std::uint64_t> data;
+            data.reserve(literal->inputs.size());
+            for (const Value input : literal->inputs) {
+                const auto item = constants.find(input.id);
+                if (item == constants.end()) break;
+                data.push_back(item->second);
+            }
+            if (data.size() != literal->inputs.size()) continue;
+            std::unordered_set<unsigned> owners;
+            if (!constArrayReads.mayShare(ir, *literal, owners)) continue;
+            const auto entry = constArrayPool.try_emplace(std::move(data),
+                                                          static_cast<unsigned>(constArrayPool.size())).first;
+            curConstArrays.emplace(literal, entry->second);
+            curConstArraySlots.insert(owners.begin(), owners.end());
+        }
+    }
+
+    // Un arreglo local pequeño de repeat(valor, N) puede vivir en la pila si sus accesos
+    // por índice, longitud, copia o SIMD conservan el descriptor y el búfer no escapa.
     void planStackArrays(const FunctionIR& ir) {
         curStackRepeats.clear();
         curStackSlots.clear();
@@ -3908,6 +3956,8 @@ public:
         if (disabled) return;
         constexpr std::int64_t maxElems = 64;
         constexpr std::size_t maxBytes = 512;
+        constexpr std::int64_t maxVectorElems = 512;
+        constexpr std::size_t maxVectorFrameBytes = 4096;
         struct Use { const Operation* op; std::size_t input; };
         std::unordered_map<unsigned, std::vector<Use>> uses;
         std::unordered_set<unsigned> exitValues;
@@ -3917,6 +3967,7 @@ public:
                 for (std::size_t k = 0; k < op.inputs.size(); ++k) uses[op.inputs[k].id].push_back({&op, k});
         }
         const auto paramCount = ir.source.params.size();
+        std::size_t vectorBytes = 0;
         for (const auto& blk : ir.blocks) {
             for (const auto& rep : blk.ops) {
                 if ((rep.op != Op::RepeatHeap && rep.op != Op::RepeatRegion) || rep.inputs.size() < 2) continue;
@@ -3924,8 +3975,9 @@ public:
                 const Type elemT = elemOf(arrT);
                 if (!(Program::isNumericType(elemT) || elemT == Type::Bool) || needsDrop(elemT)) continue;
                 auto cnt = curConstInts.find(rep.inputs[1].id);
-                if (cnt == curConstInts.end() || cnt->second < 1 || cnt->second > maxElems) continue;
-                if (static_cast<std::size_t>(cnt->second) * sizeAlignOf(elemT).first > maxBytes) continue;
+                if (cnt == curConstInts.end() || cnt->second < 1 || cnt->second > maxVectorElems) continue;
+                const std::size_t bytes = static_cast<std::size_t>(cnt->second) * sizeAlignOf(elemT).first;
+                if (bytes > maxVectorFrameBytes) continue;
                 if (exitValues.contains(rep.result.id)) continue;
                 // El valor solo puede guardarse en ranuras locales.
                 std::unordered_set<unsigned> slots;
@@ -3940,11 +3992,17 @@ public:
                         (slot < ir.slotByRef.size() && ir.slotByRef[slot]) || curStackSlots.contains(slot)) { ok = false; break; }
                 }
                 if (!ok) continue;
-                // Cada uso de esas ranuras debe ser lectura por índice/longitud/copia o escritura de elemento.
+                // Las cargas y escrituras SIMD acceden al búfer sin cambiar su descriptor.
+                bool vectorUse = false;
                 for (const auto& b2 : ir.blocks) {
                     for (const auto& op : b2.ops) {
-                        for (unsigned ms : op.mutArgSlots)
-                            if (slots.contains(ms)) ok = false;
+                        for (std::size_t i = 0; i < op.mutArgSlots.size(); ++i) {
+                            if (!slots.contains(op.mutArgSlots[i])) continue;
+                            const bool vectorStore = op.op == Op::Builtin && op.data == "simdToArray" && i == 1 &&
+                                (i >= op.mutArgPaths.size() || op.mutArgPaths[i].empty());
+                            if (vectorStore) vectorUse = true;
+                            else ok = false;
+                        }
                         switch (op.op) {
                         case Op::Store:
                             if (slots.contains(op.slot) && (op.inputs.empty() || op.inputs[0].id != rep.result.id)) ok = false;
@@ -3954,8 +4012,10 @@ public:
                                 if (exitValues.contains(op.result.id)) ok = false;
                                 for (const auto& use : uses[op.result.id]) {
                                     const Op k = use.op->op;
+                                    const bool vectorLoad = use.input == 0 && k == Op::Builtin && use.op->data == "simdFromArray";
                                     const bool reads = use.input == 0 &&
-                                        (k == Op::Index || k == Op::IndexSet || k == Op::Length || k == Op::Clone);
+                                        (k == Op::Index || k == Op::IndexSet || k == Op::Length || k == Op::Clone || vectorLoad);
+                                    vectorUse |= vectorLoad;
                                     if (!reads) ok = false;
                                 }
                             }
@@ -3975,6 +4035,12 @@ public:
                     if (!ok) break;
                 }
                 if (!ok) continue;
+                if (vectorUse) {
+                    if (bytes > maxVectorFrameBytes - vectorBytes) continue;
+                    vectorBytes += bytes;
+                } else if (cnt->second > maxElems || bytes > maxBytes) {
+                    continue;
+                }
                 curStackRepeats.emplace(&rep, static_cast<unsigned>(cnt->second));
                 curStackSlots.insert(slots.begin(), slots.end());
             }
@@ -4080,6 +4146,7 @@ public:
             }
         }
         planStackArrays(ir);
+        planConstArrays(ir);
         for (const auto& blk : ir.blocks) {
             for (const auto& op : blk.ops) {
                 if (auto it = curStackRepeats.find(&op); it != curStackRepeats.end()) {
@@ -8494,6 +8561,16 @@ public:
             out << "]\n";
         }
     }
+    void writeConstArrays(std::ostream& out) const {
+        for (const auto& [elements, id] : constArrayPool) {
+            out << "@tz.constArray." << id << " = private unnamed_addr constant [" << elements.size() << " x i64] [";
+            for (std::size_t i = 0; i < elements.size(); ++i) {
+                if (i > 0) out << ", ";
+                out << "i64 " << elements[i];
+            }
+            out << "], align 64\n";
+        }
+    }
     std::string finish(RuntimeABI abi) {
         if (usesSysArgs) usedDecls.insert("tz_sys_set_args");
         RuntimeDiagnostics diagnostics;
@@ -8517,6 +8594,7 @@ public:
         writeExternDecls(out);
         writeEnumTables(out);
         writeDigitSumLuts(out);
+        writeConstArrays(out);
         writeTypes(out);
         out << helpers.str();
         writeStrings(out);
@@ -8556,7 +8634,6 @@ std::string emitLLVM(const Program& checkedProgram, RuntimeABI abi, bool auditCo
         d.example = "fn main() { print(42) }";
         throw d;
     }
-    native::ModuleWriter module(p, auditCopies);
     const native::ReturnRanges returnRanges(p);
     std::vector<native::FunctionIR> functions;
     for (const auto& f : p.functions) {
@@ -8567,6 +8644,8 @@ std::string emitLLVM(const Program& checkedProgram, RuntimeABI abi, bool auditCo
     std::deque<Function> closureSpecStorage;
     native::optimizeIR(functions, safe, p.entryMain, !auditCopies, &fastClones, &p, &closureSpecStorage);
     safe = native::safeDepths(p, functions);
+    const native::ConstArrayReads constArrayReads(p, functions, fastClones);
+    native::ModuleWriter module(p, constArrayReads, auditCopies);
     std::unordered_map<std::string, std::string> fastMap;
     for (const auto& fc : fastClones) fastMap.emplace(fc.origName, fc.fastName);
     for (std::size_t i = 0; i < functions.size(); ++i) {

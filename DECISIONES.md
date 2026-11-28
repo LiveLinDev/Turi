@@ -648,6 +648,20 @@ Si los dos generadores son afines con residuo entero, su período común se obti
 
 Cada tesela recorre los ciclos completos y el último tramo del producto escalar. Sus filas y columnas se acotan con las dimensiones de las matrices reducidas. Dentro de la tesela, cada tramo empieza en el índice cero y su longitud es como máximo un período.
 
+Para cuatro ciclos completos y una cola de hasta quince términos, el compilador guarda el estado de la suma de fila después de cuatro períodos de columnas, junto con la diagonal periódica. Los carriles calculan solo las columnas restantes y continúan la suma en el orden de CPython. En las versiones con suma compensada se conservan tanto el acumulador como su corrección. La ruta corta requiere que la fase permita transponer el prefijo comprimido. Al salir de esta franja se usa la tesela general.
+
+Cuando el total solo se imprime con seis decimales, la ruta corta puede factorizar el producto de la cola. A cada fila le suma la contribución de los residuos de la matriz izquierda ponderados por las sumas de la derecha. La cota por fila cubre el redondeo del prefijo, la cola y la suma de CPython. Los extremos se acumulan en el orden original y se amplían para cubrir el redondeo del escalado decimal. Si los extremos imprimen el mismo decimal, basta ese intervalo. Si abarcan varios decimales, se recalculan las celdas en orden.
+
+En modo de coma flotante estricta, los bucles que actualizan un flotante leído de la iteración anterior conservan el orden de reducción. El compilador deja a LLVM la selección de transformaciones que respetan ese orden.
+
+## Tablas numéricas de solo lectura
+
+Un literal `[u64]` local de al menos 64 elementos puede ocupar una constante del ejecutable. El generador comprueba los dueños y sigue cada préstamo por los parámetros de las funciones llamadas, incluidas las variantes y los ciclos recursivos. Las lecturas, la longitud y las copias pueden usar la tabla compartida. La escritura, la salida de una dirección o una llamada externa conservan la reserva propia del programa. El generador pone a cero el descriptor local cuando termina su vida.
+
+Las listas temporales que solo se usan localmente con cargas o almacenes SIMD pueden ocupar la pila. Se admiten hasta 512 elementos por lista y 4096 bytes en total por marco para estas listas. Las direcciones que salen de la función conservan la reserva dinámica.
+
+El formato fijo redondea el producto de la mantisa y la escala decimal con aritmética entera. Cada precisión de cero a nueve tiene una cota que deja al menos un bit fraccionario y mantiene el entero redondeado dentro de `u64`. Esto permite formatear los totales grandes de `matmul` con el mismo redondeo de CPython.
+
 ## Recuento de palabras sobre el búfer del lector ASCII
 
 El lector valida el archivo regular y normaliza las líneas. Una pasada SIMD comprueba ASCII, cuenta los saltos de línea y genera la vista en minúsculas y sus máscaras de separadores. El bloque de lectura conserva el prefijo original de la línea más larga. Las palabras de hasta ocho bytes usan una clave entera y el relleno del bloque en minúsculas permite una carga al final. Las palabras largas y las claves que exceden la tabla compacta se cuentan en el diccionario de cadenas. Las listas temporales se reservan una vez y se reutilizan con cada bloque de 64 KiB.

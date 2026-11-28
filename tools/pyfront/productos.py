@@ -7,6 +7,8 @@ from pathlib import Path
 import struct
 import sys
 
+from producto_periodico_corto import SHORT_TERMS, short_checkpoint_source, words_source
+
 
 def product_loop(fn, parameters):
     """Devuelve las variables del producto que acumula cada celda en orden."""
@@ -141,17 +143,19 @@ def periodic_checkpoint(period, first, second):
     return bases + phase + packed
 
 
-def checkpoint_source(name, period, generators, data):
-    cells = [', '.join(f'u64({word:#x})' for word in data[start:start + 8])
-             for start in range(0, len(data), 8)]
-    table = ',\n        '.join(cells)
+def checkpoint_source(name, period, generators, data, fixed_report=False):
+    short_name = name + 'Short'
+    short = short_checkpoint_source(short_name, period, generators, data, CHECKPOINT_CYCLES, fixed_report)
+    start = CHECKPOINT_CYCLES * period
+    dispatch = (f'    if n >= {start} && n < {start + SHORT_TERMS} {{ return {short_name}(n) }}\n' if short else '')
     args = ', '.join(map(str, (period, *generators[0], *generators[1])))
-    return f'''fn {name}(n: int) -> (float, float) {{
-    let checkpoint = [
-        {table}
+    original = f'''fn {name}(n: int) -> (float, float) {{
+{dispatch}    let checkpoint = [
+        {words_source(data)}
     ]
     return tzPeriodicCompute(n, {args}, checkpoint)
 }}'''
+    return '\n\n'.join((short, original)) if short else original
 
 
 def consume_periodic(fn, by_name, body, matches, integer_binding, checkpoints):
@@ -205,14 +209,15 @@ for {row} in {c}:
     generators = ((*left_params, seed_a), (*right_params, seed_b))
     if description[1][0] != order[0]:
         generators = generators[::-1]
-    key = (width, generators)
+    fixed_report = matches((report,), f'print(f"{{{trace}:.6f}} {{{total}:.6f}}")')
+    key = (width, generators, fixed_report)
     if key not in checkpoints:
         data = periodic_checkpoint(width, *generators)
         if data is None:
             checkpoints[key] = None
         else:
             target = f"tzPeriodicCheckpoint{len(checkpoints)}"
-            checkpoints[key] = target, checkpoint_source(target, width, generators, data)
+            checkpoints[key] = target, checkpoint_source(target, width, generators, data, fixed_report)
     checkpoint = checkpoints[key]
     occupied = {node.id for node in ast.walk(fn) if isinstance(node, ast.Name)}
     name = "tzProductResult"
@@ -229,7 +234,13 @@ if 1 <= {n} <= 32768:
 """).body[0]
     call = guard.body[0].value
     call._tz_executable_call = (call.func.id, call.args, ("tuple", ("float", "float")))
-    guard.body.insert(-1, deepcopy(report))
+    if fixed_report:
+        output = ast.parse(f"tzProductPrintSix({trace}, {total})").body[0]
+        call = output.value
+        call._tz_executable_call = (call.func.id, call.args, "none", ("float", "float"))
+    else:
+        output = deepcopy(report)
+    guard.body.insert(-1, output)
     fn.body.insert(-8, guard)
     return True
 
@@ -298,5 +309,12 @@ def periodic_totals_source():
     source = Path(__file__).with_name("producto_periodico_totales.turi").read_text(encoding="utf-8")
     source = source.replace("TZ_CHECKPOINT_CYCLES", str(CHECKPOINT_CYCLES))
     compensated = sys.version_info >= (3, 12)
-    return "\n\n".join((tile("tzTileLarge", 4, 4), tile("tzTileTail", 4, 1),
+    output = '''extern "C" {
+    fn tzx_out_pair_six(first: float, second: float)
+}
+
+trusted fn tzProductPrintSix(first: float, second: float) {
+    tzx_out_pair_six(first, second)
+}'''
+    return "\n\n".join((output, tile("tzTileLarge", 4, 4), tile("tzTileTail", 4, 1),
                         tile("tzTileSingle", 1, 1), stripe_sum(4, compensated), stripe_sum(1, compensated), source))
