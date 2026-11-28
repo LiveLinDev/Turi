@@ -1,1 +1,17 @@
-{"args": [10], "about": "fannkuch-redux: permutations and prefix reversals on small integer arrays"}
+{
+  "args": [10],
+  "about": "fannkuch-redux: permutations and prefix reversals on small integer arrays",
+  "c_extremo": {
+    "fuente": "fannkuch_extremo.c",
+    "entrenamiento": [[6], [8], [9]],
+    "raiz": "fannkuch",
+    "variantes": {
+      "barajado": [],
+      "parejas": ["-DTZ_FANNKUCH_PAREJAS"],
+      "seis permutaciones": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_SEIS"],
+      "permutación inversa": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_SEIS", "-DTZ_FANNKUCH_INVERSAS"],
+      "grupos por primer valor": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_CUATRO"],
+      "dos grupos entrelazados": ["-DTZ_FANNKUCH_PAREJAS", "-DTZ_FANNKUCH_CUATRO", "-DTZ_FANNKUCH_DOS_GRUPOS"]
+    }
+  }
+}

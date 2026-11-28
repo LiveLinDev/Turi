@@ -1,1 +1,19 @@
-{"args": [16], "c": "../../game/binarytrees/binarytrees.c", "about": "binary-trees con una clase Node; el C experto es el del banco del lenguaje (arena por árbol)"}
+{
+  "args": [16],
+  "c": "../../game/binarytrees/binarytrees.c",
+  "about": "binary-trees con una clase Node; el C experto es el del banco del lenguaje (arena por árbol)",
+  "c_extremo": {
+    "fuente": "arboles_extremo.c",
+    "entrenamiento": [[7], [10], [13]],
+    "variantes": {
+      "pareja de índices": [],
+      "índice compacto": ["-DTZ_ARBOLES_COMPACTOS"],
+      "recorrido lineal": ["-DTZ_ARBOLES_COMPACTOS", "-DTZ_ARBOLES_LINEAL"],
+      "bloques completos": ["-DTZ_ARBOLES_COMPACTOS", "-DTZ_ARBOLES_LINEAL", "-DTZ_ARBOLES_BLOQUES"],
+      "bloques con popcnt": ["-DTZ_ARBOLES_COMPACTOS", "-DTZ_ARBOLES_LINEAL", "-DTZ_ARBOLES_BLOQUES", "-DTZ_ARBOLES_POPCNT"],
+      "enlaces de un byte": ["-DTZ_ARBOLES_BYTES"],
+      "enlaces de un byte con acumulación": ["-DTZ_ARBOLES_BYTES", "-DTZ_ARBOLES_ACUMULADOS"],
+      "un bit por nodo": ["-DTZ_ARBOLES_BITS"]
+    }
+  }
+}

@@ -6,7 +6,7 @@ def main():
     out, lines = sys.argv[1], int(sys.argv[2])
     words = ("the quick brown fox jumps over lazy dog river mountain cloud stone light shadow garden window "
              "paper silver golden ocean forest bird song night day market city road bridge tower").split()
-    seed = 11
+    seed = int(sys.argv[3]) if len(sys.argv) > 3 else 11
     with open(out, "w", encoding="utf-8", newline="\n") as handle:
         for _ in range(lines):
             seed = (seed * 1103515245 + 12345) % 2147483648

@@ -1,0 +1,135 @@
+fn pyKnapsackItem(best: mut [i32], capacity: int, weight: int, value: int) {
+    let added = simdSplat<Simd<i32, 16>>(i32(value))
+    var end = capacity + 1
+    while end >= weight + 16 {
+        let start = end - 16
+        let skip = simdFromArray<Simd<i32, 16>>(best, start)
+        let take = simdFromArray<Simd<i32, 16>>(best, start - weight) + added
+        simdToArray(simdMax(skip, take), mut best, start)
+        end = start
+    }
+    while end > weight {
+        end = end - 1
+        let candidate = best[end - weight] + i32(value)
+        if candidate > best[end] {
+            best[end] = candidate
+        }
+    }
+}
+
+fn pyKnapsack(weights: [int], values: [int], capacity: int, maxItems: int) -> int {
+    let count = weights.len()
+    if count != values.len() || count > maxItems || count >= 512 || capacity < 0 || capacity > 1048576 {
+        return -1
+    }
+    var sum = 0
+    var weightSum = 0
+    var order = repeat(0, count)
+    var used = 0
+    for i in 0..count {
+        let w = weights[i]
+        let v = values[i]
+        if w < 1 || w > 4096 || v < 0 || v >= 1073741824 {
+            return -1
+        }
+        if w <= capacity && v > 0 {
+            sum = sum + v
+            weightSum = weightSum + w
+            // Dos cocientes distintos se separan al menos en 1/(4096*4096).
+            // Los nueve bits bajos permiten recuperar el índice del objeto.
+            order[used] = ((v * 16777216) / w) * 512 + i
+            used = wrappingAdd(used, 1)
+        }
+    }
+    truncate(mut order, used)
+    if sum > 2147483647 {
+        return -1
+    }
+    if weightSum <= capacity {
+        return sum
+    }
+    var remaining = capacity
+    var lower = 0
+    var lo = 0
+    var hi = order.len()
+    var critical = -1
+    // Basta partir por la densidad que agota la capacidad. Cada partición
+    // acumula el peso de los objetos más densos sin ordenar todo el intervalo.
+    while lo < hi {
+        let middle = lo + (hi - lo) / 2
+        let key = order[middle]
+        order[middle] = order[lo]
+        var at = hi - 1
+        var split = at
+        var weightAbove = 0
+        var valueAbove = 0
+        while at > lo {
+            let current = order[at]
+            if current > key {
+                order[at] = order[split]
+                order[split] = current
+                let index = current & 511
+                weightAbove = weightAbove + weights[index]
+                valueAbove = valueAbove + values[index]
+                split = split - 1
+            }
+            at = at - 1
+        }
+        order[lo] = order[split]
+        order[split] = key
+        if remaining < weightAbove {
+            lo = split + 1
+        } else {
+            remaining = remaining - weightAbove
+            lower = lower + valueAbove
+            let item = key & 511
+            let weight = weights[item]
+            if remaining < weight {
+                critical = split
+                break
+            }
+            remaining = remaining - weight
+            lower = lower + values[item]
+            hi = split
+        }
+    }
+    assert critical >= 0
+    let pivot = order[critical] & 511
+    let q = weights[pivot]
+    let p = values[pivot]
+    // Relajación fraccionaria, expresada multiplicada por el peso del pivote.
+    let upper = q * lower + p * remaining
+    for next in 0..critical {
+        let item = order[critical - 1 - next] & 511
+        let w = weights[item]
+        if w <= remaining {
+            remaining = remaining - w
+            lower = lower + values[item]
+        }
+    }
+    let gap = upper - q * lower
+    if gap < q {
+        return lower
+    }
+    var bound = capacity
+    var forced = 0
+    var core: [int] = []
+    for packed in order {
+        let item = packed & 511
+        let gain = q * values[item] - p * weights[item]
+        // Excluir un objeto de ganancia positiva cuesta esa ganancia. Incluir
+        // uno de ganancia negativa cuesta su opuesto. Una pérdida mayor que
+        // la brecha impediría igualar la solución factible ya encontrada.
+        if gain > gap {
+            bound = bound - weights[item]
+            forced = forced + values[item]
+        } else if gain >= -gap {
+            core.push(item)
+        }
+    }
+    var best = repeat(i32(0), bound + 1)
+    for item in core {
+        pyKnapsackItem(mut best, bound, weights[item], values[item])
+    }
+    return forced + int(best[bound])
+}

@@ -1,0 +1,53 @@
+fn tzMandelFactor(bytes: int) -> int {
+    var k = bytes
+    var base = 31
+    var result = 1
+    while k > 0 {
+        if (k & 1) != 0 {
+            result = wrappingMul(result, base) % 1000000007
+        }
+        base = wrappingMul(base, base) % 1000000007
+        k = k / 2
+    }
+    return result
+}
+
+TZ_ROW_SCAN
+    let resolution = TZ_REGION_RESOLUTION
+    let band = min(resolution - 1, int(abs(imaginary) * float(resolution)))
+    let end = int(zones[band + 1])
+    var run = int(zones[band])
+    let stride = 1.0 / float(resolution)
+    while x + 32 <= n {
+        let left = float(x) * inverse - 1.5
+        let right = float(x + 31) * inverse - 1.5
+        while run < end && left >= float(zones[resolution + 2 + 3 * run]) * stride - 1.5 {
+            run = run + 1
+        }
+        if run < end {
+            let at = resolution + 1 + 3 * run
+            let begin = float(zones[at]) * stride - 1.5
+            let stop = float(zones[at + 1]) * stride - 1.5
+            if left >= begin && right <= stop {
+                let bound = int((stop + 1.5) / inverse) + 1
+                var blocks = max(1, min(n - x, bound - x) / 32)
+                while blocks > 1 && float(x + blocks * 32 - 1) * inverse - 1.5 > stop {
+                    blocks = blocks - 1
+                }
+                let factor = tzMandelFactor(4 * blocks)
+                var bytes = 0
+                if zones[at + 2] != u16(0) {
+                    count = wrappingAdd(count, blocks * 32)
+                    // (factor - 1) / (31 - 1), usando el inverso de 30 módulo M.
+                    bytes = wrappingMul(255, wrappingMul(factor + 1000000006, 233333335) % 1000000007)
+                }
+                checksum = wrappingAdd(wrappingMul(checksum, factor), bytes) % 1000000007
+                x = x + blocks * 32
+                continue
+            }
+        }
+        let result = tzMandelPixels4(x, n, inverse, imaginary)
+        count = wrappingAdd(count, result.0)
+        checksum = wrappingAdd(wrappingMul(checksum, 923521), result.1) % 1000000007
+        x = x + 32
+    }

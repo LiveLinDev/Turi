@@ -2430,6 +2430,9 @@ class Lowerer {
     }
     Value ifExprLowering(const Expr& e) {
         const auto& ie = *e.ifExpr;
+        // La condición y las ramas solo sueltan los temporales creados dentro del if.
+        const std::size_t prevFloor = tempFloor;
+        tempFloor = temporaries.size();
         const auto cond = expression(ie.condition);
         dropTemporaries();
         const auto yes = block();
@@ -2439,8 +2442,6 @@ class Lowerer {
 
         std::optional<unsigned> resSlot;
         if (e.type != Type::Void && e.type != Type::Unknown) resSlot = allocate(e.type);
-        const std::size_t prevFloor = tempFloor;
-        tempFloor = temporaries.size();
         bool fallsThrough = false;
 
         auto lowerArm = [&](unsigned blkId, const std::vector<Stmt>& body, const std::optional<Expr>& resE) {

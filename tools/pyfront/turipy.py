@@ -21,6 +21,7 @@ Opciones:
     --exacto        coma flotante idéntica bit a bit a CPython (sin fundir a*b+c ni reordenar sumas)
     --sin-nativo    ejecuta solo con Python
     --veloz RUTA    compilador de Turi a usar
+    --exe RUTA      compila el programa completo a un ejecutable exacto si su módulo es cerrado
 """
 import atexit
 import builtins
@@ -33,7 +34,10 @@ import sys
 import time
 import types
 from array import array
+from _thread import _local
+from _io import open as CPYTHON_OPEN
 
+GUARDED_BUILTINS = {"set": set, "range": range, "len": len}
 HERE = os.path.dirname(os.path.abspath(__file__))
 INT, FLOAT, BOOL, STR = "int", "float", "bool", "str"  # los mismos nombres que usa py2turi
 SCALARS = (INT, FLOAT, BOOL)
@@ -138,7 +142,7 @@ def static_value(node, known, aliases):
     raise NotStatic
 
 
-def constant_ok(value):
+def scalar_constant_ok(value):
     if type(value) is int:
         return -2 ** 63 < value < 2 ** 63
     if type(value) is float:
@@ -146,6 +150,76 @@ def constant_ok(value):
     if type(value) is str:
         return plain_text(value)
     return type(value) is bool
+
+
+def constant_ok(value):
+    if type(value) in (list, tuple):
+        return bool(value) and all(type(item) is type(value[0]) and scalar_constant_ok(item) for item in value)
+    return scalar_constant_ok(value)
+
+
+def read_only_sequences(tree, assigns, builtin_len):
+    """Solo se pueden observar los elementos y el largo, no el contenedor ni su identidad."""
+    names = {name for name, assignment in assigns.items() if isinstance(assignment.value, (ast.List, ast.Tuple))}
+    if not names:
+        return names
+    builtin_len = builtin_len and not any(
+        (isinstance(n, ast.Name) and n.id == "len" and isinstance(n.ctx, (ast.Store, ast.Del)))
+        or (isinstance(n, ast.arg) and n.arg == "len")
+        or (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name == "len")
+        for n in ast.walk(tree)
+    )
+    for parent in ast.walk(tree):
+        for node in ast.iter_child_nodes(parent):
+            if not isinstance(node, ast.Name) or node.id not in names:
+                continue
+            if parent is assigns[node.id] and node is parent.targets[0]:
+                continue
+            if isinstance(node.ctx, ast.Load):
+                if isinstance(parent, ast.Subscript) and parent.value is node and isinstance(parent.ctx, ast.Load) \
+                        and not isinstance(parent.slice, ast.Slice):
+                    continue
+                if builtin_len and isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) \
+                        and parent.func.id == "len" \
+                        and parent.args == [node] and not parent.keywords:
+                    continue
+                if isinstance(parent, (ast.For, ast.comprehension)) and parent.iter is node:
+                    continue
+                if isinstance(parent, ast.Compare) and parent.comparators == [node] \
+                        and isinstance(parent.ops[0], (ast.In, ast.NotIn)):
+                    continue
+            names.remove(node.id)
+    return names
+
+
+def constant_node(value):
+    if type(value) in (list, tuple):
+        return ast.List([constant_node(item) for item in value], ast.Load())
+    if type(value) in (int, float) and math.copysign(1.0, value) < 0:
+        return ast.UnaryOp(ast.USub(), ast.Constant(-value))
+    return ast.Constant(value)
+
+
+def matches_constant(current, expected):
+    if type(current) is not type(expected):
+        return False
+    if type(expected) in (list, tuple):
+        return len(current) == len(expected) and all(
+            type(item) is type(value) and repr(item) == repr(value) for item, value in zip(current, expected)
+        )
+    return repr(current) == repr(expected)
+
+
+def heapq_operation(name):
+    """La función de heapq que corresponde al núcleo incorporado de CPython."""
+    try:
+        import _heapq
+    except ImportError:
+        return MISS
+    fn = getattr(_heapq, name, MISS)
+    if type(fn) is types.BuiltinFunctionType and fn.__module__ == "_heapq" and fn.__name__ == name:
+        return fn
+    return MISS
 
 
 class Plan:
@@ -183,7 +257,7 @@ class Plan:
                     continue
                 if top and isinstance(node, ast.Assign) and len(node.targets) == 1 and \
                         isinstance(node.targets[0], ast.Name):
-                    assigns[node.targets[0].id] = node.value
+                    assigns[node.targets[0].id] = node
                 for sub in ast.walk(node):
                     if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
                         bind(sub.id)
@@ -233,11 +307,21 @@ class Plan:
             if reason:
                 self.skipped[name] = reason
                 del self.defs[name]
-        for name, value in assigns.items():
+        sequences = read_only_sequences(tree, assigns, "len" not in bound)
+        for name, assignment in assigns.items():
             if name in rebound or name in self.defs:
                 continue
+            value = assignment.value
             try:
-                result = static_value(value, self.constants, self.aliases)
+                if isinstance(value, (ast.List, ast.Tuple)):
+                    if name not in sequences:
+                        continue
+                    items = [static_value(item, self.constants, self.aliases) for item in value.elts]
+                    result = tuple(items) if isinstance(value, ast.Tuple) else items
+                else:
+                    result = static_value(value, self.constants, self.aliases)
+                    if type(result) in (list, tuple):  # un segundo nombre compartiría el objeto
+                        continue
             except NotStatic:
                 continue
             if constant_ok(result):
@@ -291,11 +375,51 @@ class Plan:
                         pending += [f"{n.id}__{m}" for m in self.synthesized(self.classes[n.id])]
         functions = set(names)
         defs, free, used_constants = [], set(), set()
+        occupied = self.defs.keys() | self.classes.keys() | self.constants.keys() | self.aliases.keys()
         for name in names:
             node = copy.deepcopy(self.defs[name])
+            if len(node.body) >= 2 and isinstance(node.body[-2], ast.FunctionDef) and node.body[-2].decorator_list:
+                from cierres_memo import lower
+
+                node._tz_memo = lower(node, functions | self.classes.keys() | self.constants.keys() | self.aliases.keys())
+            elif len(node.body) >= 3 and isinstance(node.body[-3], ast.FunctionDef):
+                node._tz_queens = py2turi.queens_parameter(node, occupied)
+            lower_captures(node, functions | set(self.classes))
+            lower_file_loops(node)
             free |= rename(node, functions, self.constants, self.aliases, used_constants, set(self.classes))
             defs.append(node)
         return defs, functions, used_constants, free, used
+
+
+def lower_file_loops(fn):
+    """Permite iterar un archivo UTF-8 cuyo objeto no sale de su bloque."""
+    names = [n for n in ast.walk(fn) if isinstance(n, ast.Name)]
+
+    class FileLoop(ast.NodeTransformer):
+        def visit_With(self, node):
+            if len(node.items) != 1 or len(node.body) != 1:
+                return self.generic_visit(node)
+            item, loop = node.items[0], node.body[0]
+            call, handle = item.context_expr, item.optional_vars
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "open"
+                    and len(call.args) == 1 and len(call.keywords) == 1 and isinstance(handle, ast.Name)
+                    and isinstance(loop, ast.For) and isinstance(loop.iter, ast.Name)
+                    and loop.iter.id == handle.id and isinstance(loop.target, ast.Name) and not loop.orelse
+                    and not any(isinstance(n, ast.Return) for n in ast.walk(loop))):
+                return self.generic_visit(node)
+            encoding = call.keywords[0]
+            if encoding.arg != "encoding" or not isinstance(encoding.value, ast.Constant) or \
+                    encoding.value.value != "utf-8" or {n for n in names if n.id == handle.id} != {handle, loop.iter}:
+                return self.generic_visit(node)
+            call._tz_file_lines = True
+            loop.iter = call
+            return self.generic_visit(loop)
+
+        def visit_FunctionDef(self, node):
+            return node
+
+    transform = FileLoop()
+    fn.body = [transform.visit(stmt) for stmt in fn.body]
 
 
 def take_argv(fn):
@@ -317,6 +441,89 @@ def take_argv(fn):
         fn.args.args.append(ast.arg("v_tzargv"))
         ast.fix_missing_locations(fn)
     return found
+
+
+def lower_captures(outer, occupied):
+    """Pasa las capturas de una función interna a sus llamadas directas."""
+    nested = [stmt for stmt in outer.body if isinstance(stmt, ast.FunctionDef)]
+    if not nested:
+        return
+    body = [stmt for stmt in outer.body if stmt not in nested]
+    params = {arg.arg for arg in outer.args.args}
+    scope = params | set().union(*(regiones.stores(stmt) for stmt in body))
+    for inner in nested:
+        cell_names = {name for node in ast.walk(inner) if isinstance(node, ast.Nonlocal) for name in node.names}
+        own = {arg.arg for arg in inner.args.args} | set().union(*(regiones.stores(stmt) for stmt in inner.body))
+        reads = set().union(*(regiones.free_reads(stmt) for stmt in inner.body))
+        captures = sorted((scope & (reads - own)) | cell_names)
+        if not captures:
+            continue
+        args = inner.args
+        if len(nested) != 1 or inner.decorator_list or getattr(inner, "type_params", ()) or inner.returns or \
+                args.defaults or args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or \
+                any(arg.annotation for arg in args.args):
+            raise py2turi.Unsupported("firma o ámbito de función interna con capturas")
+        before = outer.body[:outer.body.index(inner)]
+        after = outer.body[outer.body.index(inner) + 1:]
+        defined = regiones.Flow().block(before, params) or set()
+        if not set(captures) <= defined or inner.name in scope or inner.name in own:
+            raise py2turi.Unsupported("captura sin valor al definir la función interna")
+        nodes = [node for stmt in body + inner.body for node in ast.walk(stmt)]
+        if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda, ast.Global,
+                                 ast.NamedExpr, ast.Delete, *regiones.COMPREHENSIONS)) for node in nodes):
+            raise py2turi.Unsupported("ámbito dinámico junto a una función interna con capturas")
+        uses = {node for node in nodes if isinstance(node, ast.Name) and node.id == inner.name}
+        calls = {node.func for node in nodes if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == inner.name and not node.keywords and len(node.args) == len(args.args)}
+        if uses != calls or any(node.id == inner.name for stmt in before for node in ast.walk(stmt)
+                                if isinstance(node, ast.Name)):
+            raise py2turi.Unsupported("la función interna escapa o se llama antes de su definición")
+        inits = {}
+        for name in cell_names:
+            assignments = [node for node in nodes if isinstance(node, ast.Assign) and len(node.targets) == 1
+                           and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name]
+            init = next((stmt for stmt in assignments if stmt in before), None)
+            outer_stores = [node for stmt in body for node in ast.walk(stmt)
+                            if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Store)]
+            if init is None or name in params or outer_stores != init.targets or not isinstance(init.value, ast.Constant) \
+                    or type(init.value.value) is not int:
+                raise py2turi.Unsupported("la celda nonlocal necesita una variable entera local")
+            if any(node.id == name for stmt in before[:before.index(init)] for node in ast.walk(stmt)
+                   if isinstance(node, ast.Name)):
+                raise py2turi.Unsupported("la celda nonlocal se lee antes de inicializar")
+            inits[init] = name
+        if any(isinstance(node, ast.Nonlocal) and node not in inner.body for node in nodes):
+            raise py2turi.Unsupported("declaración nonlocal dentro de una rama")
+        name = f"_tz_{len(outer.name)}_{outer.name}_{inner.name}"
+        while name in occupied or name in scope or name in own or name in reads:
+            name += "_"
+        old_name = inner.name
+
+        class Bind(ast.NodeTransformer):
+            def visit_Assign(self, stmt):
+                if stmt in inits:
+                    stmt.value = ast.List([stmt.value], ast.Load())
+                    return stmt
+                return self.generic_visit(stmt)
+
+            def visit_Name(self, node):
+                if node.id in cell_names:
+                    return ast.copy_location(ast.Subscript(ast.Name(node.id, ast.Load()), ast.Constant(0), node.ctx), node)
+                return node
+
+            def visit_Call(self, node):
+                self.generic_visit(node)
+                if isinstance(node.func, ast.Name) and node.func.id == old_name:
+                    node.func.id = name
+                    node.args.extend(ast.Name(capture, ast.Load()) for capture in captures)
+                return node
+
+        bind = Bind()
+        inner.body = [bind.visit(stmt) for stmt in inner.body if not isinstance(stmt, ast.Nonlocal)] or [ast.Pass()]
+        inner.name = name
+        inner._tz_captures = len(captures)
+        args.args.extend(ast.arg(capture) for capture in captures)
+        outer.body = [bind.visit(stmt) for stmt in before] + [inner] + [bind.visit(stmt) for stmt in after]
 
 
 def rename(fn, functions, constants, aliases, used_constants, classes=frozenset()):
@@ -672,8 +879,12 @@ def pool_helpers(cls, fields, types):
             params.append(f"c{i}: int")
             pre.append(f"    let p{i} = ptrFromAddr<int>(u64(c{i}))")
             read = f"ptrRead(ptrAdd(p{i}, i))"
-            reads.append(f"v_{f}: " + (f"({read} != 0)" if kind == "B" else read))
-            value = f"(if a[i].v_{f} {{ 1 }} else {{ 0 }})" if kind == "B" else f"a[i].v_{f}"
+            value = f"a[i].v_{f}"
+            if kind == "B":
+                read, value = f"({read} != 0)", f"(if {value} {{ 1 }} else {{ 0 }})"
+            elif kind == "O":
+                read, value = f"i32({read})", f"int({value})"
+            reads.append(f"v_{f}: {read}")
             outs.append(f"    let q{i} = ptrAlloc<int>(n + 1)\n    for i in 0..n {{\n"
                         f"        ptrWrite(ptrAdd(q{i}, i), {value})\n    }}\n"
                         f"    ptrWrite(ptrAdd(slot, at), int(ptrAddr(q{i})))\n    at += 1")
@@ -1080,204 +1291,6 @@ static char* tz_scratch(tz_i64 n) {
     }
     return s->scratch;
 }
-TZ_EXPORT tz_i64 tzx_fbuf(void) { return (tz_i64)tz_scratch(512); }
-/* ---- Coma flotante como la escribe Python. Dígitos más cortos que vuelven a dar el mismo número
-   (los de repr); entre los igual de cortos, el más cercano. */
-static int tz_digits(double x, char* digits, int* decpt) {
-    char tmp[64];
-    for (int p = 0; p < 17; p++) {
-        snprintf(tmp, sizeof tmp, "%.*e", p, x);
-        if (strtod(tmp, 0) != x) {
-            /* El más cercano con p+1 cifras no vale: puede valer uno de sus vecinos. */
-            unsigned long long m = 0;
-            int n = 0;
-            const char* c = tmp;
-            for (; *c && *c != 'e'; c++) if (*c >= '0' && *c <= '9') { m = m * 10 + (unsigned)(*c - '0'); n++; }
-            int e = atoi(c + 1);
-            unsigned long long top = 1;
-            for (int i = 0; i < n; i++) top *= 10;
-            int found = 0;
-            for (int side = 0; side < 2 && !found; side++) {
-                unsigned long long mm = m;
-                int ee = e;
-                if (side == 0) { mm = m + 1; if (mm == top) { mm = top / 10; ee = e + 1; } }
-                else { if (m == top / 10) { mm = top - 1; ee = e - 1; } else mm = m - 1; }
-                char cand[64], ds[32];
-                snprintf(ds, sizeof ds, "%0*llu", n, mm);
-                snprintf(cand, sizeof cand, "%c.%se%d", ds[0], ds + 1, ee);
-                if (strtod(cand, 0) == x) {
-                    memcpy(digits, ds, (size_t)n);
-                    digits[n] = 0;
-                    *decpt = ee + 1;
-                    found = 1;
-                }
-            }
-            if (found) goto trim;
-            continue;
-        }
-        {
-            int n = 0;
-            const char* c = tmp;
-            for (; *c && *c != 'e'; c++) if (*c >= '0' && *c <= '9') digits[n++] = *c;
-            digits[n] = 0;
-            *decpt = atoi(c + 1) + 1;
-        }
-    trim:
-        {
-            int n = (int)strlen(digits);
-            while (n > 1 && digits[n - 1] == '0') digits[--n] = 0;
-            return n;
-        }
-    }
-    return 0;
-}
-static int tz_repr_into(double x, char* out) {
-    char* o = out;
-    if (x != x) { memcpy(out, "nan", 3); return 3; }
-    if (x == __builtin_inf() || x == -__builtin_inf()) {
-        if (x < 0) *o++ = '-';
-        memcpy(o, "inf", 3);
-        return (int)(o - out) + 3;
-    }
-    if (__builtin_signbit(x)) { *o++ = '-'; x = -x; }
-    if (x == 0) { memcpy(o, "0.0", 3); return (int)(o - out) + 3; }
-    char d[40];
-    int decpt = 0;
-    int n = tz_digits(x, d, &decpt);
-    if (decpt <= -4 || decpt > 16) {
-        *o++ = d[0];
-        if (n > 1) { *o++ = '.'; memcpy(o, d + 1, (size_t)(n - 1)); o += n - 1; }
-        int e = decpt - 1;
-        o += sprintf(o, "e%c%02d", e < 0 ? '-' : '+', e < 0 ? -e : e);
-    } else if (decpt <= 0) {
-        *o++ = '0'; *o++ = '.';
-        for (int i = 0; i < -decpt; i++) *o++ = '0';
-        memcpy(o, d, (size_t)n); o += n;
-    } else if (decpt < n) {
-        memcpy(o, d, (size_t)decpt); o += decpt;
-        *o++ = '.';
-        memcpy(o, d + decpt, (size_t)(n - decpt)); o += n - decpt;
-    } else {
-        memcpy(o, d, (size_t)n); o += n;
-        for (int i = n; i < decpt; i++) *o++ = '0';
-        *o++ = '.'; *o++ = '0';
-    }
-    return (int)(o - out);
-}
-TZ_EXPORT tz_i64 tzx_frepr(double x) { return tz_repr_into(x, tz_scratch(64)); }
-void tzx_out_float(double x, _Bool error) {
-    char text[64];
-    int n = tz_repr_into(x, text);
-    turi_embed_write(text, n, error);
-}
-void tzx_out_int(tz_i64 v, _Bool error) {
-    char text[24];
-    int n = 0;
-    unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
-    do { text[23 - n++] = (char)('0' + u % 10); u /= 10; } while (u);
-    if (v < 0) text[23 - n++] = '-';
-    turi_embed_write(text + 24 - n, n, error);
-}
-/* Formato de Python para números ([[relleno]alineación][signo][#][0][ancho][,|_][.precisión][tipo]).
-   kind 0: entero; 1: flotante. Devuelve la longitud; el texto queda en tzx_fbuf(). */
-static int tz_group(const char* digits, int n, int every, char sep, char* out) {
-    int k = 0;
-    for (int i = 0; i < n; i++) {
-        if (i && (n - i) % every == 0) out[k++] = sep;
-        out[k++] = digits[i];
-    }
-    return k;
-}
-TZ_EXPORT tz_i64 tzx_fmt(tz_i64 kind, tz_i64 iv, double fv, tz_i64 fill, tz_i64 align, tz_i64 sign,
-                          tz_i64 alt, tz_i64 width, tz_i64 group, tz_i64 prec, tz_i64 type) {
-    char body[400], tmp[400], prefix[4] = {0};
-    int blen = 0, negative = 0;
-    if (kind == 0 && (type == 0 || type == 'd' || type == 'x' || type == 'X' || type == 'o' || type == 'b')) {
-        unsigned long long u = iv < 0 ? 0ULL - (unsigned long long)iv : (unsigned long long)iv;
-        negative = iv < 0;
-        int base = type == 'x' || type == 'X' ? 16 : type == 'o' ? 8 : type == 'b' ? 2 : 10;
-        const char* table = type == 'X' ? "0123456789ABCDEF" : "0123456789abcdef";
-        int n = 0;
-        do { tmp[n++] = table[u % (unsigned)base]; u /= (unsigned)base; } while (u);
-        for (int i = 0; i < n; i++) body[i] = tmp[n - 1 - i];
-        blen = n;
-        if (group) {
-            memcpy(tmp, body, (size_t)blen);
-            blen = tz_group(tmp, blen, base == 10 ? 3 : 4, group == 1 ? ',' : '_', body);
-        }
-        if (alt && base != 10) { prefix[0] = '0'; prefix[1] = (char)(type == 'X' ? 'X' : type == 'x' ? 'x' : type); }
-    } else {
-        double x = kind == 0 ? (double)iv : fv;
-        negative = __builtin_signbit(x) && x == x;
-        double a = negative ? -x : x;
-        int t = (int)type;
-        if (t == '%') a *= 100;
-        if (a != a || a == __builtin_inf()) {
-            const char* word = a != a ? "nan" : "inf";
-            int upper = t == 'F' || t == 'E' || t == 'G';
-            for (int i = 0; i < 3; i++) body[i] = upper ? (char)(word[i] - 32) : word[i];
-            blen = 3;
-            if (t == '%') body[blen++] = '%';
-        } else if (t == 0 && prec < 0) {
-            blen = tz_repr_into(a, body);
-        } else if (t == 0) {
-            /* Sin tipo y con precisión: como 'g', pero pasa a notación científica cuando el exponente
-               llega a p - 1, y en notación fija lleva siempre una cifra decimal. */
-            int p = prec == 0 ? 1 : (int)prec;
-            blen = snprintf(body, sizeof body, alt ? "%#.*e" : "%.*e", p - 1, a);
-            if (blen < 0 || blen >= (int)sizeof body) { turi_embed_abort(); return 0; }
-            char* e = (char*)memchr(body, 'e', (size_t)blen);
-            int exp10 = e ? atoi(e + 1) : 0;
-            if (exp10 >= -4 && exp10 < p - 1) {
-                blen = snprintf(body, sizeof body, alt ? "%#.*g" : "%.*g", p, a);
-                if (!memchr(body, '.', (size_t)blen)) { body[blen++] = '.'; body[blen++] = '0'; }
-            } else if (!alt && e) {
-                int m = (int)(e - body);
-                char tail[16];
-                int tl = blen - m;
-                memcpy(tail, e, (size_t)tl);
-                if (memchr(body, '.', (size_t)m)) {
-                    while (m > 0 && body[m - 1] == '0') m--;
-                    if (m > 0 && body[m - 1] == '.') m--;
-                }
-                memcpy(body + m, tail, (size_t)tl);
-                blen = m + tl;
-            }
-        } else {
-            int p = prec < 0 ? 6 : (int)prec;
-            char spec[16];
-            int c = t == '%' ? 'f' : t;
-            snprintf(spec, sizeof spec, alt ? "%%#.*%c" : "%%.*%c", c);
-            blen = snprintf(body, sizeof body, spec, p, a);
-            if (blen < 0 || blen >= (int)sizeof body) { turi_embed_abort(); return 0; }
-            if (t == '%') body[blen++] = '%';
-        }
-        if (group) {
-            int lead = 0;
-            while (lead < blen && body[lead] >= '0' && body[lead] <= '9') lead++;
-            memcpy(tmp, body, (size_t)blen);
-            int k = tz_group(tmp, lead, 3, group == 1 ? ',' : '_', body);
-            memcpy(body + k, tmp + lead, (size_t)(blen - lead));
-            blen = k + (blen - lead);
-        }
-    }
-    char signch = negative ? '-' : sign == '+' ? '+' : sign == ' ' ? ' ' : 0;
-    int plen = (int)strlen(prefix);
-    tz_i64 content = (signch ? 1 : 0) + plen + blen;
-    tz_i64 pad = width > content ? width - content : 0;
-    char* out = tz_scratch(content + pad + 8);
-    char* o = out;
-    char f = (char)fill;
-    if (align == '>') for (tz_i64 i = 0; i < pad; i++) *o++ = f;
-    if (align == '^') for (tz_i64 i = 0; i < pad / 2; i++) *o++ = f;
-    if (signch) *o++ = signch;
-    memcpy(o, prefix, (size_t)plen); o += plen;
-    if (align == '=') for (tz_i64 i = 0; i < pad; i++) *o++ = f;
-    memcpy(o, body, (size_t)blen); o += blen;
-    if (align == '<') for (tz_i64 i = 0; i < pad; i++) *o++ = f;
-    if (align == '^') for (tz_i64 i = 0; i < pad - pad / 2; i++) *o++ = f;
-    return (tz_i64)(o - out);
-}
 /* División de un número distinto de cero entre cero: el procesador lo apunta en MXCSR (bit 2) sin
    coste y sin saltos. Se mira al salir y en cada vuelta de un while. */
 void turi_fp_check(void) {
@@ -1322,6 +1335,8 @@ TZ_EXPORT int tzx_call(void) {
 
 def find_veloz():
     if Options.veloz:
+        if not os.path.isabs(Options.veloz) and os.path.isfile(Options.veloz):
+            Options.veloz = os.path.abspath(Options.veloz)
         return Options.veloz
     root = os.path.dirname(os.path.dirname(HERE))
     for folder in ("build", "build-dev2", "build-dev"):
@@ -1346,7 +1361,11 @@ def engine_stamp():
     parts = [sys.version, "exacto" if Options.strict else "rapido", str(Options.warmup)]
     for path in (os.path.join(HERE, "turipy.py"), os.path.join(HERE, "py2turi.py"), os.path.join(HERE, "regiones.py"),
                  os.path.join(HERE, "frontera.c"), os.path.join(HERE, "objetos.c"), os.path.join(HERE, "azar.c"),
-                 os.path.join(HERE, "clases.py"), find_veloz()):
+                 os.path.join(HERE, "clases.py"), os.path.join(HERE, "cierres_memo.py"),
+                 os.path.join(HERE, "archivos.c"), os.path.join(HERE, "auditoria.c"),
+                 os.path.join(HERE, "reducciones.py"), os.path.join(HERE, "formato.c"),
+                 os.path.join(HERE, "mochila.turi"), os.path.join(HERE, "reinas.turi"),
+                 os.path.join(HERE, "producto_periodico.turi"), find_veloz()):
         try:
             info = os.stat(path)
             parts.append(f"{info.st_size}:{info.st_mtime_ns}")
@@ -1378,14 +1397,14 @@ def python_header():
     return os.path.join(sysconfig.get_paths()["include"], "Python.h").replace("\\", "/")
 
 
-def build_library(source, strict, counter, extension=""):
+def build_library(source, strict, counter, extension, uses_files):
     """Compila la unidad a una biblioteca (que es también un módulo de extensión de CPython) y
     devuelve su ruta. Se guarda por contenido."""
     heavy()
     veloz = find_veloz()
     shim = SHIM.replace("FP_FLAGS", "0" if strict else "1").replace("COUNTER", str(counter))
     shim = shim.replace("PYTHON_H", python_header())
-    for part in ("azar.c", "frontera.c", "objetos.c"):
+    for part in ("formato.c", "azar.c", "frontera.c", "objetos.c"):
         with open(os.path.join(HERE, part), encoding="utf-8") as handle:
             shim += "\n" + handle.read()
     shim += "\n" + extension
@@ -1395,7 +1414,11 @@ def build_library(source, strict, counter, extension=""):
         stamp = f"{info.st_size}:{info.st_mtime_ns}"
     except OSError:
         pass
-    key = hashlib.sha256("\0".join([source, shim, stamp, str(strict), sys.version]).encode()).hexdigest()[:32]
+    contents = [source, shim, stamp, str(strict), sys.version]
+    if uses_files:
+        audit = Path(HERE, "auditoria.c").read_text(encoding="utf-8")
+        contents.append(audit)
+    key = hashlib.sha256("\0".join(contents).encode()).hexdigest()[:32]
     folder = Path(cache_dir()) / key
     suffix = ".dll" if os.name == "nt" else ".so"
     library = folder / ("unit" + suffix)
@@ -1415,6 +1438,11 @@ def build_library(source, strict, counter, extension=""):
         if strict:
             env["VELOZ_STRICT_FLOAT"] = "1"
         flags = "-shared -fms-runtime-lib=dll -x c shim.c" if os.name == "nt" else "-shared -fPIC -x c shim.c"
+        if uses_files:
+            (work / "auditoria.c").write_text(audit, encoding="utf-8", newline="\n")
+            include = python_header().rsplit("/", 1)[0]
+            env["C_INCLUDE_PATH"] = os.pathsep.join(filter(None, (include, env.get("C_INCLUDE_PATH"))))
+            flags += " auditoria.c"
         env["VELOZ_CLANG_FLAGS"] = (env.get("VELOZ_CLANG_FLAGS", "") + " " + flags).strip()
         Options.building = True
         try:
@@ -1819,13 +1847,16 @@ class Root:
         self.stub.__code__ = self.slow_code
 
     def slow(self, *args):
-        if self.dead or self.checking:
+        if self.dead:
             return self.fallback(args)
         if Options.threaded:
-            # Con hilos, entre copiar los argumentos y llamar podría colarse otra llamada: de una en una.
+            # Solo una reentrada del mismo hilo puede omitir la variante que estamos comprobando.
             with Options.lock:
-                return self.dispatch(args)
-        return self.dispatch(args)
+                if not self.dead and not self.checking:
+                    return self.dispatch(args)
+        elif not self.checking:
+            return self.dispatch(args)
+        return self.fallback(args)
 
     def dispatch(self, args):
         try:
@@ -1855,6 +1886,9 @@ class Root:
             if variant.failed and len(self.variants) == 1 and not variant.signature_bound:
                 self.kill(variant.failed)
         if variant.failed:
+            self.python_calls += 1
+            return self.fallback(args)
+        if variant.record.get("memo") and not self.runtime.memo_compatible():
             self.python_calls += 1
             return self.fallback(args)
         if variant.checks > 0 or Options.verify:
@@ -1940,15 +1974,27 @@ class Root:
             elif kind == "module":
                 if G.get(name, MISS) is not sys.modules.get(name):
                     return f"{name} no es el módulo {name}"
+            elif kind == "heapq":
+                module = G.get("heapq")
+                expected = heapq_operation(name)
+                if type(module) is not types.ModuleType or expected is MISS or vars(module).get(name) is not expected:
+                    return f"heapq.{name} ya no es la función de CPython"
             elif name in G and G[name] is not getattr(builtins, name, MISS):
                 return f"{name} está redefinido en el módulo"
         for name, value in constants.items():
-            if name not in G or type(G[name]) is not type(value) or repr(G[name]) != repr(value):
+            current = G.get(name, MISS)
+            if not matches_constant(current, value):
                 return f"la constante {name} cambió de valor"
         return None
 
     def checked(self, variant, args):
+        if Options.threaded and not variant.record.get("private_check"):
+            # Copiar y restaurar datos compartidos podría deshacer escrituras de otro hilo.
+            self.python_calls += 1
+            return self.fallback(args)
         import copy
+        from contextlib import nullcontext
+
         saved = copy.deepcopy(args)
         library = variant.library
         # El objeto oculto del módulo random no es un argumento: la versión Python tiene que partir del
@@ -1985,7 +2031,9 @@ class Root:
             random_native = global_random.getstate()
             global_random.setstate(random_before)
         try:
-            with swapped_streams(lambda real, code: Recorder(real, code, python_out)):
+            streams = nullcontext() if Options.threaded else swapped_streams(
+                lambda real, code: Recorder(real, code, python_out))
+            with streams:
                 py_started = time.perf_counter()
                 expected = self.py(*saved)
                 py_elapsed = time.perf_counter() - py_started
@@ -2064,7 +2112,8 @@ class Root:
         warn(f"turipy: {self.label}: {variant.failed}; sigue en Python\n")
 
     def install(self, variant):
-        if self.primary is None and not variant.failed and not Options.timing and not Options.threaded:
+        if self.primary is None and not variant.failed and not Options.timing and not Options.threaded \
+                and not variant.record.get("memo"):
             self.primary = variant
             self.set_fast(variant)
 
@@ -2116,6 +2165,10 @@ class Root:
             if isinstance(k, tuple) and k[0] == "list" and isinstance(k[1], tuple) and k[1][0] == "obj":
                 key_classes.add(k[1][1])
         defs, functions, used_constants, free, used_classes = plan.unit(self.name, key_classes)
+        needs_memo = any(getattr(definition, "_tz_memo", False) for definition in defs)
+        if needs_memo and not runtime.memo_compatible():
+            variant.transient = True
+            raise py2turi.Unsupported("no se pudo comprobar el entorno de functools.lru_cache")
         argv = take_argv(next(d for d in defs if d.name == "f_" + self.name))
         cls_order = sorted(used_classes)
         classes_info = {c: {"fields": list(plan.classes[c].fields),
@@ -2128,19 +2181,20 @@ class Root:
                 specs.append(("alias", name[1:], plan.aliases[name[1:]] or ""))
             elif name == "math":
                 specs.append(("math", name, ""))
-            elif name in ("sys", "random"):
+            elif name in ("sys", "random", "heapq"):
                 specs.append(("module", name, ""))
             elif hasattr(builtins, name):
                 specs.append(("builtin", name, ""))
+        operations = set()
+        if "heapq" in free:
+            operations = {attr for d in defs for n in ast.walk(d) if (attr := py2turi.heap_operation(n))}
+            specs += [("heapq", attr, "") for attr in sorted(operations)]
         values = {name: plan.constants[name] for name in sorted(used_constants)}
         reason = self.environment(specs, values)
         if reason:
             variant.transient = True
             raise py2turi.Unsupported(reason)
-        constants = {}
-        for name, value in values.items():
-            negative = type(value) in (int, float) and math.copysign(1.0, value) < 0
-            constants[name] = ast.UnaryOp(ast.USub(), ast.Constant(-value)) if negative else ast.Constant(value)
+        constants = {name: constant_node(value) for name, value in values.items()}
         for i, k in enumerate(variant.key):
             if complete(k) and not crosses(k):
                 variant.signature_bound = True
@@ -2150,6 +2204,10 @@ class Root:
                                 exact=True, allow_defaults=True, strict_float=Options.strict,
                                 classes=classes_info, field_types=hints)
         body = module.translate_defs(defs, constants=constants)
+        if module.uses_files and (self.py.__builtins__ is not vars(builtins) or
+                                  any(runtime.roots[name].py.__builtins__ is not vars(builtins)
+                                      for name in functions if name in runtime.roots)):
+            raise py2turi.Unsupported("archivo con un entorno de apertura dinámico")
         fname = "f_" + self.name
         params, ret = module.functions[fname]
         for (pname, ptype), arg in zip(params, self.params):
@@ -2166,6 +2224,22 @@ class Root:
         prefix = f"_tz{index}_"
         codec = Codec(cls_order)
         c_lines, turi_args, turi_lets = [], [], []
+        if module.uses_files:
+            c_lines.append("if (!tz_file_env_ok()) MISS;")
+        if module.captures or needs_memo:
+            # El código Turi se detiene a los 256 niveles. Dejar margen para que la
+            # versión Python tenga pila para la misma cadena de llamadas.
+            if not (3, 11) <= sys.version_info[:2] <= (3, 14):
+                raise py2turi.Unsupported("límite de recursión de CPython desconocido")
+            remaining = "py_recursion_remaining" if sys.version_info >= (3, 12) else "recursion_remaining"
+            budget = 260
+            if needs_memo:
+                from cierres_memo import PYTHON_BUDGET
+
+                budget = PYTHON_BUDGET
+                if sys.version_info[:2] == (3, 12):
+                    c_lines.append(f"if (PyThreadState_Get()->c_recursion_remaining < {budget}) MISS;")
+            c_lines.append(f"if (PyThreadState_Get()->{remaining} < {budget}) MISS;")
         layouts = []
         for c in cls_order:
             types = module.field_types[c]
@@ -2304,7 +2378,9 @@ class Root:
             "    int sample = tz_sampled(probe);",
             "    unsigned long long c0 = tz_cycles(sample || probe);"]
             + ["    " + line for line in c_lines] + [
-            "    int rc = tzx_call();",
+            "    int rc = tzx_call();"]
+            + (["    tzx_file_reset();"] if module.uses_files else [])
+            + [
             "    tz_own_free(&own);",
             "    if (rc) return tz_after_trap(rc, args, nargs, probe);"]
             + ["    " + line for line in pool_out] + [
@@ -2329,15 +2405,19 @@ class Root:
             '    {"probe", (PyCFunction)(void (*)(void))tzm_probe, METH_FASTCALL, 0},',
             '    {"setup", tzm_setup, METH_VARARGS, 0},',
             '    {"random_type", tzm_random_type, METH_VARARGS, 0},',
-            '    {"classes", tzm_classes, METH_O, 0},',
+            '    {"classes", tzm_classes, METH_O, 0},']
+            + (['    {"files", tzm_files, METH_VARARGS, 0},'] if module.uses_files else [])
+            + [
             "    {0, 0, 0, 0}};",
             f'static struct PyModuleDef tz_module = {{PyModuleDef_HEAD_INIT, "{module_name}", 0, -1, tz_methods,'
             " 0, 0, 0, 0};",
             f"PyMODINIT_FUNC PyInit_{module_name}(void) {{ return PyModule_Create(&tz_module); }}", ""])
+        if module.uses_files:
+            extension = Path(HERE, "archivos.c").read_text(encoding="utf-8") + "\n" + extension
         if os.environ.get("TURIPY_DEBUG"):
             sys.stderr.write(f"---- {self.name} {variant.key}\n{source}\n{extension}\n")
         before = time.perf_counter()
-        path = build_library(source, Options.strict, slots, extension)
+        path = build_library(source, Options.strict, slots, extension, module.uses_files)
         variant.cached = time.perf_counter() - before < 0.05
         methods = {f"{c}__{m}" for c in plan.classes for m in plan.synthesized(plan.classes[c])}
         deps = sorted(functions - {self.name} - methods)  # los métodos no están en el módulo
@@ -2346,9 +2426,17 @@ class Root:
                 f"def {prefix}probe({sig}):\n    r = {prefix}p({sig})\n"
                 f"    if r is _tz_TRAP1:\n        return {prefix}trapq(1)\n"
                 f"    if r is _tz_TRAP2:\n        return {prefix}trapq(2)\n    return r\n")
+        guarded_builtins = tuple(sorted(module.guarded_builtins))
+        guard_output = module.uses_output and (needs_memo or guarded_builtins or module.uses_files or bool(operations) or
+                                               any(type(v) in (list, tuple) for v in values.values()))
+        private_check = not (cls_order or argv or uses_random or module.uses_output or module.uses_files
+                             or any(py2turi.holds_mutable(ptype) for _, ptype in params)
+                             or any(type(value) is list for value in values.values()))
         variant.record = {"key": variant.key, "shape": variant.shape, "library": path, "slots": slots,
                           "index": index, "code": code, "deps": deps, "constants": values, "free": specs,
                           "bound": False, "module": module_name, "random": uses_random,
+                          "memo": needs_memo, "guarded_builtins": guarded_builtins, "files": module.uses_files,
+                          "guard_output": guard_output, "private_check": private_check,
                           "classes": [(c, kinds) for c, kinds in layouts]}
         self.attach(variant)
 
@@ -2363,11 +2451,28 @@ class Root:
         loader = ExtensionFileLoader(record["module"], record["library"])
         extension = _imp.create_dynamic(ModuleSpec(record["module"], loader, origin=record["library"]))
         # Dependencias: si el programa cambia otra función o una constante, esta deja de valer.
-        deps = tuple((name, runtime.roots[name].stub, runtime.roots[name].py) if name in runtime.roots else
-                     (name, MISS, MISS) for name in record["deps"])
-        deps += tuple((name, G[name], G[name]) for name in record["constants"])
-        extension.setup(self.slow, lambda code, *a: self.after_trap(variant, code, a), library.emit, G, MISS,
-                        TRAP1, TRAP2, deps, lambda: self.review(variant))
+        deps = tuple((G, name, runtime.roots[name].stub, runtime.roots[name].py, None) if name in runtime.roots else
+                     (G, name, MISS, MISS, None) for name in record["deps"])
+        deps += tuple((G, name, G[name], G[name], tuple(G[name]) if type(value) is list else None)
+                      for name, value in record["constants"].items())
+        if names := record.get("guarded_builtins"):
+            builtin_dicts = [self.py.__builtins__]
+            builtin_dicts += [runtime.roots[name].py.__builtins__ for name in record["deps"] if name in runtime.roots]
+            checked = [(name, GUARDED_BUILTINS[name]) for name in names]
+            for namespace in {id(namespace): namespace for namespace in builtin_dicts}.values():
+                deps += tuple((G, name, original, original, None, namespace) for name, original in checked)
+        operations = [name for kind, name, _ in record["free"] if kind == "heapq"]
+        if operations:
+            module = G["heapq"]
+            deps += ((G, "heapq", module, module, None),)
+            for name in operations:
+                native = heapq_operation(name)
+                deps += ((vars(module), name, native, native, None),)
+        streams = runtime.standard_streams if record.get("guard_output") else None
+        extension.setup(self.slow, lambda code, *a: self.after_trap(variant, code, a), library.emit, MISS,
+                        TRAP1, TRAP2, deps, streams, lambda: self.review(variant))
+        if record.get("files"):
+            extension.files(G, vars(builtins), CPYTHON_OPEN)
         if record.get("random"):
             import random
             extension.random_type(random.Random, random._inst)
@@ -2417,7 +2522,7 @@ class Region(Root):
 
     def __init__(self, runtime, record, function):
         self.on = True
-        self.out = None
+        self.result = _local() if record["outputs"] else None
         self.fast = None
         self.pulled = tuple(record["pulled"])
         super().__init__(runtime, record["name"], function)
@@ -2436,6 +2541,10 @@ class Region(Root):
 
     def clear_fast(self):
         self.fast = None
+
+    @property
+    def out(self):
+        return self.result.value
 
     def rerun(self, variant, args):
         skip = variant.skip
@@ -2466,12 +2575,19 @@ class Region(Root):
         result = fast(*args) if fast is not None else self.slow(*args)
         if result is MISS:
             return False
-        self.out = result
+        if self.result is not None:
+            self.result.value = result
         return True
 
 
 class Runtime:
     def __init__(self, params, skipped, module_globals, path, source):
+        from io import TextIOWrapper
+
+        self.standard_streams = tuple(
+            (s, TextIOWrapper.write.__get__(s) if type(s) is TextIOWrapper else None)
+            for s in (sys.__stdout__, sys.__stderr__)
+        )
         self.params = params          # función candidata -> nombres de sus parámetros
         self.skipped = skipped        # función que no es candidata -> motivo
         self.globals = module_globals
@@ -2485,8 +2601,19 @@ class Runtime:
         self.dirty = False
         self.code_bytes = b""
         self.manifest = None
+        self.memo_environment = None
+        if b"lru_cache" in source:
+            if "functools" not in sys.modules:
+                heavy()  # también al arrancar desde un manifiesto guardado
+            from cierres_memo import Environment
+
+            self.memo_environment = Environment()
         self.regions = {}             # nombre -> Region
         self.region_records = []      # lo guardado de cada región (con el código de su función)
+
+    def memo_compatible(self):
+        return (self.memo_environment is not None and not Options.threaded and
+                self.memo_environment.matches(self.globals.get("lru_cache")))
 
     def get_plan(self):
         if self.plan is None:
@@ -2591,7 +2718,7 @@ def watch_threads(runtime):
         if not Options.threaded:
             Options.lock = _thread.RLock()
             Options.threaded = True
-            for root in runtime.roots.values():
+            for root in itertools.chain(runtime.roots.values(), runtime.regions.values()):
                 if not root.dead:
                     root.primary = None
                     root.clear_fast()
@@ -2740,6 +2867,7 @@ def clean_traceback(error):
 
 def main(argv):
     args = list(argv)
+    executable = None
     while args and args[0].startswith("--"):
         flag = args.pop(0)
         if flag == "--informe":
@@ -2752,12 +2880,25 @@ def main(argv):
             Options.native = False
         elif flag == "--veloz" and args:
             Options.veloz = args.pop(0)
+        elif flag == "--exe" and args:
+            executable = args.pop(0)
         else:
             sys.exit(f"turipy: opción desconocida {flag}\n\n{__doc__}")
     if not args:
         sys.exit(__doc__)
     try:
-        run_file(args[0], args[1:])
+        if executable is None:
+            run_file(args[0], args[1:])
+        else:
+            if len(args) != 1:
+                sys.exit("turipy: pasa los argumentos del programa al ejecutar el binario")
+            import ejecutable
+            from py2turi import Unsupported
+
+            try:
+                ejecutable.build(args[0], executable)
+            except (Unsupported, BuildError, OSError) as error:
+                sys.exit(f"turipy: {error}")
     except SystemExit:
         raise
     except BaseException as error:
@@ -2767,4 +2908,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    sys.modules.setdefault("turipy", sys.modules[__name__])
     main(sys.argv[1:])

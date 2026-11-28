@@ -461,3 +461,177 @@ Quedaban dos programas por detrás del C experto: `binarytrees` en el banco del 
 | spectralnorm | 3000 | 145 | 83 | 221.1 | 91.4 | 2.65x |
 
   Los empates de `mandelbrot` (en las dos caras) y de `nbody` en Python son eso, empates dentro del ruido de la medida: quedan abiertos.
+
+## Secuencias globales de solo lectura y ordenación con clave (25 de noviembre de 2026)
+
+El motor incorpora los literales homogéneos que el módulo solo consulta como secuencias. Cada función materializa una copia local por constante. La frontera comprueba identidad y contenido antes de cada llamada que depende de una lista. Si la función escribe en una salida personalizada, se ejecuta en CPython para que las llamadas a esa salida puedan modificar las constantes en el momento correcto.
+
+`sorted` calcula la clave una vez por elemento y mezcla índices de forma estable. Para recorrer un diccionario, su vista de pares o un conjunto, la clave debe carecer de efectos e incluir la identidad que distingue todas las entradas. Si quedan empates observables, se conserva el camino de CPython. El caso `orden_y_constantes` comprueba estas decisiones con los cuatro modos de la batería híbrida.
+
+En el banco público, los dos millones de palabras pasaron de 522 a 126 ms de proceso entero. El cálculo ya es nativo de principio a fin y toma 60 ms frente a 34,8 ms del C experto.
+
+## Montículos de Python en nativo (26 de noviembre de 2026)
+
+El traductor baja `heapify`, `heappush` y `heappop` con el algoritmo de CPython y comparación lexicográfica para las tuplas. Registra la mutación de la lista y los cambios de longitud. La frontera comprueba la identidad del módulo y de las operaciones para que una sustitución hecha en Python invalide la llamada nativa.
+
+El caso `monticulos` compara los cuatro modos, incluidas las mutaciones visibles en el argumento y la sustitución de `heappop`. El benchmark `dijkstra` ejecuta todo `main` en nativo y conserva la salida en tres tamaños. Para la cuadrícula de 500, el proceso completo bajó de 405 a 89 ms. El cálculo nativo tomó 25 ms frente a 13,1 ms de C.
+
+## Claves tupla en tablas locales
+
+Los pares y tríos de enteros se empaquetan en una clave de 64 bits con comprobaciones antes de cada inserción o consulta. Los componentes se recuperan al extraer claves o pares. Un valor fuera de rango vuelve a CPython mediante la parada transaccional.
+
+Los bucles sobre tablas se traducen cuando las vueltas solo aportan inserciones en conjuntos, actualizaciones aditivas de contadores enteros o temporales que quedan dentro de la vuelta. Si el orden llega a ser observable, el recorrido se ejecuta en CPython. `claves_tupla` comprueba el rango, la salida del filtro y los recorridos cuyo orden se conserva en Python.
+
+## Verificación del motor con hilos
+
+La comprobación consulta el estado de reentrada bajo el bloqueo. Cada hilo recoge el resultado de su propia región y las llamadas de vía rápida a funciones y regiones se retiran al arrancar un hilo.
+
+Durante la comprobación, una variante que accede a datos compartidos o escribe en la salida usa CPython para evitar restaurar una copia sobre los cambios de otro hilo. Las comprobaciones de cálculos con datos privados siguen activas. El caso `hilos` aumenta la frecuencia de cambio de hilo para ejercitar este recorrido.
+
+## Funciones internas con capturas
+
+Una función interna de llamada directa recibe cada captura al invocarse. Una colección que modifica pasa por referencia. Una variable `nonlocal` con inicialización entera se representa mediante una lista local de un elemento. Antes de entrar en nativo se comprueba el margen de recursión de CPython. Las funciones que escapan siguen el camino de Python.
+
+`cierres` cubre recursión con capturas, cambios en una lista del llamador, funciones que escapan y el límite de recursión. En `reinas`, el proceso entero bajó de 272 a 82 ms. El cálculo nativo tomó 21 ms frente a 5,3 ms de C.
+
+Una asignación simultánea de listas nuevas, como `weights, values = [], []`, usa el tipo deducido de cada destino para declarar las temporales. El análisis de alias reconoce esas listas al devolver la tupla. La prueba `pares` cubre también una lista prestada, cuya identidad conserva CPython. Así se compila `items` en el benchmark de `mochila`.
+
+Para `lru_cache(maxsize=None)`, el traductor admite una función interna pura de dos enteros que la función exterior llama una vez al devolver el resultado. Cada paso devuelve el resultado o la clave que necesita. Un bucle mantiene la pila de estados y guarda en la tabla los resultados resueltos. El motor comprueba el decorador, sus dependencias y el margen de recursión antes de ejecutar la variante. `memoria_recursiva` comprueba la salida, el estado compartido de una función impura, un límite de pila bajo y cambios en el decorador.
+
+## Iteración de archivos de texto
+
+El traductor admite el `with open(ruta, encoding="utf-8")` que contiene un solo bucle sobre el archivo y cuyo manejador no escapa. `archivos.c` abre archivos regulares en solo lectura y corta bloques de 64 KiB en límites de línea. Conserva el terminador de cada línea y convierte CRLF y CR a LF, también entre bloques. Un error, una línea demasiado larga o bytes que el camino ASCII no admite hacen que CPython ejecute la llamada. El motor libera los búferes y cierra los descriptores incluso si la función nativa se detiene.
+
+`auditoria.c` comprueba los hooks de auditoría de CPython 3.11–3.14 en una unidad de compilación separada. El motor conserva la apertura de Python cuando hay hooks activos o no se puede consultar su estado. Comprueba además la identidad de `open`. `lectura_archivos` cubre estos casos, la normalización entre bloques, errores de apertura y descodificación, y la repetición tras un error durante el bucle.
+
+Un `for` sobre `str.split()` sin argumentos puede recorrer los límites de las palabras en el texto de origen. Se conserva la última asignación al destino del bucle. El recorte por un conjunto literal de caracteres ASCII usa dos máscaras de bits.
+
+La caché de bytecode del lanzador incorpora la ruta del motor. Dos copias con igual tamaño y fecha pueden usar la misma carpeta de caché y conservar cada una sus propias trazas de excepciones.
+
+## Construcción directa de registros
+
+Cuando `__init__` se limita a copiar parámetros escalares o referencias de objetos y asigna cada campo una vez, el traductor inserta un registro ya inicializado en el almacén de la clase. Los demás constructores se ejecutan mediante su inicializador. `constructor_directo` comprueba el orden de campos y una mutación cuyo valor se observa a través de una referencia compartida.
+
+Los campos que referencian otros objetos guardan su índice en `i32`. El límite del almacén es 2³⁰ elementos y `-1` representa `None`. El traductor ensancha el índice al acceder al almacén y al exportar una columna de referencias. La prueba también reasigna una referencia recibida de CPython y verifica que el objeto devuelto conserve su identidad.
+
+## Gramática canónica en CI
+
+Las gramáticas de generación describen la sintaxis canónica. Su comprobación diferencial invoca `veloz fmt --strict` al validar muestras, al comprobar que el formato es idempotente y al verificar UTF‑8 inválido. La prueba de tolerancia sigue comprobando la normalización de grafías como `let x = 1;`.
+
+## Temporales vivos durante una expresión `if`
+
+La condición y las ramas de un `if` usado como expresión limpian los temporales de su propio ámbito. Los que ya existían siguen vivos hasta que termine la expresión exterior. La prueba nativa concatena una cadena de heap con el resultado de cada rama y compara con el intérprete. ASan reprodujo la lectura de memoria liberada con el compilador anterior en Linux y ambas ramas dan la salida esperada tras el cambio con ASan y UBSan activos.
+
+## Representación compacta de los vectores del intérprete
+
+Un vector SIMD válido ocupa hasta 64 bytes. El intérprete guarda cada carril con el ancho de su tipo dentro de ocho palabras de 64 bits. Así reduce el tamaño de todos los valores del intérprete y conserva la copia por valor de los vectores. La prueba SIMD comprueba carriles de 16 bits a ambos lados de una palabra y al final de un vector de 512 bits.
+
+Con un arreglo de 4.198.401 enteros en Ubuntu, el pico de memoria bajó de 1.095 a 326 MiB y el mínimo de cinco rondas alternadas bajó de 758 a 247 ms. La prueba de límites volvió a pasar con la comprobación del intérprete para el arreglo de 16.785.409 elementos.
+
+## Trabajadores de la prueba de contención
+
+La prueba de contención en la cola nativa dispone de seis trabajadores para cuatro productores y dos consumidores. En una máquina de dos CPU los productores podían ocupar todos los trabajadores mientras esperaban espacio en la cola. El cambio se aplica a esa prueba y conserva sus 1.600 inserciones y el límite de cuatro ranuras.
+
+## Bucles de productos de flotantes en modo exacto
+
+El traductor agrupa ocho acumulaciones independientes cuando cada elemento de salida se calcula con una suma y un coeficiente aritmético puro. Cada suma conserva su orden. La frontera comprueba la identidad de las listas de entrada y salida. El compilador comprueba los préstamos de los argumentos en las llamadas entre funciones nativas.
+
+El producto rectangular de matrices recorre cada fila de la matriz derecha de forma contigua. Cada elemento de salida sigue acumulando en el orden del índice interior de Python. Se construye y entrega una fila de salida por vuelta. Las pruebas comparan dimensiones rectangulares, filas vacías y cortas, listas compartidas, colas de bloques y el contenido de la salida tras reejecutar una excepción en CPython.
+
+## Formato de texto con el operador `%`
+
+El traductor deduce `str` para el formato con `%`, también cuando el valor interpolado es un flotante. Así se puede imprimir o guardar la cadena formateada dentro de la misma función nativa. La prueba `salida` cubre ambos usos en los dos modos de coma flotante.
+
+## Ejecutable Python en modo exacto
+
+`run.py --exe` acepta módulos cuya inicialización se puede resolver al compilar y cuya llamada de entrada se puede traducir completa. El ejecutable comparte el formateador y el lector de archivos regulares con el motor híbrido. La salida se confirma al terminar y pasa a un temporal si supera el búfer de memoria. En caso de parada se descarta esa salida. CPython recibe el fuente incluido mediante un descriptor independiente y conserva los flujos originales y las líneas del fuente en la traza. El banco comprueba los bytes de la salida del ejecutable.
+
+## Reducción de la mochila 0/1
+
+Cuando la recursión memorizada coincide con la elección de tomar o saltar un objeto, el traductor usa una cota fraccionaria y una solución factible. Su diferencia acota cuánto se puede perder al omitir o tomar cada objeto. Los objetos cuya decisión queda fijada se eliminan de la fila restante. La guarda limita el recorte a pesos positivos, valores no negativos, tamaños compatibles con la recursión original y sumas que caben en `i32`. Las demás entradas conservan la resolución memorizada.
+
+La selección ponderada localiza la densidad del objeto que agota la capacidad. Cada partición acumula pesos y valores. La fila SIMD resuelve el resto con la cota exacta y una solución factible. En el ensayo con 400 objetos, el cálculo bajó de 0,0217 a 0,0155 ms. El banco de C incluye fila, ordenación y selección con LTO y PGO.
+
+## Búsqueda con restricciones de columna y diagonal
+
+El traductor reemplaza tres conjuntos de una búsqueda recursiva por máscaras cuando puede verificar todas sus lecturas, inserciones y eliminaciones. El reflejo duplica el recuento de media primera fila y de media segunda fila en la rama central. Las dos últimas columnas pueden comprobarse en ambos órdenes con las máscaras existentes. Se aplica hasta 20 columnas, donde el recuento cabe en `int`, y el motor híbrido comprueba las identidades de `set` y `range` al entrar. En `reinas 11`, el cálculo bajó de unos 23 a 0,33 ms. El banco compara las variantes de C con reflexión y cierre de las dos últimas filas.
+
+El cierre de cuatro filas usa una máscara de 24 bits, uno por orden posible de las columnas. Cuatro tablas pequeñas codifican la disponibilidad por columna y otra las diagonales entre ellas. Las tres distancias se saturan en cuatro porque ninguna separación de fila supera tres. Se usa esta ruta cuando las cuatro columnas libres caben en los primeros dieciséis bits.
+
+El cierre de cinco filas aplica la misma prueba cuando las cinco columnas libres caben en doce bits. Las 120 permutaciones ocupan dos palabras. Cada distancia entre columnas se satura en cinco, porque las filas se separan como máximo cuatro. Las máscaras de disponibilidad y diagonales se intersectan antes de contar los órdenes admitidos.
+
+## Producto de matrices con filas y columnas periódicas
+
+En un producto rectangular con sumas estrictas se puede reutilizar una celda si coinciden todos los operandos de su fila y su columna con los de otra celda. El traductor prueba la periodicidad sobre las representaciones de los números, conserva el orden de cada suma y calcula el bloque único con SIMD. El producto general recibe matrices sin dicho período o con dimensiones que requieren comprobar los accesos de la versión original. La variante de C extremo también aprovecha el período de su generador.
+
+## Conteos en un ejecutable cerrado
+
+Un generador congruencial que produce palabras de una a tres sílabas puede contar códigos de catálogo. El traductor verifica el generador y su consumidor, la anchura y unicidad de las sílabas y los usos del diccionario. La ordenación conserva el desempate por palabra. Si cada código ocupa hasta once bits, se preparan 256 muestras y dieciséis adicionales para agrupar dos palabras y el destino en una carga de 32 bits. Con catálogos mayores se procesan 96 muestras y ocho adicionales, y se sigue una transición por palabra. El recuento solo reconstruye las cadenas del prefijo ordenado cuando ese prefijo es la única salida.
+
+Una criba cuyo resultado solo se usa para contar y sumar primos puede agrupar los estados por los cocientes enteros distintos de `n - 1`. Conserva el conteo y la suma para cada cociente. La tabla ocupa espacio proporcional a la raíz cuadrada. Se aplica entre 2 y 2³⁰ elementos, donde las sumas y los productos intermedios caben en `int`.
+
+Tras aplicar la rueda de 210, los estados grandes consultados desde el divisor 1 tienen divisores coprimos con 210. Cada consulta a otra entrada grande multiplica el divisor por un primo de al menos 11 y conserva esa propiedad. La tabla solo reserva esos estados. Su posición se obtiene con los 48 residuos del período y el prefijo de la rueda. El orden creciente conserva el estado anterior de la entrada consultada durante cada pasada.
+
+En la tabla pequeña, el mayor índice es 32.767 y la suma de todos sus enteros cabe en 32 bits. Cada palabra guarda el recuento abajo y la suma arriba. En cada grupo, el recuento eliminado es menor o igual que el recuento del destino. La resta empaquetada mantiene ambos campos independientes y permite actualizar ocho entradas por vector.
+
+A partir del segundo período de 210, la inicialización de la tabla pequeña reúne ocho prefijos a la vez. Cada período aporta un sesgo común. El recuento del prefijo determina cuánto añadir al campo de suma para desplazar sus residuos al período correspondiente.
+
+## Cuadrículas con pesos por diferencia de índices
+
+Para un peso periódico que depende de fila menos columna, un camino puede reducirse al tramo directo entre diagonales y ciclos de dos pasos. Si un ciclo de coste mínimo es adyacente al origen, el traductor puede acumular todos esos ciclos allí y realizar un camino monótono en la cuadrícula. La suma usa el período del peso y las sumas de enteros y cuadrados. La reducción exige que la matriz se consuma exclusivamente como distancia de la última celda y suma total. Verifica los pesos positivos y la cota inicial del algoritmo.
+
+## Celdas de Conway en bloques de ocho filas
+
+Las dos tablas alternadas representan una celda con un bit. Cada vector abarca ocho filas consecutivas de una columna de palabras. Las triadas horizontales se desplazan entre carriles para reutilizarlas en filas vecinas. Los intervalos activos crecen cuando una celda del borde puede alcanzar un bloque contiguo. El relleno exterior permite cargar ambos vecinos sin ampliar el tablero durante el cálculo. El traductor identifica el sembrado, la regla y la impresión de los recuentos. Las asignaciones se liberan con el alcance de la función.
+
+Cada fila comparte la paridad y el acarreo de sus dos vecinos horizontales con las filas contiguas. Para una semilla de 64 columnas se calculan en SIMD los saltos afines del generador. Los quince bits observados por el programa coinciden al calcular el generador módulo 2³², porque la máscara original solo descarta bits superiores. El cociente entero de una muestra entre 0 y 32.767 por tres se obtiene con `(muestra * 10923) >> 15`. Las muestras vivas de cada fila se guardan juntas en una o dos palabras.
+
+## Escape y conjugación en Mandelbrot
+
+El cálculo usa grupos de cuatro vectores. Si el cuadrado de la magnitud supera 32, alguna componente supera 4. Cuando la otra componente mide como máximo la mitad, domina la diferencia de cuadrados. En el resto de casos domina el producto de ambas. Con las coordenadas reconocidas, esa componente crece incluso con el redondeo de f64. Una fila solo se reutiliza si su coordenada imaginaria es exactamente la negación de la otra. Los dos bloques de filas se recombinan en el orden original mediante potencias de la base del checksum.
+
+Los dos extremos de un grupo horizontal bastan para certificar que todos sus puntos están en uno de dos discos del plano de `c`. Con `|c|² ≤ 0,06`, el disco `|z| ≤ 1/2` es invariante. Con `|c+1|² ≤ 0,009`, se cumple `|c| < 1,095` y `|c²+c| < 0,104`. Para `|z| ≤ 1/5`, la expresión `z⁴ + 2cz² + c² + c` queda por debajo de 0,194 y los pasos impares quedan por debajo de 1,135. Las holguras cubren el redondeo de f64. Los grupos que no entran en esos discos conservan la recurrencia y comprueban el escape tras las primeras dos tandas de cinco y después cada diez pasos.
+
+Para 50 iteraciones se certifican además cuadrados de lado 1/512 en el plano de `c`. Un radio que contiene todas las órbitas del cuadrado se actualiza con `(2 · |z_c| + r) · r + r_c`, más un margen de redondeo. `z_c` es la órbita del centro y `r_c` encierra el cuadrado. El certificado exterior se obtiene cuando toda la bola rebasa el umbral de escape. El interior exige que toda la bola esté dentro del radio dos después de la iteración 50. Los cuadrados contiguos del mismo tipo se agrupan por fila. La tabla guarda 8637 valores de 16 bits. Sus bytes constantes se incorporan mediante la potencia del checksum y la suma geométrica correspondiente.
+
+## Inversiones de prefijo agrupadas por el primer valor
+
+Los tres contadores bajos de `fannkuch` recorren los 24 órdenes de las primeras cuatro posiciones. El traductor agrupa las seis permutaciones que comienzan con el mismo valor. Las deja en carriles de paridad alterna para obtener el mismo checksum. Si el primer valor es distinto de cero, la primera inversión tiene la misma longitud en los seis carriles. El resto de inversiones actualiza simultáneamente la permutación directa y su inversa. La suma y el máximo se acumulan por carril y se reducen después del último grupo. En el intervalo de cuatro a doce elementos incluso `(12!)²` cabe en `int`.
+
+## Árboles completos con un bit por nodo
+
+Los árboles del banco se materializan por niveles con un bit por nodo. Las ramas tienen su bit activo y sus hijos ocupan las posiciones `2i` y `2i+1`. Las hojas y la posición cero se escriben con el bit apagado. Cada recorrido suma las ramas que encuentra mediante el recuento de bits y obtiene el número total de nodos con `2 · ramas + 1`. Los árboles de una palabra recorren dieciséis ranuras de la arena temporal. Cada vuelta escribe y lee su árbol. Las dos arenas se dimensionan a partir de la profundidad reconocida y se liberan al salir de la función.
+
+## Cota de la salida de la iteración de potencia
+
+La salida debe usar exclusivamente el formato de nueve decimales. Para la matriz positiva `B = AᵀA`, las desigualdades `L v ≤ B v ≤ U v` se conservan al multiplicar por `B`. El cociente de los productos escalares al final está dentro de ese intervalo por ser una media ponderada de cocientes de componentes.
+
+Para tamaños hasta 32.768, los coeficientes de `A` tienen denominadores menores que 2³¹ y `A[0,0] = 1`. Las sumas por fila o columna están acotadas por 4 y, durante los cuarenta productos como máximo, los componentes permanecen entre 2⁻³¹ y 2⁸⁰. Cada producto con `B` acumula como máximo dos veces `n + 1` factores de redondeo. Con `k` aplicaciones restantes de `B`, el margen `(8k + 16)(n + 3) · 2⁻⁵³` cubre estas aplicaciones, los cocientes y los productos escalares de la expresión de salida. La prueba de redondeo ensancha los extremos en 2⁻⁴⁷ antes de escalarlos. Solo se detiene si ambos extremos corresponden al mismo decimal impreso.
+
+Entre 32 y 8192 filas se pueden ensayar productos por series antes del recorrido original. Cada capa duplica el cuadrado anterior y divide sus dos rectángulos en franjas. Se desarrolla el recíproco del denominador alrededor del centro de cada franja, con grado 22. Los dos factores lineales tienen coeficientes positivos de magnitud a lo sumo 0,24. La cota por producto es `(8n + 800) · 2⁻⁵³ + 2⁻⁴⁰`, que cubre la cola relativa de la serie y la aritmética f64. La cota de salida incluye el error de todos los productos aproximados efectuados y de las operaciones pendientes del programa original. Si no certifica un único decimal, se vuelve a iniciar el recorrido original. Las tres listas temporales se liberan al salir de la ruta de series.
+
+El residuo de Rayleigh permite certificar antes el decimal. La traza de `AᵀA` es menor que 1,9. Se suman las cotas de las diagonales de `A` hasta `i + j = 7` y se acota el resto por `2/49`. Para un cociente de Rayleigh `ρ` por encima del segundo autovalor se cumple `(λ₁ − ρ)(ρ − λ₂) ≤ ‖Bv − ρv‖²/‖v‖²`. La parte inferior usa la monotonía del cociente bajo potencias de una matriz semidefinida positiva. Ambas cotas incluyen el redondeo acumulado por las series, los productos escalares y la expresión final de CPython. Si el residuo resulta insuficiente, la cota por componentes sigue disponible.
+
+Cuando el original hace al menos siete iteraciones, la ruta de series inicia el ensayo con una aproximación al autovector. Toma 192 componentes de una sección fija de 512 filas y prolonga el vector con una función racional. El residuo acota el autovalor dominante con independencia de la semilla. Si su extremo inferior es al menos 1,52, la cota de la traza implica `λ₂/λ₁ ≤ 1/4`. El vector de unos del original tiene proyección de magnitud al menos uno sobre el autovector dominante positivo normalizado. El cociente original usa el vector tras `2k − 1` aplicaciones de `B`. Como las proyecciones se elevan al cuadrado, su déficit relativo se acota por `n · (1/4)^(4k − 2)`. Se añade esa cota y el presupuesto de redondeo antes de aceptar un decimal.
+
+A partir de 512 filas se ensaya el cociente `‖Av‖²/‖v‖²` con un solo producto. Durante la compilación se calcula el residuo en la sección de 512 filas. Al ampliar la sección, las filas nuevas de `Av` se acotan por `2 ‖v‖₁/i²` y la cola de `v` decae como `j⁻²`. Las cotas de las componentes comunes y nuevas dan un límite de `8,23 · 10⁻¹¹` para el residuo normalizado al cuadrado. La ruta comprueba el mismo intervalo decimal y reserva dos vectores. Si el intervalo requiere más precisión se reserva el tercer vector y continúa la iteración.
+
+## Cuatro rondas de velocidad para cinco cuerpos
+
+Las diez parejas se calculan con vectores. Cada cuerpo recibe exactamente cuatro contribuciones en el orden del bucle original. Se escribe el resultado final en las listas o en los registros de la clase según el programa original. La función comprueba los denominadores antes de dividir y el ejecutable recupera la excepción de Python si dos cuerpos coinciden.
+
+En cada ronda se agrupan las magnitudes para reutilizar la misma permutación en los tres ejes. Las dos últimas parejas se calculan en un vector de dos carriles. Cada desplazamiento se multiplica primero por la masa de su pareja y después por la magnitud. Se incorpora el signo de la resta en la masa mediante la simetría de la multiplicación redondeada. Los cuatro impulsos se suman antes de actualizar la posición.
+
+## Totales a partir de matrices generadas
+
+Si los dos generadores son afines con residuo entero, su período común se obtiene de los coeficientes y los módulos. Cuando el producto se consume exclusivamente como traza y suma, se generan las dos matrices reducidas y se calculan sus celdas por teselas. La suma de cada celda conserva su orden. Las filas lógicas se reconstruyen por tramos del período y se usa la suma de flotantes de la versión de CPython que construye el ejecutable.
+
+Cada tesela recorre los ciclos completos y el último tramo del producto escalar. Sus filas y columnas se acotan con las dimensiones de las matrices reducidas. Dentro de la tesela, cada tramo empieza en el índice cero y su longitud es como máximo un período.
+
+## Recuento de palabras sobre el búfer del lector ASCII
+
+El lector valida el archivo regular y normaliza las líneas. El informe comprueba ASCII mientras cuenta los saltos de línea con SIMD y conserva el prefijo original de la línea más larga. Otro recorrido localiza los separadores y convierte el bloque a minúsculas en la misma operación. Las palabras de hasta ocho bytes usan una clave entera y el relleno del búfer permite una carga al final. Las palabras largas y las claves que exceden la tabla compacta se cuentan en el diccionario de cadenas. El cierre del archivo y la memoria de la tabla se gestionan con el lector y el alcance de las listas.
+
+Al reproducir una excepción, el cargador facilita al formateador de CPython el fuente incorporado mediante un archivo temporal privado. La traza conserva la ruta original y las posiciones del subrayado, incluso cuando se ha sustituido el archivo. [Lectura de líneas en CPython 3.11](https://github.com/python/cpython/blob/v3.11.9/Python/traceback.c#L411-L451)
+
+En Windows, la verificación de argumentos salta el nombre del ejecutable según las reglas de comillas de `argv[0]`. Si ese nombre contiene Unicode, se compara el resto de la línea en ambas representaciones antes de usar los argumentos de la CRT. Los nombres Unicode del ejecutable y los argumentos ASCII pueden seguir la ruta nativa. [Reglas de argumentos de MSVC](https://learn.microsoft.com/en-us/cpp/c-language/parsing-c-command-line-arguments?view=msvc-170)

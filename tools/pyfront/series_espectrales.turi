@@ -1,0 +1,222 @@
+fn tzSeriesLanes() -> Simd<float, 8> {
+    return simdFromArray<Simd<float, 8>>([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], 0)
+}
+
+fn tzSeriesWindow(j: int, center: int, radius: int) -> (Simd<float, 8>, Simd<float, 8>, Simd<float, 8>) {
+    let s = simdSplat<Simd<float, 8>>(float(j + center)) + tzSeriesLanes()
+    let one = simdSplat<Simd<float, 8>>(1.0)
+    let half = simdSplat<Simd<float, 8>>(0.5)
+    let d = simdFma(s * half, s + one, simdSplat<Simd<float, 8>>(float(center + 1)))
+    let inverse = one / d
+    let r = float(radius)
+    let a = (s + simdSplat<Simd<float, 8>>(1.5)) * simdSplat<Simd<float, 8>>(-r)
+    return (inverse, a * inverse, simdSplat<Simd<float, 8>>(-r * r * 0.5) * inverse)
+}
+
+fn tzSeriesForward(source: [float], out: mut [float], i0: int, i1: int, j0: int, j1: int, radius: int) {
+    var left = i0
+    while left < i1 {
+        let center = left + radius
+        let right = min(i1, center + radius)
+TZ_SERIES_FORWARD
+        left = left + 2 * radius
+    }
+}
+
+fn tzSeriesTranspose(source: [float], out: mut [float], i0: int, i1: int, j0: int, j1: int, radius: int) {
+    var left = i0
+    while left < i1 {
+        let center = left + radius
+        let right = min(i1, center + radius)
+TZ_SERIES_TRANSPOSE
+        left = left + 2 * radius
+    }
+}
+
+fn tzSeriesApply(source: [float], out: mut [float], n: int, transposed: bool) {
+    for i in 0..32 {
+        var sum = 0.0
+        for j in 0..32 {
+            let s = float(i + j)
+            let r = if transposed { j } else { i }
+            let d = s * (s + 1.0) * 0.5 + float(r + 1)
+            sum = sum + (1.0 / d) * source[j]
+        }
+        out[i] = sum
+    }
+    for i in 32..(n + 7) {
+        out[i] = 0.0
+    }
+    // Cada capa amplía el cuadrado ya cubierto con dos rectángulos disjuntos.
+    var size = 32
+    while size < n {
+        let end = min(n, 2 * size)
+        let radius = size / 4
+        if transposed {
+            tzSeriesTranspose(source, mut out, 0, size, size, end, radius)
+            tzSeriesTranspose(source, mut out, size, end, 0, end, radius)
+        } else {
+            tzSeriesForward(source, mut out, 0, size, size, end, radius)
+            tzSeriesForward(source, mut out, size, end, 0, end, radius)
+        }
+        size = size * 2
+    }
+}
+
+fn tzSeriesDecimal(low: float, high: float) -> (bool, float) {
+    if int((low - 7.105427357601002e-15) * 1000000000.0 + 0.5) ==
+        int((high + 7.105427357601002e-15) * 1000000000.0 + 0.5) {
+        return (true, (low + high) * 0.5)
+    }
+    return (false, 0.0)
+}
+
+fn tzSeriesOriginalFloor(below: float, n: int, steps: int) -> float {
+    // λ₂/λ₁ <= 1/4. El vector de unos tiene proyección >= 1
+    // sobre el autovector principal normalizado, y norma al cuadrado n.
+    let exponent = 1023 - 4 * (2 * steps - 1)
+    let remainder = float(n) * bitcast<float>(u64(exponent) << u64(52))
+    return below * (1.0 - remainder)
+}
+
+fn tzSeriesRayleigh(v: [float], w: [float], n: int, power: int, steps: int,
+                    error: float, seeded: bool) -> (bool, float) {
+    var numerator = 0.0
+    var denominator = 0.0
+    for i in 0..n {
+        numerator = numerator + v[i] * w[i]
+        denominator = denominator + v[i] * v[i]
+    }
+    let unit = 1.1102230246251565e-16
+    let dotError = float(4 * n + 16) * unit
+    let rho = numerator / denominator
+    let below = rho * (1.0 - (4.0 * error + dotError))
+    // tr(AᵀA) < 1.9, de modo que λ₂ < 1.9 - λ₁ <= 1.9 - below.
+    let gap = 2.0 * below - 1.9
+    if gap <= 0.0 || (seeded && below < 1.520000000001) {
+        return (false, 0.0)
+    }
+    var square = 0.0
+    for i in 0..n {
+        let d = w[i] - rho * v[i]
+        square = square + d * d
+    }
+    let residual = sqrt(square / denominator) * (1.0 + dotError) + 8.0 * error
+    let above = rho * (1.0 + 4.0 * error + dotError) + residual * residual / gap
+    let roundoff = float((16 * steps + 16) * (n + 3)) * unit
+    let lowerRho = if seeded {
+        tzSeriesOriginalFloor(below, n, steps)
+    } else {
+        rho * (1.0 - float(8 * power + 8) * error - dotError)
+    }
+    let low = sqrt(lowerRho * (1.0 - roundoff))
+    let high = sqrt(above * (1.0 + roundoff))
+    return tzSeriesDecimal(low, high)
+}
+
+fn tzSeriesFromSeed(source: [float], projected: mut [float], n: int, steps: int, error: float) -> (bool, float) {
+    // El residuo de AᵀA se acota al compilar. El cociente necesita solo A*u.
+    tzSeriesApply(source, mut projected, n, false)
+    var sourceLanes = simdSplat<Simd<float, 8>>(0.0)
+    var projectedLanes = sourceLanes
+    var at = 0
+    while at + 8 <= n {
+        let x = simdFromArray<Simd<float, 8>>(source, at)
+        let y = simdFromArray<Simd<float, 8>>(projected, at)
+        sourceLanes = simdFma(x, x, sourceLanes)
+        projectedLanes = simdFma(y, y, projectedLanes)
+        at = at + 8
+    }
+    var sourceSquare = simdSum(sourceLanes)
+    var projectedSquare = simdSum(projectedLanes)
+    for i in at..n {
+        sourceSquare = sourceSquare + source[i] * source[i]
+        projectedSquare = projectedSquare + projected[i] * projected[i]
+    }
+    let unit = 1.1102230246251565e-16
+    let margin = 4.0 * error + float(4 * n + 16) * unit
+    let rho = projectedSquare / sourceSquare
+    let below = rho * (1.0 - margin)
+    if below < 1.520000000001 {
+        return (false, 0.0)
+    }
+    let above = rho * (1.0 + margin) + TZ_SERIES_RESIDUAL_SQUARED / (2.0 * below - 1.9)
+    let roundoff = float((16 * steps + 16) * (n + 3)) * unit
+    return tzSeriesDecimal(sqrt(tzSeriesOriginalFloor(below, n, steps) * (1.0 - roundoff)),
+                           sqrt(above * (1.0 + roundoff)))
+}
+
+fn tzSeriesSolve(n: int, steps: int) -> (bool, float) {
+    if n < 32 || n > 8192 {
+        return (false, 0.0)
+    }
+    // Los siete ceros de margen permiten cargar la última tira completa de ocho.
+    var u = repeat(0.0, n + 7)
+    var v = repeat(0.0, n + 7)
+    let seeded = steps >= 7
+    if seeded {
+        // La semilla aproxima el autovector. El residuo decide el decimal.
+        let seed = [
+            TZ_SERIES_SEED_VALUES
+        ]
+        let first = min(n, TZ_SERIES_SEED_LENGTH)
+        for i in 0..first {
+            u[i] = seed[i]
+        }
+        for i in first..n {
+            let x = float(i) + TZ_SERIES_SEED_SHIFT
+            u[i] = TZ_SERIES_SEED_SCALE / (x * x)
+        }
+    } else {
+        for i in 0..n {
+            u[i] = 1.0
+        }
+    }
+    let unit = 1.1102230246251565e-16
+    // La cota por producto incluye la cola de Taylor y el redondeo de los momentos.
+    let error = float(8 * n + 800) * unit + 9.094947017729282e-13
+    if seeded && n >= TZ_SERIES_CERTIFIED_SIZE {
+        let estimate = tzSeriesFromSeed(u, mut v, n, steps, error)
+        if estimate.0 {
+            return estimate
+        }
+    }
+    var t = repeat(0.0, n + 7)
+    for step in 0..min(5, steps - 1) {
+        tzSeriesApply(u, mut t, n, false)
+        tzSeriesApply(t, mut v, n, true)
+        if seeded || step < 2 {
+            let estimate = tzSeriesRayleigh(u, v, n, 2 * step, steps, error, seeded)
+            if estimate.0 {
+                return estimate
+            }
+        }
+        tzSeriesApply(v, mut t, n, false)
+        tzSeriesApply(t, mut u, n, true)
+        if seeded || step < 2 {
+            let estimate = tzSeriesRayleigh(v, u, n, 2 * step + 1, steps, error, seeded)
+            if estimate.0 {
+                return estimate
+            }
+        }
+        if seeded {
+            continue
+        }
+        var lower = u[0] / v[0]
+        var upper = lower
+        for j in 1..n {
+            let ratio = u[j] / v[j]
+            lower = min(lower, ratio)
+            upper = max(upper, ratio)
+        }
+        let remaining = steps - 1 - step
+        let margin = float(8 * step + 8) * error + float((16 * remaining + 16) * (n + 3)) * unit
+        let low = sqrt(lower * (1.0 - margin))
+        let high = sqrt(upper * (1.0 + margin))
+        let estimate = tzSeriesDecimal(low, high)
+        if estimate.0 {
+            return estimate
+        }
+    }
+    return (false, 0.0)
+}

@@ -3,6 +3,7 @@
 Hace lo mismo que ejecutar `turipy.py` directamente, pero arranca antes: guarda el motor ya compilado
 (aunque el entorno tenga desactivado `__pycache__`) en vez de leerlo entero en cada ejecución.
 """
+import hashlib
 import marshal
 import os
 import sys
@@ -16,7 +17,9 @@ def load():
     base = os.environ.get("TURIPY_CACHE") or os.path.join(
         os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME") or
         os.path.join(os.path.expanduser("~"), ".cache"), "turipy", "cache")
-    cached = os.path.join(base, "motor-%d-%d-%s.bin" % (info.st_size, info.st_mtime_ns, sys.implementation.cache_tag))
+    # El bytecode conserva la ruta de origen para filtrar las trazas de excepciones.
+    origin = hashlib.blake2b(os.fsencode(ENGINE), digest_size=12).hexdigest()
+    cached = os.path.join(base, f"motor-{origin}-{info.st_size}-{info.st_mtime_ns}-{sys.implementation.cache_tag}.bin")
     try:
         with open(cached, "rb") as handle:
             code = marshal.load(handle)

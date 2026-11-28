@@ -1,1 +1,18 @@
-{"args": [3000], "about": "spectral norm power iteration, O(n^2) division-heavy loops"}
+{
+  "args": [3000],
+  "about": "spectral norm power iteration, O(n^2) division-heavy loops",
+  "c_extremo": {
+    "fuente": "spectralnorm_extremo.c",
+    "entrenamiento": [[511], [1021], [1537]],
+    "raiz": "spectral",
+    "variantes": {
+      "potencia completa": [],
+      "cota de salida": ["-DTZ_ESPECTRAL_INTERVALO"],
+      "series por bloques": ["-DTZ_ESPECTRAL_INTERVALO", "-DTZ_ESPECTRAL_SERIE"],
+      "residuo de Rayleigh": ["-DTZ_ESPECTRAL_INTERVALO", "-DTZ_ESPECTRAL_SERIE", "-DTZ_ESPECTRAL_RESIDUO"],
+      "siembra por primera fila": ["-DTZ_ESPECTRAL_INTERVALO", "-DTZ_ESPECTRAL_SERIE", "-DTZ_ESPECTRAL_RESIDUO", "-DTZ_ESPECTRAL_SEMILLA"],
+      "siembra por sección finita": ["-DTZ_ESPECTRAL_INTERVALO", "-DTZ_ESPECTRAL_SERIE", "-DTZ_ESPECTRAL_RESIDUO", "-DTZ_ESPECTRAL_SEMILLA", "-DTZ_ESPECTRAL_SECCION"],
+      "una aplicación certificada": ["-DTZ_ESPECTRAL_INTERVALO", "-DTZ_ESPECTRAL_SERIE", "-DTZ_ESPECTRAL_RESIDUO", "-DTZ_ESPECTRAL_SEMILLA", "-DTZ_ESPECTRAL_SECCION", "-DTZ_ESPECTRAL_CERTIFICADO"]
+    }
+  }
+}

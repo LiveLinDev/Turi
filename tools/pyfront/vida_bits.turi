@@ -1,0 +1,215 @@
+fn tzLifeSides(board: [u64], at: int, stride: int) -> (Simd<u64, 8>, Simd<u64, 8>, Simd<u64, 8>, (Simd<u64, 8>, Simd<u64, 8>)) {
+    let center = simdFromArray<Simd<u64, 8>>(board, at)
+    let before = simdFromArray<Simd<u64, 8>>(board, at - stride)
+    let after = simdFromArray<Simd<u64, 8>>(board, at + stride)
+    let one = simdSplat<Simd<u64, 8>>(u64(1))
+    let high = simdSplat<Simd<u64, 8>>(u64(63))
+    let left = (center << one) | (before >> high)
+    let right = (center >> one) | (after << high)
+    let odd = left ^ right
+    let carry = left & right
+    return (center, odd, carry, (odd ^ center, carry | (odd & center)))
+}
+
+fn tzLifeSum(a: Simd<u64, 8>, b: Simd<u64, 8>, c: Simd<u64, 8>) -> (Simd<u64, 8>, Simd<u64, 8>) {
+    let parity = a ^ b
+    return (parity ^ c, (a & b) | (parity & c))
+}
+
+fn tzLifePopulation(live: Simd<u64, 8>) -> int {
+    return int(popcnt(simdGet(live, 0))) + int(popcnt(simdGet(live, 1))) +
+        int(popcnt(simdGet(live, 2))) + int(popcnt(simdGet(live, 3))) +
+        int(popcnt(simdGet(live, 4))) + int(popcnt(simdGet(live, 5))) +
+        int(popcnt(simdGet(live, 6))) + int(popcnt(simdGet(live, 7)))
+}
+
+fn tzLifeNonempty(live: Simd<u64, 8>) -> bool {
+    return (simdGet(live, 0) | simdGet(live, 1) | simdGet(live, 2) | simdGet(live, 3) |
+        simdGet(live, 4) | simdGet(live, 5) | simdGet(live, 6) | simdGet(live, 7)) != u64(0)
+}
+
+// Cada vector contiene una palabra de 64 celdas de cada una de ocho filas.
+// Desplazar los carriles recupera las triadas de la fila anterior o siguiente.
+fn tzLifeUp(previous: Simd<u64, 8>, current: Simd<u64, 8>) -> Simd<u64, 8> {
+    var shifted = simdSplat<Simd<u64, 8>>(u64(0))
+    shifted = simdSet(shifted, 0, simdGet(previous, 7))
+    shifted = simdSet(shifted, 1, simdGet(current, 0))
+    shifted = simdSet(shifted, 2, simdGet(current, 1))
+    shifted = simdSet(shifted, 3, simdGet(current, 2))
+    shifted = simdSet(shifted, 4, simdGet(current, 3))
+    shifted = simdSet(shifted, 5, simdGet(current, 4))
+    shifted = simdSet(shifted, 6, simdGet(current, 5))
+    return simdSet(shifted, 7, simdGet(current, 6))
+}
+
+fn tzLifeDown(current: Simd<u64, 8>, next: Simd<u64, 8>) -> Simd<u64, 8> {
+    var shifted = simdSplat<Simd<u64, 8>>(u64(0))
+    shifted = simdSet(shifted, 0, simdGet(current, 1))
+    shifted = simdSet(shifted, 1, simdGet(current, 2))
+    shifted = simdSet(shifted, 2, simdGet(current, 3))
+    shifted = simdSet(shifted, 3, simdGet(current, 4))
+    shifted = simdSet(shifted, 4, simdGet(current, 5))
+    shifted = simdSet(shifted, 5, simdGet(current, 6))
+    shifted = simdSet(shifted, 6, simdGet(current, 7))
+    return simdSet(shifted, 7, simdGet(next, 0))
+}
+
+fn tzLifeStep(input: [u64], output: mut [u64], stride: int, columns: int, lo: int, hi: int,
+              loBlock: int, hiBlock: int, counting: bool) -> (int, int, int, (int, int)) {
+    var first = lo
+    var last = hi
+    var total = 0
+    var firstBlock = loBlock
+    var lastBlock = hiBlock
+    let zero = simdSplat<Simd<u64, 8>>(u64(0))
+    let one = simdSplat<Simd<u64, 8>>(u64(1))
+    let high = simdSplat<Simd<u64, 8>>(u64(1) << u64(63))
+    for block in loBlock..(hiBlock + 1) {
+        let offset = block * stride
+        var up = tzLifeSides(input, offset + (lo - 1) * 8, stride)
+        var middle = tzLifeSides(input, offset + lo * 8, stride)
+        var any = zero
+        for row in lo..(hi + 1) {
+            let at = offset + row * 8
+            let south = tzLifeSides(input, at + 8, stride)
+            let before = up.3
+            let here = middle.3
+            let after = south.3
+            let top = tzLifeUp(before.0, here.0)
+            let bottom = tzLifeDown(here.0, after.0)
+            let topCarry = tzLifeUp(before.1, here.1)
+            let bottomCarry = tzLifeDown(here.1, after.1)
+            let low = tzLifeSum(top, middle.1, bottom)
+            let highBits = tzLifeSum(topCarry, middle.2, bottomCarry)
+            // El número de parejas debe ser impar y las triadas deben aportar menos de dos.
+            let onePair = ~highBits.1 & (highBits.0 ^ low.1)
+            let live = onePair & (low.0 | middle.0)
+            simdToArray(live, mut output, at)
+            any = any | live
+            if counting {
+                total = wrappingAdd(total, tzLifePopulation(live))
+            }
+            if row == lo && lo > 1 && simdGet(live, 0) != u64(0) {
+                first = lo - 1
+            }
+            if row == hi && hi + 2 < stride / 8 && simdGet(live, 7) != u64(0) {
+                last = hi + 1
+            }
+            up = middle
+            middle = south
+        }
+        // Una celda del borde puede producir una en el bloque contiguo.
+        if block == loBlock && block > 1 && tzLifeNonempty(any & one) {
+            firstBlock = block - 1
+        }
+        if block == hiBlock && block < columns && tzLifeNonempty(any & high) {
+            lastBlock = block + 1
+        }
+    }
+    return (total, first, last, (firstBlock, lastBlock))
+}
+
+fn tzLifeReport(g: int, count: int) {
+    pyOutI(g, false)
+    write(" ")
+    pyOutI(count, false)
+    write("\n")
+}
+
+
+fn tzLifeSeed64(board: mut [u64], origin: int, stride: int, initial: int, multiplier: int, increment: int) -> int {
+    var scales = repeat(u32(0), 64)
+    var offsets = repeat(u32(0), 64)
+    var multiplierPower = u32(1)
+    var offset = u32(0)
+    let mul = u32(multiplier)
+    let add = u32(increment)
+    for i in 0..64 {
+        multiplierPower = wrappingMul(multiplierPower, mul)
+        offset = wrappingAdd(wrappingMul(offset, mul), add)
+        scales[i] = multiplierPower
+        offsets[i] = offset
+    }
+    let vectorMagic = simdSplat<Simd<u32, 8>>(u32(10923))
+    let high = simdSplat<Simd<u32, 8>>(u32(16))
+    let truncation = simdSplat<Simd<u32, 8>>(u32(32767))
+    let divide = simdSplat<Simd<u32, 8>>(u32(15))
+    let three = simdSplat<Simd<u32, 8>>(u32(3))
+    let zero = simdSplat<Simd<u32, 8>>(u32(0))
+    let weights = simdFromArray<Simd<u32, 8>>([u32(1), u32(2), u32(4), u32(8), u32(16), u32(32), u32(64), u32(128)], 0)
+    var seed = u32(initial)
+    var population = 0
+    let first = 1 + origin / 64
+    let shift = u64(origin & 63)
+    for row in origin..(origin + 64) {
+        let start = simdSplat<Simd<u32, 8>>(seed)
+        var living = u64(0)
+        for part in 0..8 {
+            let base = part * 8
+            let turns = start * simdFromArray<Simd<u32, 8>>(scales, base) + simdFromArray<Simd<u32, 8>>(offsets, base)
+            let sample = (turns >> high) & truncation
+            let rest = sample - (((sample * vectorMagic) >> divide) * three)
+            let bits = simdSum(simdCmpEq(rest, zero) & weights)
+            living = living | (u64(bits) << u64(base))
+            if part == 7 {
+                seed = simdGet(turns, 7)
+            }
+        }
+        let at = first * stride + row + 8
+        board[at] = living << shift
+        if shift != u64(0) {
+            board[at + stride] = living >> (u64(64) - shift)
+        }
+        population = population + int(popcnt(living))
+    }
+    return population
+}
+
+fn tzLife(generations: int, size: int, interval: int, initial: int, mul: int, add: int) {
+    // Un vector de filas y una columna de palabras rodean ambos tableros.
+    let origin = max(0, generations) + 1
+    let side = size + 2 * origin
+    let stride = ((side + 7) / 8 + 2) * 8
+    let columns = (side + 63) / 64
+    var first = (origin + 7) / 8
+    var last = (origin + size + 8) / 8
+    var firstBlock = 1 + (origin - 1) / 64
+    var lastBlock = min(columns, 1 + (origin + size) / 64)
+    // Los intervalos solo crecen y ambas tablas permanecen vacías fuera de ellos.
+    var a = repeat(u64(0), (columns + 2) * stride)
+    var b = repeat(u64(0), (columns + 2) * stride)
+    var count = 0
+    if size == 64 {
+        count = tzLifeSeed64(mut a, origin, stride, initial, mul, add)
+    } else {
+        var seed = u32(initial)
+        for row in origin..(origin + size) {
+            for column in origin..(origin + size) {
+                seed = wrappingAdd(wrappingMul(seed, u32(mul)), u32(add))
+                if ((seed >> u32(16)) & u32(32767)) % u32(3) == u32(0) {
+                    let at = (1 + column / 64) * stride + row + 8
+                    a[at] = a[at] | (u64(1) << u64(column & 63))
+                    count = count + 1
+                }
+            }
+        }
+    }
+    for g in 0..generations {
+        if g % interval == 0 {
+            tzLifeReport(g, count)
+        }
+        let counting = (g + 1) % interval == 0 || g + 1 == generations
+        let next = if (g & 1) == 0 {
+            tzLifeStep(a, mut b, stride, columns, first, last, firstBlock, lastBlock, counting)
+        } else {
+            tzLifeStep(b, mut a, stride, columns, first, last, firstBlock, lastBlock, counting)
+        }
+        count = next.0
+        first = next.1
+        last = next.2
+        let blocks = next.3
+        firstBlock = blocks.0
+        lastBlock = blocks.1
+    }
+    tzLifeReport(generations, count)
+}

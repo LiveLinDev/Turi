@@ -1,1 +1,13 @@
-{"args": [500], "about": "Dijkstra en una cuadrícula con heapq y tuplas (distancia, fila, columna)"}
+{
+  "args": [500],
+  "about": "Dijkstra en una cuadrícula con heapq y tuplas (distancia, fila, columna)",
+  "c_extremo": {
+    "fuente": "dijkstra_extremo.c",
+    "entrenamiento": [[95], [127], [257]],
+    "variantes": {
+      "cubetas": [],
+      "diagonales": ["-DTZ_DIJKSTRA_DIAGONALES", "-DTZ_DIJKSTRA_LINEAL"],
+      "suma cerrada": ["-DTZ_DIJKSTRA_DIAGONALES"]
+    }
+  }
+}

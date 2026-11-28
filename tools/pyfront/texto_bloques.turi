@@ -1,0 +1,177 @@
+extern "C" {
+    fn tzx_text_file_chunk(handle: int) -> int
+    fn tzx_text_rows(address: int, length: int) -> int
+    fn tzx_text_fold_breaks(address: int) -> int
+    fn tzx_text_casefold(address: int, length: int)
+}
+
+fn tzTextPunctuation(c: u8) -> bool {
+    return c == u8(46) || c == u8(44) || c == u8(59) || c == u8(58) || c == u8(33) || c == u8(63)
+}
+
+raw fn tzTextToken(base: Ptr<u8>, start: int, end: int,
+                      keys: mut [u64], scores: mut [int], extra: mut Map<str, int>) -> int {
+    var lo = start
+    var hi = end
+    while lo < hi && tzTextPunctuation(ptrRead(ptrAdd(base, lo))) {
+        lo = lo + 1
+    }
+    while lo < hi && tzTextPunctuation(ptrRead(ptrAdd(base, hi - 1))) {
+        hi = hi - 1
+    }
+    let length = hi - lo
+    if length == 0 {
+        return 0
+    }
+    if length <= 8 {
+        // El lector reserva ocho bytes para que esta carga sea válida al final.
+        let bytes = ptrRead(ptrCast<u64>(ptrAdd(base, lo)))
+        let keep = ~u64(0) >> u64(8 * (8 - length))
+        let code = bytes & keep
+        var slot = int(wrappingMul(code, u64(0x9e3779b185ebca87)) >> u64(56))
+        for probe in 0..256 {
+            let found = keys[slot]
+            if found == code {
+                scores[slot] = wrappingAdd(scores[slot], 1)
+                return 1
+            }
+            if found == u64(0) {
+                keys[slot] = code
+                scores[slot] = 1
+                return 1
+            }
+            slot = (slot + 1) & 255
+        }
+    }
+    let word = strFromPtr(ptrAdd(base, lo), length)
+    let count = if extra.has(word) { extra[word] } else { 0 }
+    extra[word] = wrappingAdd(count, 1)
+    return 1
+}
+
+trusted fn tzTextLongest(base: Ptr<u8>, at: int, length: int, limit: int, longest: mut int, prefix: mut str) {
+    if length > longest {
+        longest = length
+        prefix = strFromPtr(ptrAdd(base, at), min(limit, length))
+    }
+}
+
+fn tzTextRank(word: str, score: int, ranked: mut [str], counts: mut [int], limit: int) {
+    var place = limit - 1
+    if score > counts[place] || (score == counts[place] && word < ranked[place]) {
+        while place > 0 && (score > counts[place - 1] || (score == counts[place - 1] && word < ranked[place - 1])) {
+            counts[place] = counts[place - 1]
+            ranked[place] = ranked[place - 1]
+            place = place - 1
+        }
+        counts[place] = score
+        ranked[place] = word
+    }
+}
+
+fn tzTextPrintTop(keys: [u64], scores: [int], extra: Map<str, int>, limit: int, width: int) {
+    var ranked = repeat("", limit)
+    var counts = repeat(0, limit)
+    for slot in 0..256 {
+        if scores[slot] == 0 {
+            continue
+        }
+        var key = keys[slot]
+        var word = ""
+        while key != u64(0) {
+            word = word + strFromByte(int(key & u64(255)))
+            key = key >> u64(8)
+        }
+        tzTextRank(word, scores[slot], mut ranked, mut counts, limit)
+    }
+    for word in extra.keys() {
+        tzTextRank(word, extra[word], mut ranked, mut counts, limit)
+    }
+    for rank in 0..limit {
+        if counts[rank] == 0 {
+            break
+        }
+        let word = ranked[rank]
+        for pad in word.len()..width {
+            write(" ")
+        }
+        write(word)
+        write(" ")
+        pyOutI(counts[rank], false)
+        write("\n")
+    }
+}
+
+trusted fn tzTextReport(path: str, prefixSize: int, limit: int, width: int) {
+    var keys = repeat(u64(0), 256)
+    var scores = repeat(0, 256)
+    var extra: Map<str, int> = mapNew()
+    var lines = 0
+    var words = 0
+    var size = 0
+    var longest = 0
+    var prefix = ""
+    let file = pyOpenAsciiFile(path)
+    while true {
+        let address = tzx_text_file_chunk(file)
+        assert address != 0
+        let length = tzx_file_len(file)
+        if length == 0 {
+            break
+        }
+        // La vista queda dentro del bloque de lectura hasta la siguiente llamada al lector.
+        let base = ptrFromAddr<u8>(u64(address))
+        size = size + length
+        // Guarda el prefijo original antes de convertir a minúsculas.
+        let rows = tzx_text_rows(address, length)
+        assert rows >= 0
+        lines = lines + (rows & 131071)
+        tzTextLongest(base, rows >> 34, (rows >> 17) & 131071, prefixSize, mut longest, mut prefix)
+        var token = 0
+        let blocks = length / 64
+        for block in 0..blocks {
+            let from = block * 64
+            var flags = bitcast<u64>(tzx_text_fold_breaks(address + from))
+            while flags != u64(0) {
+                let i = from + int(ctz(flags))
+                if i > token {
+                    var count = 0
+                    raw { count = tzTextToken(base, token, i, mut keys, mut scores, mut extra) }
+                    words = wrappingAdd(words, count)
+                }
+                token = i + 1
+                flags = flags & wrappingSub(flags, u64(1))
+            }
+        }
+        let tail = blocks * 64
+        tzx_text_casefold(address + tail, length - tail)
+        for i in tail..length {
+            let c = ptrRead(ptrAdd(base, i))
+            if c == u8(32) || c == u8(10) || c == u8(9) {
+                if i > token {
+                    var count = 0
+                    raw { count = tzTextToken(base, token, i, mut keys, mut scores, mut extra) }
+                    words = wrappingAdd(words, count)
+                }
+                token = i + 1
+            }
+        }
+        if token < length {
+            var count = 0
+            raw { count = tzTextToken(base, token, length, mut keys, mut scores, mut extra) }
+            words = wrappingAdd(words, count)
+        }
+    }
+    pyCloseAsciiFile(file)
+    pyOutI(lines, false)
+    write(" ")
+    pyOutI(words, false)
+    write(" ")
+    pyOutI(size, false)
+    write("\n")
+    pyOutI(longest, false)
+    write(" ")
+    write(prefix)
+    write("\n")
+    tzTextPrintTop(keys, scores, extra, limit, width)
+}

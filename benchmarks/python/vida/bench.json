@@ -1,1 +1,16 @@
-{"args": [300], "about": "juego de la vida con un conjunto de tuplas y un diccionario de recuentos"}
+{
+  "args": [300],
+  "about": "juego de la vida con un conjunto de tuplas y un diccionario de recuentos",
+  "c_extremo": {
+    "fuente": "vida_extremo.c",
+    "entrenamiento": [[49], [121], [199]],
+    "variantes": {
+      "bloques completos": [],
+      "filas activas": ["-DTZ_VIDA_FILAS"],
+      "triadas y bordes": ["-DTZ_VIDA_TRIADAS"],
+      "semilla SIMD": ["-DTZ_VIDA_TRIADAS", "-DTZ_VIDA_SEMILLA"],
+      "semilla SIMD y reutilización": ["-DTZ_VIDA_TRIADAS", "-DTZ_VIDA_SEMILLA", "-DTZ_VIDA_REUSO"],
+      "ocho filas por vector": ["-DTZ_VIDA_TRIADAS", "-DTZ_VIDA_SEMILLA", "-DTZ_VIDA_REUSO", "-DTZ_VIDA_COLUMNAS"]
+    }
+  }
+}

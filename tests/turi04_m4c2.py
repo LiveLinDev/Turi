@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 
-def run_cmd(args, input_bytes=None, env=None, text=True, cwd=None):
+def run_cmd(args, input_bytes=None, env=None, text=True, cwd=None, timeout=None):
     return subprocess.run(
         args,
         input=input_bytes,
@@ -16,6 +16,7 @@ def run_cmd(args, input_bytes=None, env=None, text=True, cwd=None):
         encoding="utf-8" if text else None,
         env=env,
         cwd=str(cwd) if cwd else None,
+        timeout=timeout,
     )
 
 
@@ -622,10 +623,13 @@ fn main() {
     nexe = workdir / ("mpmc_native.exe" if os.name == "nt" else "mpmc_native")
     nrel = workdir / ("mpmc_native_rel.exe" if os.name == "nt" else "mpmc_native_rel")
     nsrc.write_text(native_src, encoding="utf-8", newline="\n")
+    # Los productores esperan activamente en una cola de cuatro ranuras.
+    # Reserva un trabajador por tarea para que también arranquen los consumidores.
+    env = dict(os.environ, TURI_THREADS="6")
     for flag, binp in [([], nexe), (["--release"], nrel)]:
         b = run_cmd([str(cli), "build", str(nsrc), "-o", str(binp), *flag], cwd=workdir)
         assert b.returncode == 0, b.stderr
-        r = run_cmd([str(binp)], cwd=workdir)
+        r = run_cmd([str(binp)], cwd=workdir, env=env, timeout=30)
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == str(sum(range(1600))), (flag, r.stdout)
 

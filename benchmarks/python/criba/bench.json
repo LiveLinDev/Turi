@@ -1,1 +1,22 @@
-{"args": [20000000], "about": "criba de Eratóstenes con una lista de booleanos; la función devuelve la lista"}
+{
+  "args": [20000000],
+  "about": "criba de Eratóstenes con una lista de booleanos; la función devuelve la lista",
+  "c_extremo": {
+    "fuente": "criba_extremo.c",
+    "entrenamiento": [[75001], [230001], [2100019]],
+    "variantes": {
+      "rueda": [],
+      "cocientes": ["-DTZ_CRIBA_COCIENTES"],
+      "grupos": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS"],
+      "recíprocos": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS", "-DTZ_CRIBA_RECIPROCOS"],
+      "rueda de cocientes": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS", "-DTZ_CRIBA_RUEDA_COCIENTES"],
+      "rueda y recíprocos": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS", "-DTZ_CRIBA_RECIPROCOS", "-DTZ_CRIBA_RUEDA_COCIENTES"],
+      "rueda y recíprocos SIMD": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS", "-DTZ_CRIBA_RECIPROCOS", "-DTZ_CRIBA_RUEDA_COCIENTES", "-DTZ_CRIBA_RECIPROCOS_SIMD"],
+      "divisores filtrados": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS", "-DTZ_CRIBA_RECIPROCOS", "-DTZ_CRIBA_RUEDA_COCIENTES", "-DTZ_CRIBA_RECIPROCOS_SIMD", "-DTZ_CRIBA_DIVISORES", "-DTZ_CRIBA_DIVISORES_DENSOS"],
+      "divisores comprimidos": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS", "-DTZ_CRIBA_RECIPROCOS", "-DTZ_CRIBA_RUEDA_COCIENTES", "-DTZ_CRIBA_RECIPROCOS_SIMD", "-DTZ_CRIBA_DIVISORES"],
+      "recuento y suma en una palabra": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS", "-DTZ_CRIBA_RECIPROCOS", "-DTZ_CRIBA_RUEDA_COCIENTES", "-DTZ_CRIBA_RECIPROCOS_SIMD", "-DTZ_CRIBA_DIVISORES", "-DTZ_CRIBA_PARES"],
+      "recuento y suma SIMD": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS", "-DTZ_CRIBA_RECIPROCOS", "-DTZ_CRIBA_RUEDA_COCIENTES", "-DTZ_CRIBA_RECIPROCOS_SIMD", "-DTZ_CRIBA_DIVISORES", "-DTZ_CRIBA_PARES", "-DTZ_CRIBA_PARES_SIMD"],
+      "inicialización vectorial de la rueda": ["-DTZ_CRIBA_COCIENTES", "-DTZ_CRIBA_GRUPOS", "-DTZ_CRIBA_RECIPROCOS", "-DTZ_CRIBA_RUEDA_COCIENTES", "-DTZ_CRIBA_RECIPROCOS_SIMD", "-DTZ_CRIBA_DIVISORES", "-DTZ_CRIBA_PARES", "-DTZ_CRIBA_PARES_SIMD", "-DTZ_CRIBA_RUEDA_VECTORIAL"]
+    }
+  }
+}

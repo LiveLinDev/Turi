@@ -165,6 +165,16 @@ fn main() {
     let vu8Wide = simdFromArray<Simd<u8, 32>>(bArr32, 0)
     let vu8WideSum = simdSum(vu8Wide + simdSplat<Simd<u8, 32>>(u8(2)))
 
+    // Los carriles 3 y 4 cruzan una palabra y el 31 ocupa los últimos bits.
+    let i32lanes = simdSplat<Simd<i16, 32>>(i16(7))
+    let edited = simdSet(simdSet(simdSet(i32lanes, 3, i16(-32768)), 4, i16(32767)), 31, i16(-257))
+    assert simdGet(i32lanes, 3) == i16(7)
+    assert simdGet(edited, 2) == i16(7)
+    assert simdGet(edited, 3) == i16(-32768)
+    assert simdGet(edited, 4) == i16(32767)
+    assert simdGet(edited, 5) == i16(7)
+    assert simdGet(edited, 31) == i16(-257)
+
     // f64x2 & f64x4
     let d2 = simdFma(simdSplat<Simd<f64, 2>>(3.0), simdSplat<Simd<f64, 2>>(4.0), simdSplat<Simd<f64, 2>>(5.0))
     let d4 = simdSqrt(simdFromArray<Simd<f64, 4>>([1.0, 4.0, 9.0, 16.0], 0))

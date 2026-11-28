@@ -1,0 +1,59 @@
+// Cada posición representa un nodo. En una rama i, los hijos están en 2*i y 2*i+1.
+raw fn tzTreeFill(nodes: MutPtr<u64>, depth: int) {
+    let leaves = 1 << depth
+    if leaves < 64 {
+        ptrWrite(nodes, wrappingSub(u64(1) << u64(leaves), u64(2)))
+        return
+    }
+    let words = leaves / 64
+    ptrWrite(nodes, ~u64(1))
+    ptrWrite(ptrAdd(nodes, words), u64(0))
+    for block in 1..words {
+        ptrWrite(ptrAdd(nodes, block), ~u64(0))
+        ptrWrite(ptrAdd(nodes, words + block), u64(0))
+    }
+}
+
+raw fn tzTreeCount(nodes: Ptr<u64>, end: int) -> int {
+    let words = (end + 63) / 64
+    var count = 0
+    for block in 0..words {
+        count = wrappingAdd(count, int(popcnt(ptrRead(ptrAdd(nodes, block)))))
+    }
+    return 2 * count + 1
+}
+
+trusted fn tzTreeRun(maxDepth: int, minDepth: int) {
+    let stretchSize = 1 << (maxDepth + 2)
+    let permanentSize = 1 << (maxDepth + 1)
+    var scratch = repeat(u64(0), (stretchSize + 63) / 64 + 15)
+    var permanent = repeat(u64(0), (permanentSize + 63) / 64)
+    let work = mutSlicePtr(mut scratch)
+    let saved = mutSlicePtr(mut permanent)
+    trusted { raw { tzTreeFill(work, maxDepth + 1) } }
+    var stretchCount = 0
+    trusted { raw { stretchCount = tzTreeCount(ptrConst(work), stretchSize) } }
+    pyOutI(stretchCount, false)
+    write("\n")
+    trusted { raw { tzTreeFill(saved, maxDepth) } }
+    for block in 0..((maxDepth - minDepth) / 2 + 1) {
+        let depth = minDepth + 2 * block
+        let size = 1 << (depth + 1)
+        let iterations = 1 << (maxDepth - depth + minDepth)
+        var total = 0
+        for i in 0..iterations {
+            // Los árboles de una palabra recorren las ranuras de la arena.
+            let tree = if size <= 64 { ptrAdd(work, i & 15) } else { work }
+            trusted { raw { tzTreeFill(tree, depth) } }
+            var treeCount = 0
+            trusted { raw { treeCount = tzTreeCount(ptrConst(tree), size) } }
+            total = wrappingAdd(total, treeCount)
+        }
+        pyOutI(total, false)
+        write("\n")
+    }
+    var permanentCount = 0
+    trusted { raw { permanentCount = tzTreeCount(ptrConst(saved), permanentSize) } }
+    pyOutI(permanentCount, false)
+    write("\n")
+}

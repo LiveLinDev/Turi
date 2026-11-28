@@ -1,0 +1,11 @@
+fn tzGridTotals(n: int, modulus: int, period: int, bias: int, edge: int) -> (int, int) {
+    let m = n - 1
+    let full = m / period
+    let fullSum = full * (full + 1) / 2
+    let fullSquares = full * (full + 1) * (2 * full + 1) / 6
+    let squares = m * n * (2 * m + 1) / 6
+    let diagonals = n * m * (n + 1) / 6
+    let linear = full * n * (n + 1) - period * (2 * n + 1) * fullSum
+    let repeated = (linear + period * period * fullSquares) / 2
+    return (edge * m, (modulus + 2 * bias) * diagonals - modulus * repeated + edge * squares)
+}

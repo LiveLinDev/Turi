@@ -1,1 +1,15 @@
-{"args": [400], "about": "producto de matrices i-j-k con listas de listas de flotantes"}
+{
+  "args": [400],
+  "about": "producto de matrices i-j-k con listas de listas de flotantes",
+  "c_extremo": {
+    "fuente": "matmul_extremo.c",
+    "entrenamiento": [[127], [192], [255]],
+    "variantes": {
+      "bloques": [],
+      "períodos": ["-DTZ_MATMUL_PERIODOS"],
+      "períodos por bloques": ["-DTZ_MATMUL_PERIODOS", "-DTZ_MATMUL_BALDOSAS"],
+      "períodos y sumas por bloques": ["-DTZ_MATMUL_PERIODOS", "-DTZ_MATMUL_BALDOSAS", "-DTZ_MATMUL_SUMAS_BLOQUE"],
+      "teselas por ciclos": ["-DTZ_MATMUL_PERIODOS", "-DTZ_MATMUL_BALDOSAS", "-DTZ_MATMUL_SUMAS_BLOQUE", "-DTZ_MATMUL_CICLOS"]
+    }
+  }
+}

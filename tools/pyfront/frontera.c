@@ -329,42 +329,64 @@ static double tz_now(void) {
 
 /* Objetos de Python que usa la variante. Se fijan una vez (`setup`) antes de guardar el estado de
    la biblioteca, así que restaurarlo tras una parada no los toca. */
-static PyObject *tzh_slow, *tzh_trap, *tzh_emit, *tzh_G, *tzh_MISS, *tzh_TRAP1, *tzh_TRAP2, *tzh_review;
-static PyObject* tzh_names[64];
-static PyObject* tzh_vals[64];
-static PyObject* tzh_alts[64];  /* una función del programa vale como la envoltura del motor o como la original */
-static int tzh_ndeps;
+static PyObject *tzh_slow, *tzh_trap, *tzh_emit, *tzh_MISS, *tzh_TRAP1, *tzh_TRAP2, *tzh_review;
+static PyObject *tzh_deps, *tzh_streams;
 TZ_EXPORT double tz_t;
 
 static PyObject* tzm_setup(PyObject* self, PyObject* args) {
     PyObject* deps;
     (void)self;
-    if (!PyArg_ParseTuple(args, "OOOOOOOOO", &tzh_slow, &tzh_trap, &tzh_emit, &tzh_G, &tzh_MISS, &tzh_TRAP1,
-                          &tzh_TRAP2, &deps, &tzh_review))
+    if (!PyArg_ParseTuple(args, "OOOOOOOOO", &tzh_slow, &tzh_trap, &tzh_emit, &tzh_MISS, &tzh_TRAP1,
+                          &tzh_TRAP2, &deps, &tzh_streams, &tzh_review))
         return 0;
-    Py_INCREF(tzh_slow); Py_INCREF(tzh_trap); Py_INCREF(tzh_emit); Py_INCREF(tzh_G); Py_INCREF(tzh_review);
+    Py_INCREF(tzh_slow); Py_INCREF(tzh_trap); Py_INCREF(tzh_emit); Py_INCREF(tzh_review);
     Py_INCREF(tzh_MISS); Py_INCREF(tzh_TRAP1); Py_INCREF(tzh_TRAP2);
-    tzh_ndeps = 0;
-    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(deps) && i < 64; i++) {
-        PyObject* pair = PyTuple_GET_ITEM(deps, i);
-        tzh_names[i] = PyTuple_GET_ITEM(pair, 0);
-        tzh_vals[i] = PyTuple_GET_ITEM(pair, 1);
-        tzh_alts[i] = PyTuple_GET_ITEM(pair, 2);
-        Py_INCREF(tzh_names[i]);
-        Py_INCREF(tzh_vals[i]);
-        Py_INCREF(tzh_alts[i]);
-        tzh_ndeps++;
-    }
+    Py_INCREF(tzh_streams);
+    tzh_deps = Py_NewRef(deps);
     Py_RETURN_NONE;
+}
+
+static int tz_stream_ok(const char* name, PyObject* original) {
+    PyObject* stream = PySys_GetObject(name);
+    if (stream != PyTuple_GET_ITEM(original, 0)) return 0;
+    if (stream == Py_None) return 1;
+    PyObject* standard_write = PyTuple_GET_ITEM(original, 1);
+    if (!PyCFunction_Check(standard_write)) return 0;
+    PyObject* write = PyObject_GetAttrString(stream, "write");
+    if (!write) {
+        PyErr_Clear();
+        return 0;
+    }
+    int same = PyCFunction_Check(write) && PyCFunction_GET_SELF(write) == stream &&
+               PyCFunction_GET_FUNCTION(write) == PyCFunction_GET_FUNCTION(standard_write);
+    Py_DECREF(write);
+    return same;
 }
 
 /* El programa puede haber cambiado una función o constante de la que depende el código nativo. */
 static int tz_deps_ok(void) {
-    for (int i = 0; i < tzh_ndeps; i++) {
-        PyObject* v = PyDict_GetItemWithError(tzh_G, tzh_names[i]);
-        if (v != tzh_vals[i] && v != tzh_alts[i]) {
+    /* Una salida redirigida puede ejecutar Python y cambiar las dependencias en mitad de la llamada. */
+    if (tzh_streams != Py_None &&
+        (!tz_stream_ok("stdout", PyTuple_GET_ITEM(tzh_streams, 0)) ||
+         !tz_stream_ok("stderr", PyTuple_GET_ITEM(tzh_streams, 1)))) return 0;
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(tzh_deps); i++) {
+        PyObject* dep = PyTuple_GET_ITEM(tzh_deps, i);
+        PyObject* owner = PyTuple_GET_ITEM(dep, 0);
+        PyObject* key = PyTuple_GET_ITEM(dep, 1);
+        PyObject* v = PyDict_GetItemWithError(owner, key);
+        /* Las dependencias de un nombre integrado resuelven primero el global. */
+        if (!v && PyTuple_GET_SIZE(dep) == 6 && !PyErr_Occurred())
+            v = PyDict_GetItemWithError(PyTuple_GET_ITEM(dep, 5), key);
+        if (v != PyTuple_GET_ITEM(dep, 2) && v != PyTuple_GET_ITEM(dep, 3)) {
             if (!v && PyErr_Occurred()) PyErr_Clear();
             return 0;
+        }
+        /* Una lista que conserva su identidad aún puede haber cambiado de contenido. */
+        PyObject* snapshot = PyTuple_GET_ITEM(dep, 4);
+        if (snapshot != Py_None) {
+            if (PyList_GET_SIZE(v) != PyTuple_GET_SIZE(snapshot)) return 0;
+            for (Py_ssize_t j = 0; j < PyTuple_GET_SIZE(snapshot); j++)
+                if (PyList_GET_ITEM(v, j) != PyTuple_GET_ITEM(snapshot, j)) return 0;
         }
     }
     return 1;

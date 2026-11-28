@@ -1,0 +1,80 @@
+fn tzLeadingFlips(initial: u64, inverse: u64, leading: u64,
+                  bShift: Simd<u64, 8>, cShift: Simd<u64, 8>, dShift: Simd<u64, 8>) -> Simd<u64, 8> {
+    let zero = simdSplat<Simd<u64, 8>>(u64(0))
+    let four = simdSplat<Simd<u64, 8>>(u64(4))
+    let sixty = simdSplat<Simd<u64, 8>>(u64(60))
+    let last = simdSplat<Simd<u64, 8>>(u64(15))
+    let a = (initial >> leading) & u64(15)
+    if a == u64(0) {
+        return zero
+    }
+    let starts = simdSplat<Simd<u64, 8>>(initial)
+    let b = (starts >> bShift) & last
+    let c = (starts >> cShift) & last
+    let d = (starts >> dShift) & last
+    let direct = simdSplat<Simd<u64, 8>>((initial & ~u64(65535)) | a) |
+        (b << four) | (c << simdSplat<Simd<u64, 8>>(u64(8))) | (d << simdSplat<Simd<u64, 8>>(u64(12)))
+    let reversed = simdSplat<Simd<u64, 8>>((inverse & u64(0xffffffffffff)) | (a << u64(60))) |
+        (b << simdSplat<Simd<u64, 8>>(u64(56))) | (c << simdSplat<Simd<u64, 8>>(u64(52))) |
+        (d << simdSplat<Simd<u64, 8>>(u64(48)))
+    // Las seis permutaciones tienen el mismo largo de prefijo en la primera inversión.
+    let initialShift = simdSplat<Simd<u64, 8>>(u64(60) - a * u64(4))
+    var value = (direct & ~((~zero) >> initialShift)) | (reversed >> initialShift)
+    var reverse = (reversed & ~((~zero) << initialShift)) | (direct << initialShift)
+    var flips = zero
+    var first = value & last
+    while simdReduceMax(simdCmpGt(first, zero)) != u64(0) {
+        let shift = sixty - first * four
+        let prefix = (~zero) >> shift
+        // El prefijo directo y el sufijo inverso se intercambian sin barajar bytes.
+        let next = (value & ~prefix) | (reverse >> shift)
+        reverse = (reverse & ~((~zero) << shift)) | (value << shift)
+        value = next
+        flips = flips - simdCmpGt(first, zero)
+        first = value & last
+    }
+    return flips + simdSplat<Simd<u64, 8>>(u64(1))
+}
+
+fn tzPackHigher(initial: u64, counts: u64, n: int) -> (u64, u64, bool) {
+    var value = initial
+    var digits = counts
+    for k in 4..n {
+        let shift = bitcast<u64>(wrappingMul(k, 4)) & u64(63)
+        let low = (~u64(0)) >> (wrappingSub(u64(0), shift) & u64(63))
+        value = (value & ~((low << u64(4)) | u64(15))) | ((value >> u64(4)) & low) | ((value & u64(15)) << shift)
+        digits = wrappingSub(digits, u64(1) << shift)
+        if ((digits >> shift) & u64(15)) != u64(0) {
+            return (value, digits, true)
+        }
+        digits = digits | (bitcast<u64>(wrappingAdd(k, 1)) << shift)
+    }
+    return (value, digits, false)
+}
+
+fn tzPairsFannkuch(n: int) -> (int, int) {
+    var digits = u64(0x0FEDCBA987654321)
+    var permutation = bitcast<u64>(-81985529216486896)
+    var flips = simdSplat<Simd<u64, 8>>(u64(0))
+    var records = flips
+TZ_PERMUTATION_CONTROLS
+    while true {
+        let bytes = bswap(permutation)
+        let nibble = u64(0x0f0f0f0f0f0f0f0f)
+        let inverted = ((bytes & nibble) << u64(4)) | ((bytes >> u64(4)) & nibble)
+TZ_PERMUTATION_GROUPS
+        let next = tzPackHigher(permutation, digits, n)
+        if !next.2 {
+            break
+        }
+        permutation = next.0
+        digits = next.1
+    }
+    // Los seis primeros carriles alternan paridad. Los dos últimos repiten
+    // órdenes del grupo para conservar el máximo sin entrar en el checksum.
+    let ab = wrappingSub(simdGet(flips, 0), simdGet(flips, 1))
+    let cd = wrappingSub(simdGet(flips, 2), simdGet(flips, 3))
+    let ef = wrappingSub(simdGet(flips, 4), simdGet(flips, 5))
+    let sum = wrappingAdd(wrappingAdd(ab, cd), ef)
+    return (bitcast<int>(sum), bitcast<int>(simdReduceMax(records)))
+}

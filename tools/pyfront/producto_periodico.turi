@@ -1,0 +1,87 @@
+fn pyPeriodicProduct(a: [[float]], b: [[float]]) -> [[float]] {
+    let rows = a.len()
+    let inner = b.len()
+    var output: [[float]] = []
+    if rows < 64 || inner < 8 {
+        return output
+    }
+    let cols = b[0].len()
+    if cols < 64 {
+        return output
+    }
+    for row in a {
+        if row.len() < inner {
+            return output
+        }
+    }
+    for row in b {
+        if row.len() < cols {
+            return output
+        }
+    }
+    // Comprueba los períodos sobre los bits de cada elemento, incluido el cero con signo.
+    let firstA = bitcast<u64>(a[0][0])
+    let firstB = bitcast<u64>(b[0][0])
+    var pr = 1
+    while pr * 2 <= rows && bitcast<u64>(a[pr][0]) != firstA {
+        pr = pr + 1
+    }
+    var pc = 1
+    while pc * 2 <= cols && bitcast<u64>(b[0][pc]) != firstB {
+        pc = pc + 1
+    }
+    if pr * 2 > rows || pc * 2 > cols {
+        return output
+    }
+    var previous = 0
+    for i in pr..rows {
+        let row = a[i]
+        let earlier = a[previous]
+        for k in 0..inner {
+            if bitcast<u64>(row[k]) != bitcast<u64>(earlier[k]) {
+                return output
+            }
+        }
+        previous = previous + 1
+    }
+    for row in b {
+        for j in pc..cols {
+            if bitcast<u64>(row[j]) != bitcast<u64>(row[j - pc]) {
+                return output
+            }
+        }
+    }
+    reserve(mut output, rows)
+    for rowIndex in 0..pr {
+        let left = a[rowIndex]
+        var row = repeat(0.0, cols)
+        var start = 0
+        while start + 8 <= pc {
+            var sum = simdSplat<Simd<float, 8>>(0.0)
+            for term in 0..inner {
+                let values = simdFromArray<Simd<float, 8>>(b[term], start)
+                sum = sum + simdSplat<Simd<float, 8>>(left[term]) * values
+            }
+            simdToArray(sum, mut row, start)
+            start = start + 8
+        }
+        for col in start..pc {
+            var sum = 0.0
+            for term in 0..inner {
+                sum = sum + left[term] * b[term][col]
+            }
+            row[col] = sum
+        }
+        for col in pc..cols {
+            row[col] = row[col - pc]
+        }
+        output.push(row)
+    }
+    previous = 0
+    for i in pr..rows {
+        let row = output[previous]
+        output.push(row)
+        previous = previous + 1
+    }
+    return output
+}

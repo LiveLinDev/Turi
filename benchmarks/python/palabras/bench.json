@@ -1,1 +1,25 @@
-{"args": [2000000], "about": "frecuencia de palabras con un diccionario, dict.get y sorted con clave tupla"}
+{
+  "args": [2000000],
+  "about": "frecuencia de palabras con un diccionario, dict.get y sorted con clave tupla",
+  "c_extremo": {
+    "fuente": "palabras_extremo.c",
+    "entrenamiento": [[32000], [150001], [250000]],
+    "variantes": {
+      "ramas": [],
+      "selección": ["-DTZ_PALABRAS_SELECCION"],
+      "primeras": ["-DTZ_PALABRAS_SELECCION", "-DTZ_PALABRAS_PRIMERAS"],
+      "bloque 64": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=64"],
+      "bloque 96": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=96"],
+      "bloque 128": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=128"],
+      "bloque 256": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=256"],
+      "saltos empaquetados 96": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=96", "-DTZ_PALABRAS_ABSOLUTO"],
+      "saltos empaquetados 256": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=256", "-DTZ_PALABRAS_ABSOLUTO"],
+      "saltos 96": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=96", "-DTZ_PALABRAS_SALTOS"],
+      "saltos 128": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=128", "-DTZ_PALABRAS_SALTOS"],
+      "saltos 256": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=256", "-DTZ_PALABRAS_SALTOS"],
+      "pares 96": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=96", "-DTZ_PALABRAS_SALTOS", "-DTZ_PALABRAS_DOBLE"],
+      "pares 256": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=256", "-DTZ_PALABRAS_SALTOS", "-DTZ_PALABRAS_DOBLE"],
+      "pares de 32 bits": ["-DTZ_PALABRAS_PRIMERAS", "-DTZ_PALABRAS_BLOQUE=256", "-DTZ_PALABRAS_SALTOS", "-DTZ_PALABRAS_DOBLE", "-DTZ_PALABRAS_PAR_32"]
+    }
+  }
+}

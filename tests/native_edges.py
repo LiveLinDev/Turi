@@ -68,6 +68,17 @@ fn main() {
 }
 """
 
+IF_TEMPORARIES = """
+fn describe(n: int) -> str {
+    return "n=" + str(n) + " doble=" + str(n * 2) + " par=" + (if n % 2 == 0 { "True" } else { "False" })
+}
+fn main() {
+    print(describe(7))
+    print(describe(8))
+}
+"""
+
+
 RECURSION = """
 fn descend(n: int) -> int {
     if n == 0 { return 3 }
@@ -116,6 +127,7 @@ def main():
         compare(cli, folder, AGGREGATES, "9\n2\n77\n2\n9\n33\n77\n0\nfalse\nPerú\n".encode())
         compare(cli, folder, EFFECTS,
                 b"1\n3\n1\n2\nfalse\ntrue\n9223372036854775806\n-9223372036854775808\n-3\n-2\n")
+        compare(cli, folder, IF_TEMPORARIES, b"n=7 doble=14 par=False\nn=8 doble=16 par=True\n")
         compare(cli, folder, RECURSION.replace("DEPTH", "254"), b"11\n3\n")
         compare(cli, folder, RECURSION.replace("DEPTH", "255"), b"11\n", "R_DEPTH")
         # Length invariants survive nested loops, but rebinding or shadowing

@@ -26,7 +26,7 @@ import copy
 STOP = (ast.Return, ast.Yield, ast.YieldFrom, ast.Await, ast.Global, ast.Nonlocal, ast.Delete, ast.FunctionDef,
         ast.AsyncFunctionDef, ast.ClassDef, ast.With, ast.AsyncWith, ast.AsyncFor, ast.NamedExpr,
         ast.Import, ast.ImportFrom)
-NATIVE_MODULES = {"sys", "random"}  # módulos que el traductor conoce
+NATIVE_MODULES = {"sys", "random", "heapq"}  # módulos que el traductor conoce
 COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
 
 

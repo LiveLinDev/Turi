@@ -1,1 +1,13 @@
-{"args": [400], "about": "mochila 0/1 con lru_cache sobre una función interna"}
+{
+  "args": [400],
+  "about": "mochila 0/1 con lru_cache sobre una función interna",
+  "c_extremo": {
+    "fuente": "mochila_extremo.c",
+    "entrenamiento": [[31], [126], [257]],
+    "variantes": {
+      "fila": [],
+      "ordenación": ["-DTZ_MOCHILA_COTA"],
+      "selección": ["-DTZ_MOCHILA_COTA", "-DTZ_MOCHILA_SELECCION"]
+    }
+  }
+}

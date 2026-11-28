@@ -1,0 +1,168 @@
+struct TzPrimeTotals {
+    size: int,
+    total: int
+}
+
+fn tzComposite(out: TzPrimeTotals, source: TzPrimeTotals, before: TzPrimeTotals, p: int) -> TzPrimeTotals {
+    return TzPrimeTotals {
+        size: wrappingSub(out.size, wrappingSub(source.size, before.size)),
+        total: wrappingSub(out.total, wrappingMul(p, wrappingSub(source.total, before.total)))
+    }
+}
+
+fn tzPrimeWheel(n: int, prefix: [TzPrimeTotals]) -> TzPrimeTotals {
+    let cycles = n / 210
+    let offset = n % 210
+    let tail = prefix[offset]
+    let two = if n >= 2 { 1 } else { 0 }
+    let three = if n >= 3 { 1 } else { 0 }
+    let five = if n >= 5 { 1 } else { 0 }
+    let seven = if n >= 7 { 1 } else { 0 }
+    // Cada período deja 48 residuos. Sus valores suman 5040 en el primero.
+    return TzPrimeTotals {
+        size: 48 * cycles + tail.size - 1 + two + three + five + seven,
+        total: 5040 * cycles * cycles + 210 * cycles * tail.size + tail.total - 1 +
+            2 * two + 3 * three + 5 * five + 7 * seven
+    }
+}
+
+fn tzPrimeRank(n: int, prefix: [TzPrimeTotals]) -> int {
+    return 48 * (n / 210) + prefix[n % 210].size
+}
+
+fn tzPrimePack(cell: TzPrimeTotals) -> u64 {
+    return (u64(cell.total) << u64(32)) | u64(cell.size)
+}
+
+fn tzPrimeUnpack(cell: u64) -> TzPrimeTotals {
+    return TzPrimeTotals { size: int(cell & u64(0xffffffff)), total: int(cell >> u64(32)) }
+}
+
+fn tzPrimeTotals(n: int) -> (int, int) {
+    let root = int(sqrt(float(n)))
+    let high = n / (root + 1)
+    let zero = TzPrimeTotals { size: 0, total: 0 }
+    // La tabla pequeña llega hasta 32767. El recuento y la suma caben en 32 bits.
+    var small = repeat(u64(0), root + 1)
+    var inverse = repeat(0.0, root + 8)
+    var prefix = repeat(zero, 210)
+    var residues = repeat(u16(0), 48)
+    var count = 0
+    var total = 0
+    for j in 1..210 {
+        if j % 2 != 0 && j % 3 != 0 && j % 5 != 0 && j % 7 != 0 {
+            residues[count] = u16(j)
+            count = count + 1
+            total = total + j
+        }
+        prefix[j] = TzPrimeTotals { size: count, total: total }
+    }
+    // Los divisores grandes alcanzables desde 1 son productos de primos >= 11.
+    // Solo se guardan en orden creciente los divisores coprimos con la rueda.
+    let members = tzPrimeRank(root, prefix)
+    let bigCount = tzPrimeRank(high, prefix)
+    var positions = repeat(u16(0), members + 1)
+    for rank in 1..(members + 1) {
+        let index = rank - 1
+        positions[rank] = u16((index / 48) * 210 + int(residues[index % 48]))
+    }
+    var big = repeat(zero, bigCount + 1)
+    let wheel = [
+        TZ_PRIME_WHEEL_PREFIX
+    ]
+    for value in 1..min(210, root + 1) {
+        small[value] = tzPrimePack(tzPrimeWheel(value, prefix))
+    }
+    // A partir del segundo período los cuatro primos base están incluidos.
+    // Solo cambian el múltiplo de 210 y la contribución del prefijo de la rueda.
+    let low = simdSplat<Simd<u64, 8>>(u64(0xffffffff))
+    for cycle in 1..(root / 210 + 1) {
+        let from = cycle * 210
+        let width = min(210, root + 1 - from)
+        let bias = (u64(5040 * cycle * cycle + 16) << u64(32)) | u64(48 * cycle + 3)
+        let shift = u64(from) << u64(32)
+        let biases = simdSplat<Simd<u64, 8>>(bias)
+        let shifts = simdSplat<Simd<u64, 8>>(shift)
+        var at = 0
+        while at + 8 <= width {
+            let packed = simdFromArray<Simd<u64, 8>>(wheel, at)
+            simdToArray(packed + biases + (packed & low) * shifts, mut small, from + at)
+            at = at + 8
+        }
+        for offset in at..width {
+            let packed = wheel[offset]
+            small[from + offset] = wrappingAdd(wrappingAdd(packed, bias),
+                                               wrappingMul(packed & u64(0xffffffff), shift))
+        }
+    }
+    let lanes = simdFromArray<Simd<float, 8>>([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], 0)
+    let one = simdSplat<Simd<float, 8>>(1.0)
+    let increment = simdSplat<Simd<u64, 8>>(u64(1))
+    var place = 1
+    while place <= root {
+        // El recíproco redondeado hacia arriba conserva el cociente entero hasta 2^30.
+        let divisors = simdSplat<Simd<float, 8>>(float(place)) + lanes
+        let bits = bitcast<Simd<u64, 8>>(one / divisors) + increment
+        simdToArray(bitcast<Simd<float, 8>>(bits), mut inverse, place)
+        place = place + 8
+    }
+    for rank in 1..(bigCount + 1) {
+        let i = int(positions[rank])
+        let value = int(float(n) * inverse[i])
+        big[rank] = tzPrimeWheel(value, prefix)
+    }
+    for primeRank in 2..(members + 1) {
+        let prime = int(positions[primeRank])
+        let before = tzPrimeUnpack(small[prime - 1])
+        if (small[prime] & u64(0xffffffff)) == u64(before.size) {
+            continue
+        }
+        let square = prime * prime
+        let invPrime = inverse[prime]
+        let scaled = float(int(float(n) * invPrime))
+        let last = min(high, int(scaled * invPrime))
+        let split = min(last, int(float(high) * invPrime))
+        let firstEnd = tzPrimeRank(split, prefix) + 1
+        let lastEnd = tzPrimeRank(last, prefix) + 1
+        for rank in 1..firstEnd {
+            let i = int(positions[rank])
+            big[rank] = tzComposite(big[rank], big[tzPrimeRank(i * prime, prefix)], before, prime)
+        }
+        for rank in firstEnd..lastEnd {
+            let i = int(positions[rank])
+            let previous = tzPrimeUnpack(small[int(scaled * inverse[i])])
+            big[rank] = tzComposite(big[rank], previous, before, prime)
+        }
+        var value = root
+        if value >= square {
+            var quotient = int(float(value) * invPrime)
+            var boundary = quotient * prime
+            while value >= square {
+                // El cociente es constante dentro del grupo y queda por debajo
+                // de cada destino. Se puede recorrer el grupo en orden creciente.
+                let first = max(boundary, square)
+                let source = tzPrimeUnpack(small[quotient])
+                let count = wrappingSub(source.size, before.size)
+                let total = wrappingMul(prime, wrappingSub(source.total, before.total))
+                // El recuento que se resta está contenido en el destino.
+                // Por tanto, la resta del campo bajo no toma un préstamo del alto.
+                let delta = (u64(total) << u64(32)) | u64(count)
+                let amount = simdSplat<Simd<u64, 8>>(delta)
+                var at = first
+                while at + 7 <= value {
+                    let cells = simdFromArray<Simd<u64, 8>>(small, at)
+                    simdToArray(cells - amount, mut small, at)
+                    at = at + 8
+                }
+                for i in at..(value + 1) {
+                    small[i] = wrappingSub(small[i], delta)
+                }
+                value = first - 1
+                quotient = quotient - 1
+                boundary = boundary - prime
+            }
+        }
+    }
+    let result = if high > 0 { big[1] } else { tzPrimeUnpack(small[n]) }
+    return (result.size, result.total)
+}

@@ -1,1 +1,16 @@
-{"args": [20000000], "about": "n-body simulation, 5 bodies, array of structs, double precision"}
+{
+  "args": [20000000],
+  "about": "n-body simulation, 5 bodies, array of structs, double precision",
+  "c_extremo": {
+    "fuente": "nbody_extremo.c",
+    "entrenamiento": [[220001], [750003], [1300127]],
+    "raiz": "advance",
+    "variantes": {
+      "máscaras por grupo": [],
+      "cuatro rondas": ["-DTZ_CUERPOS_RONDAS"],
+      "masas por ronda": ["-DTZ_CUERPOS_PESO_TEMPRANO"],
+      "diferencias por ronda": ["-DTZ_CUERPOS_PESO_TEMPRANO", "-DTZ_CUERPOS_DELTA_POSICIONES"],
+      "última pareja corta": ["-DTZ_CUERPOS_PESO_TEMPRANO", "-DTZ_CUERPOS_PAR_CORTO"]
+    }
+  }
+}

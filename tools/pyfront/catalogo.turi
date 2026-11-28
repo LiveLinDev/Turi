@@ -1,0 +1,63 @@
+fn CAT_NAME(n: int) -> CAT_TYPE {
+    let syllables = CAT_SYLLABLES
+    var counts = repeat(0, CAT_SIZE)
+    if n > 0 {
+        let zero = simdSplat<Simd<u32, 8>>(u32(0))
+        let one = simdSplat<Simd<u32, 8>>(u32(1))
+        let two = simdSplat<Simd<u32, 8>>(u32(2))
+        let three = simdSplat<Simd<u32, 8>>(u32(3))
+        let radix = simdSplat<Simd<u32, 8>>(u32(CAT_RADIX))
+        let magic = simdSplat<Simd<u32, 8>>(u32(CAT_MAGIC))
+        let magic3 = simdSplat<Simd<u32, 8>>(u32(10923))
+        let keep = simdSplat<Simd<u32, 8>>(u32(32767))
+        let high = simdSplat<Simd<u32, 8>>(u32(16))
+        let shift3 = simdSplat<Simd<u32, 8>>(u32(15))
+        let shiftR = simdSplat<Simd<u32, 8>>(u32(CAT_SHIFT))
+        let lanes = simdFromArray<Simd<u32, 8>>([u32(0), u32(1), u32(2), u32(3), u32(4), u32(5), u32(6), u32(7)], 0)
+CAT_VECTORS
+        var symbols = repeat(u32(0), CAT_LOOKAHEAD)
+        var lengths = repeat(u32(0), CAT_TRANSITIONS)
+CAT_TABLES
+        var state = u32(CAT_SEED)
+        var remaining = n
+        var at = 0
+        while remaining > 0 {
+            let seed = simdSplat<Simd<u32, 8>>(state)
+CAT_SAMPLES
+            // Cada posición puede iniciar una palabra. El salto no depende de decodificar la clave.
+            for group in 0..CAT_TRANSITION_GROUPS {
+                let offset = group * 8
+                let a = simdFromArray<Simd<u32, 8>>(symbols, offset + 1)
+                let b = radix + a * radix + simdFromArray<Simd<u32, 8>>(symbols, offset + 2)
+                let c = radix + b * radix + simdFromArray<Simd<u32, 8>>(symbols, offset + 3)
+                let length = simdFromArray<Simd<u32, 8>>(lengths, offset)
+                let longer = simdSelect(simdCmpEq(length, one), b, c)
+                let code = simdSelect(simdCmpEq(length, zero), a, longer)
+                let next = length + two + lanes + simdSplat<Simd<u32, 8>>(u32(offset))
+CAT_STORE
+            }
+CAT_WALK
+            at = at - CAT_BLOCK
+        }
+    }
+CAT_FINISH
+}
+
+fn CAT_DECODE(index: int, syllables: [str]) -> str {
+    var code = index
+    var width = 1
+    var block = CAT_RADIX
+    while code >= block {
+        code = code - block
+        block = block * CAT_RADIX
+        width = width + 1
+    }
+    var word = ""
+    for i in 0..width {
+        word = syllables[code % CAT_RADIX] + word
+        code = code / CAT_RADIX
+    }
+    return word
+}
+
+CAT_EXTRA

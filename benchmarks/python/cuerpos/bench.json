@@ -1,1 +1,17 @@
-{"args": [2000000], "c": "../../game/nbody/nbody.c", "about": "N cuerpos con una clase Body y atributos; el C experto es el del banco del lenguaje"}
+{
+  "args": [2000000],
+  "c": "../../game/nbody/nbody.c",
+  "about": "N cuerpos con una clase Body y atributos; el C experto es el del banco del lenguaje",
+  "c_extremo": {
+    "fuente": "../../game/nbody/nbody_extremo.c",
+    "entrenamiento": [[41001], [95003], [214097]],
+    "raiz": "advance",
+    "variantes": {
+      "máscaras por grupo": [],
+      "cuatro rondas": ["-DTZ_CUERPOS_RONDAS"],
+      "masas por ronda": ["-DTZ_CUERPOS_PESO_TEMPRANO"],
+      "diferencias por ronda": ["-DTZ_CUERPOS_PESO_TEMPRANO", "-DTZ_CUERPOS_DELTA_POSICIONES"],
+      "última pareja corta": ["-DTZ_CUERPOS_PESO_TEMPRANO", "-DTZ_CUERPOS_PAR_CORTO"]
+    }
+  }
+}

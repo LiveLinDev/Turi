@@ -1,0 +1,142 @@
+fn pyQueensRows5(available: u64, column: u32) -> int {
+    // El producto reúne cinco bits separados por doce posiciones.
+    let mask = (available >> u64(column)) & u64(0x1001001001001)
+    return int((wrappingMul(mask, u64(0x1002004008010)) >> u64(48)) & u64(31))
+}
+
+fn pyQueensClosed5(cols: u32, left: u32, right: u32, table: [u64]) -> u64 {
+    let first = cols & ~(left | right)
+    if first == u32(0) {
+        return u64(0)
+    }
+    var available = u64(first)
+    for row in 1..5 {
+        let mask = cols & ~((left << u32(row)) | (right >> u32(row)))
+        if mask == u32(0) {
+            return u64(0)
+        }
+        available = available | (u64(mask) << u64(12 * row))
+    }
+    var columns = cols
+    let a = u32(ctz(columns))
+    var previous = a
+    var gap = 0
+    let firstIndex = 128 + 2 * pyQueensRows5(available, a)
+    var low = table[firstIndex]
+    var high = table[firstIndex + 1]
+    columns = columns & wrappingSub(columns, u32(1))
+    for col in 1..5 {
+        let index = u32(ctz(columns))
+        columns = columns & wrappingSub(columns, u32(1))
+        gap = 5 * gap + int(min(index - previous, u32(5))) - 1
+        previous = index
+        let key = 128 + 2 * (32 * col + pyQueensRows5(available, index))
+        low = low & table[key]
+        high = high & table[key + 1]
+    }
+    return u64(popcnt(low & table[448 + 2 * gap])) + u64(popcnt(high & table[449 + 2 * gap]))
+}
+
+fn pyQueensClosed4(cols: u32, left: u32, right: u32, table: [u64]) -> u64 {
+    let first = cols & ~(left | right)
+    if first == u32(0) {
+        return u64(0)
+    }
+    let second = cols & ~((left << u32(1)) | (right >> u32(1)))
+    let third = cols & ~((left << u32(2)) | (right >> u32(2)))
+    let last = cols & ~((left << u32(3)) | (right >> u32(3)))
+    let availability = u64(first) | (u64(second) << u64(16)) | (u64(third) << u64(32)) | (u64(last) << u64(48))
+    let secondRest = cols & wrappingSub(cols, u32(1))
+    let thirdRest = secondRest & wrappingSub(secondRest, u32(1))
+    let lastRest = thirdRest & wrappingSub(thirdRest, u32(1))
+    let a = ctz(cols)
+    let b = ctz(secondRest)
+    let c = ctz(thirdRest)
+    let d = ctz(lastRest)
+    // El producto coloca los bits de las cuatro filas en las posiciones 48 a 51.
+    let keep = u64(0x0001000100010001)
+    let multiply = u64(0x0001000200040008)
+    let x = int((wrappingMul((availability >> u64(a)) & keep, multiply) >> u64(48)) & u64(15))
+    let y = int((wrappingMul((availability >> u64(b)) & keep, multiply) >> u64(48)) & u64(15))
+    let z = int((wrappingMul((availability >> u64(c)) & keep, multiply) >> u64(48)) & u64(15))
+    let w = int((wrappingMul((availability >> u64(d)) & keep, multiply) >> u64(48)) & u64(15))
+    let gaps = ((min(b - a, u32(4)) - u32(1)) << u32(4)) |
+               ((min(c - b, u32(4)) - u32(1)) << u32(2)) | (min(d - c, u32(4)) - u32(1))
+    return u64(popcnt(table[x] & table[16 + y] & table[32 + z] & table[48 + w] & table[64 + int(gaps)]))
+}
+
+fn pyQueensSearch(cols: u32, left: u32, right: u32, remaining: int, table: [u64]) -> u64 {
+    if remaining == 5 && cols < u32(4096) {
+        return pyQueensClosed5(cols, left, right, table)
+    }
+    if remaining == 4 && cols < u32(65536) {
+        return pyQueensClosed4(cols, left, right, table)
+    }
+    var available = cols & ~(left | right)
+    if remaining == 3 {
+        let middle = cols & ~((left << u32(1)) | (right >> u32(1)))
+        let end = cols & ~((left << u32(2)) | (right >> u32(2)))
+        var total = u64(0)
+        while available != u32(0) {
+            let rest = available & wrappingSub(available, u32(1))
+            let queen = available ^ rest
+            available = rest
+            let two = cols ^ queen
+            let high = two & wrappingSub(two, u32(1))
+            let low = two ^ high
+            if high != (low << u32(1)) {
+                let a = middle & two & ~((queen << u32(1)) | (queen >> u32(1)))
+                let b = end & two & ~((queen << u32(2)) | (queen >> u32(2)))
+                let count = popcnt(a) * popcnt(b) - popcnt(a & b)
+                total = wrappingAdd(total, u64(count))
+            }
+        }
+        return total
+    }
+    var total = u64(0)
+    while available != u32(0) {
+        let rest = available & wrappingSub(available, u32(1))
+        let queen = available ^ rest
+        available = rest
+        let below = pyQueensSearch(cols ^ queen, (left | queen) << u32(1),
+                                  (right | queen) >> u32(1), wrappingSub(remaining, 1), table)
+        // Cada solución es una permutación de a lo sumo 20 columnas.
+        total = wrappingAdd(total, below)
+    }
+    return total
+}
+
+fn pyQueens(n: int) -> int {
+    if n < 4 {
+        return if n == 0 || n == 1 { 1 } else { 0 }
+    }
+    let table = [
+        TZ_QUEENS_TAIL_TABLE
+    ]
+    let cols = (u32(1) << u32(n)) - u32(1)
+    let half = (u32(1) << u32(n / 2)) - u32(1)
+    var choices = half
+    var solutions = u64(0)
+    while choices != u32(0) {
+        let rest = choices & wrappingSub(choices, u32(1))
+        let queen = choices ^ rest
+        choices = rest
+        solutions = solutions + pyQueensSearch(cols ^ queen, queen << u32(1), queen >> u32(1), n - 1, table)
+    }
+    if n % 2 != 0 {
+        // Con la primera reina en el centro, el reflejo se aplica a la segunda fila.
+        let center = u32(1) << u32(n / 2)
+        let left = center << u32(1)
+        let right = center >> u32(1)
+        let restCols = cols ^ center
+        choices = half & restCols & ~(left | right)
+        while choices != u32(0) {
+            let rest = choices & wrappingSub(choices, u32(1))
+            let queen = choices ^ rest
+            choices = rest
+            solutions = solutions + pyQueensSearch(restCols ^ queen, (left | queen) << u32(1),
+                                                   (right | queen) >> u32(1), n - 2, table)
+        }
+    }
+    return int(solutions * u64(2))
+}

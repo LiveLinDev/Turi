@@ -6,7 +6,7 @@ Lee antes, en este orden: `AGENT_MEMORY.md` (reglas 13 a 15 y la lista de verifi
 
 ## 0. La meta, medida
 
-**Cualquier programa Python da lo mismo que CPython; todo lo que calcula corre en código máquina; y donde existe un C equivalente escrito por un experto, Turi le gana.** Ganar es ganar: un empate es un defecto abierto.
+**Cualquier programa Python da lo mismo que CPython, todo lo que calcula corre en código máquina y, donde existe un C extremo equivalente, Turi le gana.** Un empate sigue siendo un defecto abierto.
 
 Tres marcadores. Ningún paquete está hecho si empeora alguno.
 
@@ -14,7 +14,7 @@ Tres marcadores. Ningún paquete está hecho si empeora alguno.
 |---|---|---|
 | **Exactitud** | Salida, errores, trazas y código de salida frente a CPython (`tests/turipy_hybrid.py`, corpus A1, propiedades A3) | 0 diferencias. Siempre. |
 | **Cobertura** | `python tools/pyfront/cobertura.py` (A1): funciones nativas / funciones llamadas, y tiempo en nativo / tiempo total | 90 % → 97 % → 100 % de las funciones, quitando la lista cerrada de abajo; ≥ 99 % del tiempo en los programas de cálculo |
-| **Velocidad** | `python tools/pyfront/bench.py -n 9` (alternado con el C experto) | Cada programa ≥ 1,05× en tiempo de cálculo. Entre 0,95 y 1,05 es empate (defecto). Menos es derrota (se publica). |
+| **Velocidad** | `python tools/pyfront/bench.py --c-extremo -n 9` | Cada programa ≥ 1,05× en cálculo y proceso completo, con salidas equivalentes. El banco queda pendiente mientras falte una referencia extrema válida. |
 
 ### Lo que nadie puede prometer (lista cerrada)
 
@@ -101,8 +101,8 @@ Tamaño orientativo: P (días), M (una o dos semanas), G (más).
 `tools/pyfront/cobertura.py` ejecuta cada programa con CPython y con `run.py --informe`, compara salidas y escribe `tools/pyfront/COBERTURA.md`: programas idénticos, funciones nativas sobre llamadas, tiempo en nativo (`TURIPY_TIME=1`) y los 20 motivos más frecuentes.
 *Hecho cuando:* el informe sale con un comando y `modelo/` entra en `ctest`.
 
-**A2 · Banco Python frente a C experto (M).**
-Cada característica nueva necesita un programa que la use en el bucle caliente y su C experto (mismo algoritmo, misma salida, `-O3 -march=native -flto`, versión portable y versión con intrínsecos). Añadir a `tools/pyfront/examples/` y `benchmarks/game/`:
+**A2 · Banco Python frente a C extremo (M).**
+Cada característica nueva necesita un programa que la use en el bucle caliente y una referencia equivalente. La versión extrema aplica optimizaciones manuales, incluidos intrínsecos cuando convenga. Cada métrica toma el mínimo de la variante válida más rápida entre LTO y LTO con PGO. Ambos programas miden su cálculo con un reloj interno y el banco mide por separado los procesos completos. El entrenamiento usa entradas distintas de las medidas. Ambas partes conservan el orden de las operaciones de coma flotante. Los bancos viven en `tools/pyfront/examples/`, `benchmarks/game/` y `benchmarks/python/`.
 
 | Programa | Qué ejercita |
 |---|---|
@@ -287,22 +287,50 @@ Instalador (`pip install`), Linux y macOS, documentación en inglés, más model
 
 ## 8. Estado de la implementación (se actualiza al terminar cada paquete)
 
-25 de noviembre de 2026, noche. Todo sin commit sobre `0685fa5`.
+Registro iniciado el 25 de noviembre de 2026 sobre `0685fa5`. Se actualizó el 27 de noviembre con la primera campaña frente a C extremo.
 
 | Paquete | Estado | Dónde |
 |---|---|---|
 | A1 | Hecho. 60 respuestas del modelo y 40 programas «reales» pedidos a la Spark (`corpus/pedir.py`). Marcador: `cobertura.py` → `COBERTURA.md` | `tools/pyfront/corpus/`, `cobertura.py` |
-| A2 | Hecho (10 programas con su C experto). Línea base: los 10 a velocidad de CPython | `benchmarks/python/`, `bench.py` |
+| A2 | Línea base verificada en los 14 programas frente a C extremo. Las 14 filas siguen por debajo de la ventaja exigida de 1,05× en cálculo y proceso entero. | `benchmarks/`, `bench.py`, [RESULTADOS.md](../tools/pyfront/RESULTADOS.md#primera-campaña-frente-a-c-extremo--27-de-noviembre-de-2026) |
 | A3, A4 | Pendientes | |
 | B1 | Hecho: `print`, `sys.stdout/stderr.write`, cadenas f con especificación, `%`, `str.format`, `repr`, flotantes como Python (2,3 millones de casos sin diferencia). Búfer en el shim, repetición sin duplicar | `turipy.SHIM`, `py2turi.print_call/formatted` |
 | B2 | Hecho: cada bucle es una región nativa (también los del nivel superior) | `regiones.py`, `turipy.Region` |
-| B4 | En parte: `random` exacto (Mersenne Twister y fórmulas de random.py). Faltan archivos y entrada estándar | `azar.c` |
+| B4 | Parcial. `random` exacto e iteración de archivos regulares ASCII con apertura UTF-8. Quedan otras operaciones de archivo y la entrada estándar | `azar.c`, `archivos.c`, `auditoria.c` |
 | B5 | Hecho: cada biblioteca es un módulo de extensión; la frontera está en C (0,18 µs por llamada sencilla, antes ~3 µs). Regla de no empeorar al arrancar (3 comprobaciones) y mientras corre (muestreo de ciclos) | `frontera.c` |
 | C1 | Hecho: resultados valor-o-None, centinelas, argumentos None | `py2turi` (`is_opt`, `none_params`) |
 | C5 | Hecho como paradas: el cuerpo del `try` corre en nativo; un error detiene y Python repite (con su manejador). `raise` = parada | `py2turi.flatten_try` |
 | C3 | Hecho v1: clases de mundo cerrado (sin herencia), dataclass, métodos, constructores, `is None`, campos escalares/texto/objeto/listas. Almacén por clase con índices (-1 = None); en la frontera, mapa de identidad y columnas; al volver se escriben los campos que cambian y se crean solo los objetos alcanzables. Banco: `cuerpos` 0,73× y `arboles` 0,09× frente a C (el almacén no libera temporales) | `clases.py`, `objetos.c` |
-| C2, C4, C6–C11, D, E1 | Pendientes. Siguiente: liberar temporales del almacén (arboles), diccionarios con orden y claves tupla, generadores, closures/lru_cache, archivos y stdin | |
+| C2 | Parcial. Claves tupla de dos y tres enteros en tablas locales y recorridos con efectos conmutativos. Quedan el orden de inserción y la frontera para diccionarios y conjuntos | `py2turi.py` |
+| C4 | Parcial. Funciones internas de llamada directa con capturas, `nonlocal` entero y recursión pura memorizada con `lru_cache(maxsize=None)`. Las búsquedas locales por columnas y diagonales usan máscaras. La mochila 0/1 pura selecciona la densidad crítica y resuelve la fila restante en SIMD. Quedan las funciones como valores y los cierres que escapan | `turipy.py`, `py2turi.py`, `cierres_memo.py`, `reinas.turi` |
+| C6–C9, C11, D | Pendientes | |
+| E1 | La entrada pública `run.py --exe` compila los 14 bancos en modo exacto y reproduce errores con el fuente incorporado. Se midieron los 14 tamaños oficiales. | `ejecutable.py`, `ejecutable.c`, `bench.py --c-extremo --exe` |
+| C10 | Parcial. `heapq`, ordenación estable con clave y el caso de `lru_cache` de C4 | `py2turi.py`, `turipy.py`, `cierres_memo.py` |
+
+E1 reutiliza `Plan.unit`, `take_argv`, `Module.translate_defs`, el formateador y el lector de archivos regulares. La salida se confirma al terminar. Si el código nativo se detiene, CPython repite el módulo desde el fuente incorporado y recibe los argumentos y flujos del proceso original.
+
+En `spectralnorm`, el traductor deriva las diferencias del denominador a partir del polinomio de grado dos. Con una cota que demuestra que cada divisor es un entero positivo de hasta 2³¹, genera los recíprocos por pares y conserva el orden de suma de cada fila. La guarda usa las dimensiones, las longitudes y las instrucciones disponibles.
 
 Sesión siguiente (sin commit, verificación incompleta): `truncate` en el compilador, tope de arreglos 2^30, arena de objetos, `sys.argv` nativo; `arboles` 0,45× y `criba` 0,89× en cálculo. Estado detallado, diseño de lo que falta y reglas en `docs/RELEVO-GPT.md`.
+
+Revalidación del relevo. Los 49 grupos de Release pasan con `ctest -j 3`, incluidos los dos casos de límites actualizados y reejecutados. La batería híbrida pasó 88 comprobaciones con CPython 3.13 sobre el traductor corregido. El nuevo tope de 2³⁰ se aplica a los arreglos. Las tablas, los pools y las colas conservan sus límites y diagnósticos. `truncate` cierra los recursos del tramo recortado en orden inverso, tanto en el intérprete como en nativo. Los 49 grupos también pasaron con ASan y UBSan después de P1.
+
+El banco público de 14 programas coincidió con C en las salidas. En cinco rondas, `arboles` obtuvo 0,42× en cálculo nativo y 0,25× en proceso entero. `criba` obtuvo 0,96× y 0,42×, respectivamente. La línea base completa está en [RESULTADOS.md](../tools/pyfront/RESULTADOS.md).
+
+P1. `palabras` ya ejecuta `main` entero en nativo. Lo permiten las constantes globales de secuencia de solo lectura, `dict.items()` en expresiones que no observan el orden de inserción y la ordenación estable con clave. Para 2.000.000 de palabras, el proceso bajó de 522 ms a 126 ms. Queda por superar a C, que tomó 34,8 ms frente a 60 ms de cálculo nativo.
+
+P2. El benchmark `dijkstra` ejecuta `main` entero en nativo con `heapq`. La cuadrícula de 500 bajó de 405 ms a 89 ms de proceso. El cálculo nativo tomó 25 ms frente a 13,1 ms de C. Pasaron las 96 comprobaciones híbridas con el compilador ASan y UBSan.
+
+P3. `vida` ejecuta `main` entero en nativo. Las claves tupla se guardan en un entero de 64 bits con comprobación de rango. Los bucles de conjuntos o diccionarios pueden ejecutarse en nativo si el traductor demuestra que el orden carece de efectos observables. A 300 generaciones, el proceso bajó de 412 a 146 ms. El cálculo nativo tomó 80 ms frente a 19,4 ms de C. Coincidió con CPython a 0, 2 y 300 generaciones. Pasaron las 100 comprobaciones híbridas con el compilador ASan y UBSan, incluida la corrección de la verificación con hilos.
+
+P4. `reinas` ejecuta `main` entero en nativo para 0, 4 y 11 reinas. Con 11, el proceso bajó de 272 a 82 ms. El cálculo tomó 21 ms frente a 5,3 ms de C. En `mochila`, la recursión memorizada se traduce automáticamente a una pila explícita con memoria por estado. Pasó en CPython 3.11, 3.12, 3.13 y 3.14 para 0, 10 y 400 elementos. A 400, el proceso bajó de 1550 a 424 ms. El cálculo nativo tomó 260 ms frente a 14,2 ms de C.
+
+Validación al cerrar P4. Pasaron las 108 comprobaciones híbridas con el compilador ASan y UBSan. Los 100 programas del corpus local dieron la misma salida que CPython. Los resultados se registran en [COBERTURA.md](../tools/pyfront/COBERTURA.md).
+
+P5. `texto` admite `main` en nativo con archivos regulares ASCII y normalización de saltos de línea. La lectura usa bloques de 64 KiB y libera automáticamente el búfer y el descriptor. Las condiciones de apertura o lectura no admitidas se resuelven en CPython, que conserva sus errores. El bucle de palabras evita la lista de `split()`. Las pruebas de este paquete pasaron en Windows con CPython 3.11 a 3.14.
+
+P6 parcial. Se inicializa cada registro en una inserción y se guardan las referencias a otros objetos en 32 bits. A profundidad 16, el último ensayo emparejado dio 57,8 ms de cálculo frente a 37,4 ms de C. Queda reducir las comprobaciones y el coste de arranque. Las medidas de los dos paquetes están en [RESULTADOS.md](../tools/pyfront/RESULTADOS.md).
+
+Validación de P5 y del avance de P6. Pasaron los 49 grupos de Release y las 116 comprobaciones diferenciales del motor con el compilador ASan y UBSan, además de la prueba de caché entre copias. Los 100 programas del corpus volvieron a coincidir con CPython. Los resultados se registran en [COBERTURA.md](../tools/pyfront/COBERTURA.md).
 
 Fallos encontrados y arreglados por el camino: `__builtin_longjmp` devolvía mal XMM6–15 en Windows (ahora `setjmp` de la CRT); los hilos de `subprocess` ponían todo el motor en modo «con hilos»; `a[f()] += 1` evaluaba el índice dos veces; una función retirada invalidaba para siempre a las que dependían de ella.

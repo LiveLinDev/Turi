@@ -1,1 +1,18 @@
-{"args": [4000], "about": "Mandelbrot set, 50 iterations, 8 pixels per step without early exit"}
+{
+  "args": [4000],
+  "about": "Mandelbrot set, 50 iterations, 8 pixels per step without early exit",
+  "c_extremo": {
+    "fuente": "mandelbrot_extremo.c",
+    "entrenamiento": [[769], [1021], [1536]],
+    "raiz": "mandelbrot",
+    "variantes": {
+      "cuatro vectores": [],
+      "escape": ["-DTZ_MANDEL_ESCAPE"],
+      "simetría": ["-DTZ_MANDEL_ESCAPE", "-DTZ_MANDEL_SIMETRIA"],
+      "regiones interiores": ["-DTZ_MANDEL_ESCAPE", "-DTZ_MANDEL_SIMETRIA", "-DTZ_MANDEL_DISCOS"],
+      "regiones y escape mixto": ["-DTZ_MANDEL_ESCAPE", "-DTZ_MANDEL_SIMETRIA", "-DTZ_MANDEL_DISCOS", "-DTZ_MANDEL_CADENCIA"],
+      "franjas certificadas": ["-DTZ_MANDEL_ESCAPE", "-DTZ_MANDEL_SIMETRIA", "-DTZ_MANDEL_DISCOS", "-DTZ_MANDEL_CADENCIA", "-DTZ_MANDEL_REGIONES"],
+      "franjas a 512": ["-DTZ_MANDEL_ESCAPE", "-DTZ_MANDEL_SIMETRIA", "-DTZ_MANDEL_DISCOS", "-DTZ_MANDEL_CADENCIA", "-DTZ_MANDEL_REGIONES", "-DTZ_MANDEL_REGIONES_512"]
+    }
+  }
+}

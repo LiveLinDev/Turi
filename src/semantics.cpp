@@ -8222,8 +8222,25 @@ struct RawPtrVal {
 struct SimdVal {
     Type elemType = Type::Unknown;
     unsigned lanes = 0;
-    std::array<std::uint64_t, 32> raw{};
+    // Los tipos SIMD válidos ocupan como máximo 64 bytes. Empaquetar los
+    // carriles evita que cada Value escalar reserve espacio para 32 enteros.
+    std::array<std::uint64_t, 8> words{};
     bool operator==(const SimdVal&) const = default;
+
+    std::uint64_t lane(unsigned index) const {
+        const unsigned width = simdElemBytes(elemType) * 8;
+        const unsigned offset = index * width;
+        return (words[offset / 64] >> (offset % 64)) & maskForWidth(width);
+    }
+
+    void setLane(unsigned index, std::uint64_t value) {
+        const unsigned width = simdElemBytes(elemType) * 8;
+        const unsigned offset = index * width;
+        const unsigned shift = offset % 64;
+        const std::uint64_t mask = maskForWidth(width);
+        auto& word = words[offset / 64];
+        word = (word & ~(mask << shift)) | ((value & mask) << shift);
+    }
 };
 using AggregatePtr = std::shared_ptr<Aggregate>;
 using ArrayPtr = std::shared_ptr<ArrayBuffer>;
@@ -8962,36 +8979,35 @@ SimdVal evalSimdBinary(std::string_view op, const SimdVal& l, const SimdVal& r) 
     const Type elemT = l.elemType;
     if (elemT == Type::Float) {
         for (unsigned k = 0; k < l.lanes; ++k) {
-            const double a = std::bit_cast<double>(l.raw[k]);
-            const double b = std::bit_cast<double>(r.raw[k]);
+            const double a = std::bit_cast<double>(l.lane(k));
+            const double b = std::bit_cast<double>(r.lane(k));
             double res = 0.0;
             if (op == "+") res = a + b;
             else if (op == "-") res = a - b;
             else if (op == "*") res = a * b;
             else res = a / b;
-            out.raw[k] = std::bit_cast<std::uint64_t>(res);
+            out.setLane(k, std::bit_cast<std::uint64_t>(res));
         }
         return out;
     }
     if (elemT == Type::F32) {
         for (unsigned k = 0; k < l.lanes; ++k) {
-            const float a = std::bit_cast<float>(static_cast<std::uint32_t>(l.raw[k]));
-            const float b = std::bit_cast<float>(static_cast<std::uint32_t>(r.raw[k]));
+            const float a = std::bit_cast<float>(static_cast<std::uint32_t>(l.lane(k)));
+            const float b = std::bit_cast<float>(static_cast<std::uint32_t>(r.lane(k)));
             float res = 0.0f;
             if (op == "+") res = a + b;
             else if (op == "-") res = a - b;
             else if (op == "*") res = a * b;
             else res = a / b;
-            out.raw[k] = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(res));
+            out.setLane(k, std::bit_cast<std::uint32_t>(res));
         }
         return out;
     }
     const unsigned w = Program::intBitWidth(elemT);
-    const std::uint64_t m = maskForWidth(w);
     const bool isSigned = Program::isSignedInt(elemT);
     for (unsigned k = 0; k < l.lanes; ++k) {
-        const std::uint64_t a = l.raw[k] & m;
-        const std::uint64_t b = r.raw[k] & m;
+        const std::uint64_t a = l.lane(k);
+        const std::uint64_t b = r.lane(k);
         std::uint64_t res = 0;
         if (op == "+") res = a + b;
         else if (op == "-") res = a - b;
@@ -9006,7 +9022,7 @@ SimdVal evalSimdBinary(std::string_view op, const SimdVal& l, const SimdVal& r) 
         } else {
             res = a >> static_cast<unsigned>(b & (w - 1u));
         }
-        out.raw[k] = res & m;
+        out.setLane(k, res);
     }
     return out;
 }
@@ -9058,12 +9074,12 @@ Value binary(const Expr& expr, Value lhs, Value rhs) {
             eq = (lsv->elemType == rsv.elemType && lsv->lanes == rsv.lanes);
             for (unsigned k = 0; eq && k < lsv->lanes; ++k) {
                 if (lsv->elemType == Type::Float)
-                    eq = (std::bit_cast<double>(lsv->raw[k]) == std::bit_cast<double>(rsv.raw[k]));
+                    eq = (std::bit_cast<double>(lsv->lane(k)) == std::bit_cast<double>(rsv.lane(k)));
                 else if (lsv->elemType == Type::F32)
-                    eq = (std::bit_cast<float>(static_cast<std::uint32_t>(lsv->raw[k])) ==
-                          std::bit_cast<float>(static_cast<std::uint32_t>(rsv.raw[k])));
+                    eq = (std::bit_cast<float>(static_cast<std::uint32_t>(lsv->lane(k))) ==
+                          std::bit_cast<float>(static_cast<std::uint32_t>(rsv.lane(k))));
                 else
-                    eq = (lsv->raw[k] == rsv.raw[k]);
+                    eq = (lsv->lane(k) == rsv.lane(k));
             }
         } else {
             eq = (lhs == rhs);
@@ -9800,7 +9816,7 @@ struct Interpreter {
                     const Type elemT = programRef.simdElem(t);
                     const std::size_t elemSz = vmElemSize(elemT);
                     for (unsigned k = 0; k < sv.lanes; ++k) {
-                        packValueToBytes(elemT, decodeSimdLane(elemT, sv.raw[k]), dst + k * elemSz);
+                        packValueToBytes(elemT, decodeSimdLane(elemT, sv.lane(k)), dst + k * elemSz);
                     }
                     return;
                 }
@@ -9920,7 +9936,7 @@ struct Interpreter {
                     sv.lanes = programRef.simdLanes(t);
                     const std::size_t elemSz = vmElemSize(sv.elemType);
                     for (unsigned k = 0; k < sv.lanes; ++k) {
-                        sv.raw[k] = encodeSimdLane(sv.elemType, unpackValueFromBytes(sv.elemType, src + k * elemSz));
+                        sv.setLane(k, encodeSimdLane(sv.elemType, unpackValueFromBytes(sv.elemType, src + k * elemSz)));
                     }
                     return Value{sv};
                 }
@@ -12115,7 +12131,7 @@ struct Interpreter {
                         const unsigned lanes = programRef.simdLanes(vt);
                         const std::uint64_t bits = encodeSimdLane(elemT, pop());
                         SimdVal sv{elemT, lanes, {}};
-                        for (unsigned k = 0; k < lanes; ++k) sv.raw[k] = bits;
+                        for (unsigned k = 0; k < lanes; ++k) sv.setLane(k, bits);
                         operands.emplace_back(sv);
                     } else if (fnName == "simdLanes") {
                         const unsigned lanes = programRef.simdLanes(i.expr->typeArgs.at(0));
@@ -12125,14 +12141,14 @@ struct Interpreter {
                         const auto sv = std::get<SimdVal>(pop());
                         if (idx < 0 || static_cast<unsigned>(idx) >= sv.lanes)
                             fail("R_BOUNDS", "Índice de carril fuera de límites en simdGet", i.span, "simdGet(v, 0)");
-                        operands.push_back(decodeSimdLane(sv.elemType, sv.raw[static_cast<unsigned>(idx)]));
+                        operands.push_back(decodeSimdLane(sv.elemType, sv.lane(static_cast<unsigned>(idx))));
                     } else if (fnName == "simdSet") {
                         const Value val = pop();
                         const Integer idx = std::get<Integer>(pop());
                         auto sv = std::get<SimdVal>(pop());
                         if (idx < 0 || static_cast<unsigned>(idx) >= sv.lanes)
                             fail("R_BOUNDS", "Índice de carril fuera de límites en simdSet", i.span, "simdSet(v, 0, x)");
-                        sv.raw[static_cast<unsigned>(idx)] = encodeSimdLane(sv.elemType, val);
+                        sv.setLane(static_cast<unsigned>(idx), encodeSimdLane(sv.elemType, val));
                         operands.emplace_back(sv);
                     } else if (fnName == "simdFromArray") {
                         const Integer off = std::get<Integer>(pop());
@@ -12145,7 +12161,7 @@ struct Interpreter {
                             fail("R_BOUNDS", "Rango fuera de límites en simdFromArray", i.span, "simdFromArray<Simd<f32, 4>>(arr, 0)");
                         SimdVal sv{elemT, lanes, {}};
                         for (unsigned k = 0; k < lanes; ++k) {
-                            sv.raw[k] = encodeSimdLane(elemT, arr->items[static_cast<std::size_t>(off) + k]);
+                            sv.setLane(k, encodeSimdLane(elemT, arr->items[static_cast<std::size_t>(off) + k]));
                         }
                         operands.emplace_back(sv);
                     } else if (fnName == "simdToArray") {
@@ -12157,7 +12173,7 @@ struct Interpreter {
                             if (off < 0 || static_cast<std::size_t>(off) > n || n - static_cast<std::size_t>(off) < sv.lanes)
                                 fail("R_BOUNDS", "Rango fuera de límites en simdToArray", i.span, "simdToArray(v, mut arr, 0)");
                             for (unsigned k = 0; k < sv.lanes; ++k) {
-                                arr->items[static_cast<std::size_t>(off) + k] = decodeSimdLane(sv.elemType, sv.raw[k]);
+                                arr->items[static_cast<std::size_t>(off) + k] = decodeSimdLane(sv.elemType, sv.lane(k));
                             }
                         });
                         operands.emplace_back(Value{});
@@ -12194,15 +12210,15 @@ struct Interpreter {
                         SimdVal out{a.elemType, a.lanes, {}};
                         for (unsigned k = 0; k < a.lanes; ++k) {
                             if (a.elemType == Type::Float) {
-                                const double da = std::bit_cast<double>(a.raw[k]);
-                                const double db = std::bit_cast<double>(b.raw[k]);
-                                const double dc = std::bit_cast<double>(c.raw[k]);
-                                out.raw[k] = std::bit_cast<std::uint64_t>(std::fma(da, db, dc));
+                                const double da = std::bit_cast<double>(a.lane(k));
+                                const double db = std::bit_cast<double>(b.lane(k));
+                                const double dc = std::bit_cast<double>(c.lane(k));
+                                out.setLane(k, std::bit_cast<std::uint64_t>(std::fma(da, db, dc)));
                             } else {
-                                const float fa = std::bit_cast<float>(static_cast<std::uint32_t>(a.raw[k]));
-                                const float fb = std::bit_cast<float>(static_cast<std::uint32_t>(b.raw[k]));
-                                const float fc = std::bit_cast<float>(static_cast<std::uint32_t>(c.raw[k]));
-                                out.raw[k] = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(std::fma(fa, fb, fc)));
+                                const float fa = std::bit_cast<float>(static_cast<std::uint32_t>(a.lane(k)));
+                                const float fb = std::bit_cast<float>(static_cast<std::uint32_t>(b.lane(k)));
+                                const float fc = std::bit_cast<float>(static_cast<std::uint32_t>(c.lane(k)));
+                                out.setLane(k, std::bit_cast<std::uint32_t>(std::fma(fa, fb, fc)));
                             }
                         }
                         operands.emplace_back(out);
@@ -12213,26 +12229,28 @@ struct Interpreter {
                         SimdVal out{a.elemType, a.lanes, {}};
                         if (a.elemType == Type::Float) {
                             for (unsigned k = 0; k < a.lanes; ++k) {
-                                const double da = std::bit_cast<double>(a.raw[k]);
-                                const double db = std::bit_cast<double>(b.raw[k]);
-                                out.raw[k] = std::bit_cast<std::uint64_t>((isMin ? (da < db) : (da > db)) ? da : db);
+                                const double da = std::bit_cast<double>(a.lane(k));
+                                const double db = std::bit_cast<double>(b.lane(k));
+                                out.setLane(k, std::bit_cast<std::uint64_t>((isMin ? (da < db) : (da > db)) ? da : db));
                             }
                         } else if (a.elemType == Type::F32) {
                             for (unsigned k = 0; k < a.lanes; ++k) {
-                                const float fa = std::bit_cast<float>(static_cast<std::uint32_t>(a.raw[k]));
-                                const float fb = std::bit_cast<float>(static_cast<std::uint32_t>(b.raw[k]));
-                                out.raw[k] = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>((isMin ? (fa < fb) : (fa > fb)) ? fa : fb));
+                                const float fa = std::bit_cast<float>(static_cast<std::uint32_t>(a.lane(k)));
+                                const float fb = std::bit_cast<float>(static_cast<std::uint32_t>(b.lane(k)));
+                                out.setLane(k, std::bit_cast<std::uint32_t>((isMin ? (fa < fb) : (fa > fb)) ? fa : fb));
                             }
                         } else if (Program::isSignedInt(a.elemType)) {
                             const unsigned w = Program::intBitWidth(a.elemType);
                             for (unsigned k = 0; k < a.lanes; ++k) {
-                                const Integer sa = signExtendWidth(a.raw[k], w);
-                                const Integer sb = signExtendWidth(b.raw[k], w);
-                                out.raw[k] = (isMin ? (sa < sb) : (sa > sb)) ? a.raw[k] : b.raw[k];
+                                const auto av = a.lane(k), bv = b.lane(k);
+                                const Integer sa = signExtendWidth(av, w);
+                                const Integer sb = signExtendWidth(bv, w);
+                                out.setLane(k, (isMin ? (sa < sb) : (sa > sb)) ? av : bv);
                             }
                         } else {
                             for (unsigned k = 0; k < a.lanes; ++k) {
-                                out.raw[k] = (isMin ? (a.raw[k] < b.raw[k]) : (a.raw[k] > b.raw[k])) ? a.raw[k] : b.raw[k];
+                                const auto av = a.lane(k), bv = b.lane(k);
+                                out.setLane(k, (isMin ? (av < bv) : (av > bv)) ? av : bv);
                             }
                         }
                         operands.emplace_back(out);
@@ -12241,16 +12259,15 @@ struct Interpreter {
                         SimdVal out{a.elemType, a.lanes, {}};
                         if (a.elemType == Type::Float) {
                             for (unsigned k = 0; k < a.lanes; ++k)
-                                out.raw[k] = std::bit_cast<std::uint64_t>(std::fabs(std::bit_cast<double>(a.raw[k])));
+                                out.setLane(k, std::bit_cast<std::uint64_t>(std::fabs(std::bit_cast<double>(a.lane(k)))));
                         } else if (a.elemType == Type::F32) {
                             for (unsigned k = 0; k < a.lanes; ++k)
-                                out.raw[k] = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(std::fabs(std::bit_cast<float>(static_cast<std::uint32_t>(a.raw[k])))));
+                                out.setLane(k, std::bit_cast<std::uint32_t>(std::fabs(std::bit_cast<float>(static_cast<std::uint32_t>(a.lane(k))))));
                         } else {
                             const unsigned w = Program::intBitWidth(a.elemType);
-                            const std::uint64_t m = maskForWidth(w);
                             for (unsigned k = 0; k < a.lanes; ++k) {
-                                const Integer sa = signExtendWidth(a.raw[k], w);
-                                out.raw[k] = (sa < 0) ? ((0ULL - a.raw[k]) & m) : (a.raw[k] & m);
+                                const auto value = a.lane(k);
+                                out.setLane(k, signExtendWidth(value, w) < 0 ? 0ULL - value : value);
                             }
                         }
                         operands.emplace_back(out);
@@ -12259,56 +12276,58 @@ struct Interpreter {
                         SimdVal out{a.elemType, a.lanes, {}};
                         for (unsigned k = 0; k < a.lanes; ++k) {
                             if (a.elemType == Type::Float)
-                                out.raw[k] = std::bit_cast<std::uint64_t>(std::sqrt(std::bit_cast<double>(a.raw[k])));
+                                out.setLane(k, std::bit_cast<std::uint64_t>(std::sqrt(std::bit_cast<double>(a.lane(k)))));
                             else
-                                out.raw[k] = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(std::sqrt(std::bit_cast<float>(static_cast<std::uint32_t>(a.raw[k])))));
+                                out.setLane(k, std::bit_cast<std::uint32_t>(std::sqrt(std::bit_cast<float>(static_cast<std::uint32_t>(a.lane(k))))));
                         }
                         operands.emplace_back(out);
                     } else if (fnName == "simdSum") {
                         const auto a = std::get<SimdVal>(pop());
                         if (a.elemType == Type::Float) {
                             double acc = -0.0;
-                            for (unsigned k = 0; k < a.lanes; ++k) acc += std::bit_cast<double>(a.raw[k]);
+                            for (unsigned k = 0; k < a.lanes; ++k) acc += std::bit_cast<double>(a.lane(k));
                             operands.emplace_back(acc);
                         } else if (a.elemType == Type::F32) {
                             float acc = -0.0f;
-                            for (unsigned k = 0; k < a.lanes; ++k) acc += std::bit_cast<float>(static_cast<std::uint32_t>(a.raw[k]));
+                            for (unsigned k = 0; k < a.lanes; ++k) acc += std::bit_cast<float>(static_cast<std::uint32_t>(a.lane(k)));
                             operands.emplace_back(acc);
                         } else {
                             std::uint64_t acc = 0;
-                            for (unsigned k = 0; k < a.lanes; ++k) acc += a.raw[k];
+                            for (unsigned k = 0; k < a.lanes; ++k) acc += a.lane(k);
                             operands.push_back(decodeSimdLane(a.elemType, acc));
                         }
                     } else if (fnName == "simdReduceMin" || fnName == "simdReduceMax") {
                         const bool isMin = (fnName == "simdReduceMin");
                         const auto a = std::get<SimdVal>(pop());
                         if (a.elemType == Type::Float) {
-                            double acc = std::bit_cast<double>(a.raw[0]);
+                            double acc = std::bit_cast<double>(a.lane(0));
                             for (unsigned k = 1; k < a.lanes; ++k) {
-                                const double d = std::bit_cast<double>(a.raw[k]);
+                                const double d = std::bit_cast<double>(a.lane(k));
                                 if (isMin ? (d < acc) : (d > acc)) acc = d;
                             }
                             operands.emplace_back(acc);
                         } else if (a.elemType == Type::F32) {
-                            float acc = std::bit_cast<float>(static_cast<std::uint32_t>(a.raw[0]));
+                            float acc = std::bit_cast<float>(static_cast<std::uint32_t>(a.lane(0)));
                             for (unsigned k = 1; k < a.lanes; ++k) {
-                                const float f = std::bit_cast<float>(static_cast<std::uint32_t>(a.raw[k]));
+                                const float f = std::bit_cast<float>(static_cast<std::uint32_t>(a.lane(k)));
                                 if (isMin ? (f < acc) : (f > acc)) acc = f;
                             }
                             operands.emplace_back(acc);
                         } else if (Program::isSignedInt(a.elemType)) {
                             const unsigned w = Program::intBitWidth(a.elemType);
-                            std::uint64_t best = a.raw[0];
+                            std::uint64_t best = a.lane(0);
                             Integer bestS = signExtendWidth(best, w);
                             for (unsigned k = 1; k < a.lanes; ++k) {
-                                const Integer curS = signExtendWidth(a.raw[k], w);
-                                if (isMin ? (curS < bestS) : (curS > bestS)) { bestS = curS; best = a.raw[k]; }
+                                const auto value = a.lane(k);
+                                const Integer curS = signExtendWidth(value, w);
+                                if (isMin ? (curS < bestS) : (curS > bestS)) { bestS = curS; best = value; }
                             }
                             operands.push_back(decodeSimdLane(a.elemType, best));
                         } else {
-                            std::uint64_t best = a.raw[0];
+                            std::uint64_t best = a.lane(0);
                             for (unsigned k = 1; k < a.lanes; ++k) {
-                                if (isMin ? (a.raw[k] < best) : (a.raw[k] > best)) best = a.raw[k];
+                                const auto value = a.lane(k);
+                                if (isMin ? (value < best) : (value > best)) best = value;
                             }
                             operands.push_back(decodeSimdLane(a.elemType, best));
                         }
@@ -12322,36 +12341,36 @@ struct Interpreter {
                         for (unsigned k = 0; k < a.lanes; ++k) {
                             bool hit = false;
                             if (a.elemType == Type::Float) {
-                                const double da = std::bit_cast<double>(a.raw[k]);
-                                const double db = std::bit_cast<double>(b.raw[k]);
+                                const double da = std::bit_cast<double>(a.lane(k));
+                                const double db = std::bit_cast<double>(b.lane(k));
                                 hit = (fnName == "simdCmpEq") ? (da == db)
                                     : (fnName == "simdCmpLt") ? (da < db)
                                     : (fnName == "simdCmpLe") ? (da <= db)
                                     : (fnName == "simdCmpGt") ? (da > db) : (da >= db);
                             } else if (a.elemType == Type::F32) {
-                                const float fa = std::bit_cast<float>(static_cast<std::uint32_t>(a.raw[k]));
-                                const float fb = std::bit_cast<float>(static_cast<std::uint32_t>(b.raw[k]));
+                                const float fa = std::bit_cast<float>(static_cast<std::uint32_t>(a.lane(k)));
+                                const float fb = std::bit_cast<float>(static_cast<std::uint32_t>(b.lane(k)));
                                 hit = (fnName == "simdCmpEq") ? (fa == fb)
                                     : (fnName == "simdCmpLt") ? (fa < fb)
                                     : (fnName == "simdCmpLe") ? (fa <= fb)
                                     : (fnName == "simdCmpGt") ? (fa > fb) : (fa >= fb);
                             } else if (Program::isSignedInt(a.elemType)) {
                                 const unsigned w = Program::intBitWidth(a.elemType);
-                                const Integer sa = signExtendWidth(a.raw[k], w);
-                                const Integer sb = signExtendWidth(b.raw[k], w);
+                                const Integer sa = signExtendWidth(a.lane(k), w);
+                                const Integer sb = signExtendWidth(b.lane(k), w);
                                 hit = (fnName == "simdCmpEq") ? (sa == sb)
                                     : (fnName == "simdCmpLt") ? (sa < sb)
                                     : (fnName == "simdCmpLe") ? (sa <= sb)
                                     : (fnName == "simdCmpGt") ? (sa > sb) : (sa >= sb);
                             } else {
-                                const std::uint64_t ua = a.raw[k];
-                                const std::uint64_t ub = b.raw[k];
+                                const std::uint64_t ua = a.lane(k);
+                                const std::uint64_t ub = b.lane(k);
                                 hit = (fnName == "simdCmpEq") ? (ua == ub)
                                     : (fnName == "simdCmpLt") ? (ua < ub)
                                     : (fnName == "simdCmpLe") ? (ua <= ub)
                                     : (fnName == "simdCmpGt") ? (ua > ub) : (ua >= ub);
                             }
-                            out.raw[k] = hit ? allOnes : 0ULL;
+                            out.setLane(k, hit ? allOnes : 0ULL);
                         }
                         operands.emplace_back(out);
                     } else if (fnName == "simdSelect") {
@@ -12360,7 +12379,7 @@ struct Interpreter {
                         const auto mask = std::get<SimdVal>(pop());
                         SimdVal out{a.elemType, a.lanes, {}};
                         for (unsigned k = 0; k < a.lanes; ++k) {
-                            out.raw[k] = (mask.raw[k] != 0) ? a.raw[k] : b.raw[k];
+                            out.setLane(k, (mask.lane(k) != 0) ? a.lane(k) : b.lane(k));
                         }
                         operands.emplace_back(out);
                     } else if (fnName == "clz" || fnName == "ctz" || fnName == "popcnt" || fnName == "bswap") {
@@ -12775,9 +12794,7 @@ struct Interpreter {
                     else if (i.expr->text == "~") {
                         auto v = pop();
                         if (auto* sv = std::get_if<SimdVal>(&v)) {
-                            const unsigned w = Program::intBitWidth(sv->elemType);
-                            const std::uint64_t m = maskForWidth(w);
-                            for (unsigned k = 0; k < sv->lanes; ++k) sv->raw[k] = (~sv->raw[k]) & m;
+                            for (unsigned k = 0; k < sv->lanes; ++k) sv->setLane(k, ~sv->lane(k));
                             operands.emplace_back(*sv);
                         } else if (auto* ei = std::get_if<ExactInt>(&v))
                             operands.push_back(makeIntValue(ei->type, ~ei->bits));
@@ -12788,15 +12805,13 @@ struct Interpreter {
                         if (auto* sv = std::get_if<SimdVal>(&v)) {
                             if (sv->elemType == Type::Float) {
                                 for (unsigned k = 0; k < sv->lanes; ++k)
-                                    sv->raw[k] = std::bit_cast<std::uint64_t>(-std::bit_cast<double>(sv->raw[k]));
+                                    sv->setLane(k, std::bit_cast<std::uint64_t>(-std::bit_cast<double>(sv->lane(k))));
                             } else if (sv->elemType == Type::F32) {
                                 for (unsigned k = 0; k < sv->lanes; ++k)
-                                    sv->raw[k] = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(-std::bit_cast<float>(static_cast<std::uint32_t>(sv->raw[k]))));
+                                    sv->setLane(k, std::bit_cast<std::uint32_t>(-std::bit_cast<float>(static_cast<std::uint32_t>(sv->lane(k)))));
                             } else {
-                                const unsigned w = Program::intBitWidth(sv->elemType);
-                                const std::uint64_t m = maskForWidth(w);
                                 for (unsigned k = 0; k < sv->lanes; ++k)
-                                    sv->raw[k] = (0ULL - sv->raw[k]) & m;
+                                    sv->setLane(k, 0ULL - sv->lane(k));
                             }
                             operands.emplace_back(*sv);
                         } else if (auto* d = std::get_if<double>(&v)) operands.emplace_back(-(*d));

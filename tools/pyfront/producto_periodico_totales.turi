@@ -1,0 +1,71 @@
+fn tzPeriodicTotals(n: int, width: int, aRow: int, aCol: int, aMod: int, aSeed: int,
+                    bRow: int, bCol: int, bMod: int, bSeed: int) -> (float, float) {
+    let period = min(width, n)
+    let stride = ((period + 7) / 8) * 8
+    let cells = period * stride
+    var a = repeat(0.0, cells)
+    var b = repeat(0.0, cells)
+    var c = repeat(0.0, cells)
+    let aDivisor = float(aMod)
+    let bDivisor = float(bMod)
+    for i in 0..period {
+        for j in 0..period {
+            let at = i * stride + j
+            a[at] = float((i * aRow + j * aCol + aSeed) % aMod) / aDivisor
+            b[at] = float((i * bRow + j * bCol + bSeed) % bMod) / bDivisor
+        }
+    }
+    var row = 0
+    // Las teselas se acotan a period filas y stride columnas. En el eje
+    // interior cada tramo recorre a lo sumo period términos desde cero.
+    while row + 4 <= period {
+        var col = 0
+        while col + 32 <= stride {
+            trusted { raw { tzTileLarge(a, b, mut c, row, col, n, period, stride) } }
+            col = col + 32
+        }
+        while col < stride {
+            trusted { raw { tzTileTail(a, b, mut c, row, col, n, period, stride) } }
+            col = col + 8
+        }
+        row = row + 4
+    }
+    while row < period {
+        for column in 0..(stride / 8) {
+            trusted { raw { tzTileSingle(a, b, mut c, row, column * 8, n, period, stride) } }
+        }
+        row = row + 1
+    }
+    // Restaurar el orden original conserva el resultado de sum() de esta versión de Python.
+    let cycles = n / period
+    let rest = n - cycles * period
+    var sums = repeat(0.0, period)
+    var unique = repeat(0.0, n)
+    for i in 0..period {
+        let at = i * stride
+        for cycle in 0..cycles {
+            let start = cycle * period
+            for j in 0..period {
+                unique[start + j] = c[at + j]
+            }
+        }
+        let start = cycles * period
+        for j in 0..rest {
+            unique[start + j] = c[at + j]
+        }
+        sums[i] = SUM(unique)
+    }
+    var trace = 0.0
+    var total = 0.0
+    for cycle in 0..cycles {
+        for k in 0..period {
+            trace = trace + c[k * stride + k]
+            total = total + sums[k]
+        }
+    }
+    for k in 0..rest {
+        trace = trace + c[k * stride + k]
+        total = total + sums[k]
+    }
+    return (trace, total)
+}

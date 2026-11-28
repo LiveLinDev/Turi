@@ -12,7 +12,10 @@ traducir con garantías se rechaza con un mensaje (`Unsupported`), nunca se trad
 Uso:  python tools/pyfront/py2turi.py archivo.py > archivo.turi
 """
 import ast
+from copy import copy
+from itertools import combinations, permutations, product
 import json
+from pathlib import Path
 import sys
 
 INT, FLOAT, BOOL, STR = "int", "float", "bool", "str"
@@ -102,6 +105,16 @@ STORERS = {"append", "extend", "insert", "add", "update", "setdefault", "appendl
             "heappush", "heapreplace", "heappushpop", "heapify", "insort", "insort_left", "insort_right"}
 
 
+def packed_key_arity(t):
+    if isinstance(t, tuple) and t[0] == "tuple" and t[1] in ((INT, INT), (INT, INT, INT)):
+        return len(t[1])
+    return 0
+
+
+def hash_key_type(t):
+    return t in (INT, STR, BOOL) or packed_key_arity(t) > 0
+
+
 def turi_type(t):
     if t in (INT, FLOAT, BOOL, STR):
         return t
@@ -113,12 +126,19 @@ def turi_type(t):
         if t[0] == "list" and t[1] is not None:
             return "[" + turi_type(t[1]) + "]"
         if t[0] == "dict" and t[1] is not None and t[2] is not None:
-            return "Map<" + turi_type(t[1]) + ", " + turi_type(t[2]) + ">"
+            key = INT if packed_key_arity(t[1]) else t[1]
+            return "Map<" + turi_type(key) + ", " + turi_type(t[2]) + ">"
         if t[0] == "set" and t[1] is not None:
-            return "Set<" + turi_type(t[1]) + ">"
+            key = INT if packed_key_arity(t[1]) else t[1]
+            return "Set<" + turi_type(key) + ">"
         if t[0] == "tuple":
             return "(" + ", ".join(turi_type(x) for x in t[1]) + ")"
     raise Unsupported(f"no se pudo deducir un tipo ({t!r})")
+
+
+def pool_field_value(text, t):
+    # Un índice de un almacén cabe en 30 bits. -1 representa None.
+    return f"i32({text})" if is_obj(t) else text
 
 
 def zero_of(t):
@@ -168,6 +188,82 @@ def annotation_type(node):
 
 
 HELPERS = {
+    "pyPackKey2": """fn pyPackKey2(key: (int, int)) -> int {
+    assert key.0 >= -2147483648 && key.0 < 2147483648
+    assert key.1 >= -2147483648 && key.1 < 2147483648
+    return key.0 * 4294967296 + (key.1 & 4294967295)
+}""",
+    "pyUnpackKey2": """fn pyUnpackKey2(packed: int) -> (int, int) {
+    let low = packed & 4294967295
+    let second = if low < 2147483648 { low } else { low - 4294967296 }
+    return ((packed - low) / 4294967296, second)
+}""",
+    "pyPackKey3": """fn pyPackKey3(key: (int, int, int)) -> int {
+    assert key.0 >= -1048576 && key.0 < 1048576
+    assert key.1 >= -1048576 && key.1 < 1048576
+    assert key.2 >= -1048576 && key.2 < 1048576
+    return key.0 * 4398046511104 + (key.1 & 2097151) * 2097152 + (key.2 & 2097151)
+}""",
+    "pyUnpackKey3": """fn pyUnpackKey3(packed: int) -> (int, int, int) {
+    let low = packed & 4398046511103
+    let middle = low / 2097152
+    let tail = low % 2097152
+    let second = if middle < 1048576 { middle } else { middle - 2097152 }
+    let third = if tail < 1048576 { tail } else { tail - 2097152 }
+    return ((packed - low) / 4398046511104, second, third)
+}""",
+    "pySetPacked": """fn pySetPacked<T>(items: [T], key: fn(T) -> int) -> Set<int> {
+    var result: Set<int> = setNew()
+    for item in items {
+        result.add(key(item))
+    }
+    return result
+}""",
+    "pyHeapDown": """fn pyHeapDown<T>(heap: mut [T], start: int, var pos: int, less: fn(T, T) -> bool) {
+    let item = heap[pos]
+    while pos > start {
+        let parentPos = (pos - 1) / 2
+        let parent = heap[parentPos]
+        if !less(item, parent) { break }
+        heap[pos] = parent
+        pos = parentPos
+    }
+    heap[pos] = item
+}""",
+    "pyHeapUp": """fn pyHeapUp<T>(heap: mut [T], start: int, less: fn(T, T) -> bool) {
+    let n = len(heap)
+    let item = heap[start]
+    var pos = start
+    var child = 2 * pos + 1
+    while child < n {
+        let right = child + 1
+        if right < n && !less(heap[child], heap[right]) { child = right }
+        heap[pos] = heap[child]
+        pos = child
+        child = 2 * pos + 1
+    }
+    heap[pos] = item
+    pyHeapDown(mut heap, start, pos, less)
+}""",
+    "pyHeapPush": """fn pyHeapPush<T>(heap: mut [T], item: T, less: fn(T, T) -> bool) {
+    heap.push(item)
+    pyHeapDown(mut heap, 0, len(heap) - 1, less)
+}""",
+    "pyHeapPop": """fn pyHeapPop<T>(heap: mut [T], less: fn(T, T) -> bool) -> T {
+    let last = heap.pop()
+    if len(heap) == 0 { return last }
+    let first = heap[0]
+    heap[0] = last
+    pyHeapUp(mut heap, 0, less)
+    return first
+}""",
+    "pyHeapify": """fn pyHeapify<T>(heap: mut [T], less: fn(T, T) -> bool) {
+    var i = len(heap) / 2
+    while i > 0 {
+        i -= 1
+        pyHeapUp(mut heap, i, less)
+    }
+}""",
     "pyMod": """fn pyMod(a: int, b: int) -> int {
     let r = a % b
     if r != 0 && ((r < 0) != (b < 0)) {
@@ -229,6 +325,63 @@ HELPERS = {
         out.push(a + i * step)
     }
     return out
+}""",
+    "pyDictItems": """fn pyDictItems<K, V>(d: Map<K, V>) -> [(K, V)] {
+    var result: [(K, V)] = []
+    reserve(mut result, len(d))
+    for k in d.keys() {
+        match d.get(k) {
+            Some(v) => result.push((k, v))
+            None => assert false
+        }
+    }
+    return result
+}""",
+    "pySortKeyFloat": """fn pySortKeyFloat(k: float) -> float {
+    assert k == k
+    return k
+}""",
+    "pySortedBy": """fn pySortedBy<T, K>(seq: [T], makeKey: fn(T) -> K, less: fn(K, K) -> bool) -> [T] {
+    let n = len(seq)
+    var keys: [K] = []
+    reserve(mut keys, n)
+    var order = repeat(0, n)
+    var step = repeat(0, n)
+    for i in 0..n {
+        keys.push(makeKey(seq[i]))
+        order[i] = i
+    }
+    var width = 1
+    while width < n {
+        var lo = 0
+        while lo < n {
+            let mid = min(lo + width, n)
+            let hi = min(mid + width, n)
+            var left = lo
+            var right = mid
+            for dst in lo..hi {
+                // Los empates conservan el orden anterior, también al ordenar al revés.
+                if left == mid || (right < hi && less(keys[order[right]], keys[order[left]])) {
+                    step[dst] = order[right]
+                    right += 1
+                } else {
+                    step[dst] = order[left]
+                    left += 1
+                }
+            }
+            lo = hi
+        }
+        let old = order
+        order = step
+        step = old
+        width *= 2
+    }
+    var result: [T] = []
+    reserve(mut result, n)
+    for i in order {
+        result.push(seq[i])
+    }
+    return result
 }""",
     "pySortedInt": """fn pySortedInt(a: [int]) -> [int] {
     var out = a
@@ -473,6 +626,77 @@ HELPERS["pyFound"] = """fn pyFound(i: int) -> int {
 HELPERS["pySplit"] = """fn pySplit(s: str, sep: str) -> [str] {
     assert sep.len() > 0
     return s.split(sep)
+}"""
+HELPERS["pySpaceByte"] = """fn pySpaceByte(ch: int) -> bool {
+    return (ch >= 9 && ch <= 13) || (ch >= 28 && ch <= 32)
+}"""
+HELPERS["pyTrimSet"] = """fn pyHasChar(chars: str, code: int) -> bool {
+    for i in 0..chars.len() {
+        if chars[i] == code { return true }
+    }
+    return false
+}
+
+fn pyTrimSet(s: str, chars: str, left: bool, right: bool) -> str {
+    var lo = 0
+    var hi = s.len()
+    while left && lo < hi && pyHasChar(chars, s[lo]) {
+        lo += 1
+    }
+    while right && lo < hi && pyHasChar(chars, s[hi - 1]) {
+        hi -= 1
+    }
+    return s[lo..hi]
+}"""
+HELPERS["pyTrimMask"] = """fn pyInCharMask(code: int, low: int, high: int) -> bool {
+    if code >= 128 { return false }
+    let mask = if code < 64 { low } else { high }
+    return ((mask >> (code & 63)) & 1) != 0
+}
+
+fn pyTrimMask(s: str, low: int, high: int, left: bool, right: bool) -> str {
+    let n = s.len()
+    var lo = 0
+    var hi = n
+    while left && lo < hi && pyInCharMask(s[lo], low, high) {
+        lo += 1
+    }
+    while right && lo < hi && pyInCharMask(s[hi - 1], low, high) {
+        hi -= 1
+    }
+    if lo == 0 && hi == n { return s }
+    return s[lo..hi]
+}"""
+HELPERS["pyReadAsciiFile"] = """extern "C" {
+    fn tzx_file_path(n: int) -> int
+    fn tzx_file_open(n: int) -> int
+    fn tzx_file_chunk(handle: int) -> int
+    fn tzx_file_len(handle: int) -> int
+    fn tzx_file_close(handle: int) -> int
+}
+
+trusted fn pyOpenAsciiFile(path: str) -> int {
+    let pathAddr = tzx_file_path(path.len())
+    assert pathAddr != 0
+    let p = mutPtrFromAddr<u8>(u64(pathAddr))
+    for i in 0..path.len() {
+        let ch = path[i]
+        assert ch > 0 && ch < 128
+        ptrWrite(ptrAdd(p, i), u8(ch))
+    }
+    let handle = tzx_file_open(path.len())
+    assert handle != 0
+    return handle
+}
+
+trusted fn pyAsciiFileChunk(handle: int) -> str {
+    let data = tzx_file_chunk(handle)
+    assert data != 0
+    return strFromPtr(ptrFromAddr<u8>(u64(data)), tzx_file_len(handle))
+}
+
+trusted fn pyCloseAsciiFile(handle: int) {
+    assert tzx_file_close(handle) != 0
 }"""
 HELPERS["pyReplace"] = """fn pyReplace(s: str, a: str, b: str) -> str {
     assert a.len() > 0
@@ -737,13 +961,22 @@ HELPERS["pyShuffle"] = """fn pyShuffle<T>(h: int, x: mut [T]) {
         i -= 1
     }
 }"""
-HELPER_DEPS = {"pyReprF": ["tzxOut"], "pyRnd": ["tzxRnd"], "pyRndBelow": ["tzxRnd"], "pyRndBits": ["tzxRnd"],
+HELPER_DEPS = {"pyHeapUp": ["pyHeapDown"], "pyHeapPush": ["pyHeapDown"],
+               "pyHeapPop": ["pyHeapUp"], "pyHeapify": ["pyHeapUp"],
+               "pyReprF": ["tzxOut"], "pyRnd": ["tzxRnd"], "pyRndBelow": ["tzxRnd"], "pyRndBits": ["tzxRnd"],
                "pyRndUniform": ["tzxRnd"], "pyRndSeed": ["tzxRnd"], "pyRandrange": ["pyRndBelow", "pyFloorDiv"],
                "pyShuffle": ["pyRndBelow"], "pyChoice": ["pyRndBelow"], "pyChoiceS": ["pyRndBelow"], "pyFmtI": ["tzxOut"], "pyFmtF": ["tzxOut"], "pyOutI": ["tzxOut"],
                "pyOutF": ["tzxOut"]}
 HELPER_DEPS.update({"pySortedFloatExact": ["pySortable"], "pyHi": ["pyIdx"], "pyRange": ["pyRangeLen"], "pyPowMod": ["pyMod"],
                "pySliceStr": ["pyHi"], "pySlice": ["pyHi"], "pyGet": ["pyAt"], "pyCharAt": ["pyAt"],
                "pyBin": ["pyBinDigits"], "pyHex": ["pyHexDigits"]})
+HELPERS["pyWideSimd"] = """extern "C" {
+    fn tzx_wide_simd() -> int
+}
+
+trusted fn pyWideSimd() -> bool {
+    return tzx_wide_simd() != 0
+}"""
 OPEN_END = "4611686018427387904"
 SPEC = None  # expresión regular de la mini-lengua de formato (se compila al primer uso)
 
@@ -767,6 +1000,79 @@ def type_sig(t):
     if isinstance(t, tuple) and t[0] == "tuple":
         return "T" + str(len(t[1])) + "".join(type_sig(x) for x in t[1])
     raise Unsupported("convertir a texto un valor de este tipo")
+
+
+def queens_tail_masks(rows):
+    orders = list(permutations(range(rows)))
+    masks = [sum(1 << p for p, order in enumerate(orders) if available & (1 << order.index(col)))
+             for col in range(rows) for available in range(1 << rows)]
+    pairs = list(combinations(range(rows), 2))
+    for gaps in product(range(1, rows + 1), repeat=rows - 1):
+        cols = [0]
+        for distance in gaps:
+            cols.append(cols[-1] + distance)
+        masks.append(sum(1 << p for p, order in enumerate(orders)
+                         if all(abs(cols[order[i]] - cols[order[j]]) != j - i
+                                for i, j in pairs)))
+    return masks
+
+
+def queens_tail_source():
+    """Una máscara por filas disponibles y otra por distancias entre columnas."""
+    masks = queens_tail_masks(4)
+    for mask in queens_tail_masks(5):
+        masks.extend((mask & ((1 << 64) - 1), mask >> 64))
+    rows = [", ".join(f"u64(0x{mask:x})" for mask in masks[first:first + 8]) for first in range(0, len(masks), 8)]
+    template = Path(__file__).with_name("reinas.turi").read_text(encoding="utf-8")
+    return template.replace("TZ_QUEENS_TAIL_TABLE", ",\n        ".join(rows))
+
+
+def queens_parameter(function, occupied):
+    """Devuelve el lado si toda la búsqueda es local y solo devuelve su cuenta."""
+    if len(function.args.args) != 1 or function.args.posonlyargs or function.args.kwonlyargs:
+        return None
+    side = function.args.args[0].arg
+    body = function.body[1:] if ast.get_docstring(function, clean=False) is not None else function.body
+    match body:
+        case [ast.Assign(targets=[ast.Name(id=count)]),
+              ast.Assign(targets=[ast.Name(id=columns)]),
+              ast.Assign(targets=[ast.Name(id=descending)]),
+              ast.Assign(targets=[ast.Name(id=ascending)]),
+              ast.FunctionDef(name=visit, args=ast.arguments(args=[ast.arg(arg=row)]),
+                              body=[ast.Nonlocal(), ast.If(), ast.For(target=ast.Name(id=column))]),
+              ast.Expr(), ast.Return()]:
+            pass
+        case _:
+            return None
+    names = {side, count, columns, descending, ascending, visit, row, column}
+    if len(names) != 8 or {"set", "range"} & (names | occupied):
+        return None
+    expected = ast.parse(f"""\
+{count} = 0
+{columns} = set()
+{descending} = set()
+{ascending} = set()
+def {visit}({row}):
+    nonlocal {count}
+    if {row} == {side}:
+        {count} += 1
+        return
+    for {column} in range({side}):
+        if {column} in {columns} or ({row} - {column}) in {descending} or ({row} + {column}) in {ascending}:
+            continue
+        {columns}.add({column})
+        {descending}.add({row} - {column})
+        {ascending}.add({row} + {column})
+        {visit}({row} + 1)
+        {columns}.remove({column})
+        {descending}.remove({row} - {column})
+        {ascending}.remove({row} + {column})
+{visit}(0)
+return {count}
+""")
+    if ast.dump(ast.Module(body=body, type_ignores=[])) == ast.dump(expected):
+        return "v_" + side
+    return None
 
 
 class Module:
@@ -801,7 +1107,10 @@ class Module:
         self.field_types = {c: dict((field_types or {}).get(c, {})) for c in self.classes}
         self.field_conflicts = set()
         self.defs_by_name = {}
+        self.captures = {}
         self.uses_global_random = False  # usa las funciones del módulo random (su objeto oculto)
+        self.uses_files = False
+        self.guarded_builtins = set()
         self.flat = []
         self.facts = None  # (funciones que pueden guardar objetos en algo viejo, funciones que crean)
 
@@ -832,22 +1141,51 @@ class Module:
                     raise Unsupported(f"el atributo {attr} de {cls} guarda valores de tipos distintos")
                 if not complete(types.get(attr)):
                     raise Unsupported(f"no se pudo deducir el tipo del atributo {attr} de {cls}")
-            fields = ", ".join(f"v_{a}: {turi_type(types[a])}" for a in info["fields"])
+            fields = ", ".join(f"v_{a}: {'i32' if is_obj(types[a]) else turi_type(types[a])}" for a in info["fields"])
             out.append(f"struct Tz{cls} {{\n    {fields}\n}}" if info["fields"] else f"struct Tz{cls} {{\n    tzpad: int\n}}")
             init = info["methods"].get("__init__")
-            zeros = ", ".join(f"v_{a}: {zero_of(types[a])}" for a in info["fields"]) or "tzpad: 0"
+            initial = ", ".join(f"v_{a}: {pool_field_value(zero_of(types[a]), types[a])}"
+                                for a in info["fields"]) or "tzpad: 0"
             if init and init in self.functions:
                 params = self.functions[init][0][1:]
                 sig = "".join(f", {n}: {turi_type(t)}" for n, t in params if t != "none")
-                args = "".join(f", {n}" for n, t in params if t != "none")
-                body = f"    {init}({passing}, tzi{args})\n"
+                direct = self.direct_class_fields(init, params, info["fields"], types)
+                if direct is not None:
+                    initial, body = direct, ""
+                else:
+                    args = "".join(f", {n}" for n, t in params if t != "none")
+                    body = f"    {init}({passing}, tzi{args})\n"
             elif init:
                 continue  # nadie lo construye en nativo
             else:
                 sig, body = "", ""
             out.append(f"fn f_{cls}__new({pools}{sig}) -> int {{\n    let tzi = tzP_{cls}.len()\n"
-                       f"    tzP_{cls}.push(Tz{cls} {{ {zeros} }})\n{body}    return tzi\n}}")
+                       f"    tzP_{cls}.push(Tz{cls} {{ {initial} }})\n{body}    return tzi\n}}")
         return out
+
+    def direct_class_fields(self, init, params, fields, types):
+        """Un inicializador que solo copia parámetros puede construir el registro de una vez."""
+        definition = self.defs_by_name[init]
+        if not fields or len(definition.body) != len(fields):
+            return None
+        owner = definition.args.args[0].arg
+        arguments = dict(params)
+        values = {}
+        for stmt in definition.body:
+            if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1 or not isinstance(stmt.value, ast.Name):
+                return None
+            target = stmt.targets[0]
+            if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                    and target.value.id == owner and target.attr in types):
+                return None
+            arg = stmt.value.id
+            kind = arguments.get(arg)
+            if kind != types[target.attr] or not (kind in (INT, FLOAT, BOOL, STR) or is_obj(kind)):
+                return None
+            values[target.attr] = arg
+        if values.keys() != set(fields):
+            return None
+        return ", ".join(f"v_{attr}: {pool_field_value(values[attr], types[attr])}" for attr in fields)
 
     def need(self, name):
         for dep in HELPER_DEPS.get(name, []):
@@ -891,6 +1229,7 @@ class Module:
                 raise
         self.unit_names = {d.name for d in flat}
         self.defs_by_name = {d.name: d for d in flat}
+        self.captures = {d.name: d._tz_captures for d in flat if getattr(d, "_tz_captures", 0)}
         for d in flat:
             try:
                 self.check_signature(d)
@@ -987,12 +1326,274 @@ class Module:
         self.flat = flat
         for d in flat:
             try:
-                out.append(Function(self, d).emit())
+                lowered, prologue = self.tile_float_reduction(self.fill_numeric_lists(d))
+                lowered, matrix_prologue = self.interchange_float_product(lowered)
+                prologue += matrix_prologue
+                prologue += self.memo_knapsack(lowered)
+                prologue += self.masked_queens(lowered)
+                prologue += self.fixed_orbits(lowered)
+                side = getattr(lowered, "_tz_packed_permutations", None)
+                if side and self.functions[d.name] == ([(side, INT)], ("tuple", (INT, INT))):
+                    prologue += (f"if {side} >= 4 && {side} <= 12 {{", f"    return tzPairsFannkuch({side})", "}")
+                out.append(Function(self, lowered).emit(prologue))
             except Unsupported as error:
                 error.function = getattr(error, "function", None) or d.name
                 raise
         helpers = [HELPERS[h] for h in self.helpers]
         return "\n\n".join(self.class_code() + out + self.extra + helpers) + "\n"
+
+    def fill_numeric_lists(self, fn):
+        params, result = self.functions[fn.name]
+        if (not self.exact or not self.strict_float or len(params) != 1 or params[0][1] != INT
+                or not isinstance(result, tuple) or result[0] != "tuple"):
+            return fn
+        elements = result[1]
+        if not all(t in (("list", INT), ("list", FLOAT)) for t in elements):
+            return fn
+        size = params[0][0]
+        body = fn.body[1:] if ast.get_docstring(fn, clean=False) is not None else fn.body
+        match body:
+            case [ast.Assign(targets=[ast.Tuple(elts=targets)], value=ast.Tuple(elts=initial)),
+                  ast.For(target=ast.Name(id=index),
+                          iter=ast.Call(func=ast.Name(id="range"), args=[ast.Name(id=bound)], keywords=[]),
+                          body=appends, orelse=[]) as loop,
+                  ast.Return(value=ast.Tuple(elts=returned)) as final]:
+                pass
+            case _:
+                return fn
+        if size != bound or size == index or not len(elements) == len(targets) == len(initial) == len(returned) == len(appends):
+            return fn
+        names = []
+        assignments = []
+        numeric = (ast.Name, ast.Load, ast.Constant, ast.BinOp, ast.UnaryOp, ast.operator, ast.unaryop)
+        for target, empty, used, statement in zip(targets, initial, returned, appends):
+            match target, empty, used, statement:
+                case (ast.Name(id=name), ast.List(elts=[]), ast.Name(id=result_name),
+                      ast.Expr(value=ast.Call(func=ast.Attribute(value=ast.Name(id=container), attr="append"),
+                                             args=[value], keywords=[]))) if name == result_name == container:
+                    pass
+                case _:
+                    return fn
+            if any(not isinstance(part, numeric) or isinstance(part, ast.Name) and part.id not in (size, index)
+                   for part in ast.walk(value)):
+                return fn
+            names.append(name)
+            assignments.append(ast.Assign(targets=[ast.Subscript(value=ast.Name(id=name, ctx=ast.Load()),
+                                                                  slice=ast.Name(id=index, ctx=ast.Load()),
+                                                                  ctx=ast.Store())], value=value))
+        if len(set(names)) != len(names) or {size, index}.intersection(names):
+            return fn
+        self.guarded_builtins.add("range")
+        length = self.fresh("listLength")
+        prefix = f"{length} = {size} if {size} > 0 else 0\n"
+        prefix += "".join(f"{name} = [{zero_of(t[1])}] * {length}\n" for name, t in zip(names, elements))
+        lowered = copy(fn)
+        lowered_loop = copy(loop)
+        lowered_loop.body = assignments
+        lowered.body = ast.parse(prefix).body + [lowered_loop, final]
+        return ast.fix_missing_locations(lowered)
+
+    def fixed_orbits(self, fn):
+        layout = getattr(fn, "_tz_orbit_layout", None)
+        if layout is None or not self.strict_float:
+            return ()
+        params, result = self.functions[fn.name]
+        if result != "none":
+            return ()
+        types = [t for _, t in params]
+        cls = None
+        if layout == "arrays":
+            if types != [("list", FLOAT)] * 7 + [FLOAT, INT]:
+                return ()
+        else:
+            bodies = types[0]
+            if (types[1:] != [FLOAT, INT] or not isinstance(bodies, tuple)
+                    or bodies[0] != "list" or not is_obj(bodies[1])):
+                return ()
+            cls = bodies[1][1]
+            fields = self.field_types.get(cls, {})
+            if any(fields.get(field) != FLOAT for field in ("x", "y", "z", "vx", "vy", "vz", "mass")):
+                return ()
+        from orbitas import orbit_kernel, orbit_prologue
+
+        if not any(source.startswith("struct TzOrbitState ") for source in self.extra):
+            self.extra.append(orbit_kernel())
+        return orbit_prologue([name for name, _ in params], self.fresh("orbit"), self.fresh("body"), cls)
+
+    def memo_knapsack(self, fn):
+        arguments = getattr(fn, "_tz_knapsack", None)
+        if not self.exact or arguments is None:
+            return ()
+        params, result = self.functions[fn.name]
+        types = dict(params)
+        weights, values, capacity = arguments
+        if result != INT or (types.get(weights), types.get(values), types.get(capacity)) != (
+            ("list", INT), ("list", INT), INT
+        ):
+            return ()
+        from cierres_memo import MAX_FRAMES
+
+        if "pyKnapsack" not in HELPERS:
+            HELPERS["pyKnapsack"] = Path(__file__).with_name("mochila.turi").read_text(encoding="utf-8")
+        helper = self.need("pyKnapsack")
+        value = self.fresh("optimum")
+        return (f"let {value} = {helper}({weights}, {values}, {capacity}, {MAX_FRAMES})",
+                f"if {value} >= 0 {{", f"    return {value}", "}")
+
+    def masked_queens(self, fn):
+        side = getattr(fn, "_tz_queens", None)
+        if not self.exact or side is None or self.functions[fn.name] != ([(side, INT)], INT):
+            return ()
+        if "pyQueens" not in HELPERS:
+            HELPERS["pyQueens"] = queens_tail_source()
+        self.guarded_builtins.update(("set", "range"))
+        helper = self.need("pyQueens")
+        return (f"if {side} <= 20 {{", f"    return {helper}({side})", "}")
+
+    def tile_float_reduction(self, fn):
+        params, result = self.functions[fn.name]
+        if not (self.exact and self.strict_float) or result != "none" or len(params) not in (3, 4):
+            return fn, ()
+        body = fn.body[1:] if ast.get_docstring(fn, clean=False) is not None else fn.body
+        match body:
+            case [ast.For(target=ast.Name(id=row),
+                          iter=ast.Call(func=ast.Name(id="range"), args=[ast.Name(id=rows)], keywords=[]),
+                          body=outer, orelse=[])]:
+                pass
+            case _:
+                return fn, ()
+        match outer:
+            case [ast.Assign(targets=[ast.Name(id=acc)], value=ast.Constant(value=zero)),
+                  ast.For(target=ast.Name(id=col),
+                          iter=ast.Call(func=ast.Name(id="range"), args=[ast.Name(id=cols)], keywords=[]),
+                          body=[ast.AugAssign(target=ast.Name(id=summed), op=ast.Add(), value=product)],
+                          orelse=[]),
+                  ast.Assign(targets=[ast.Subscript(value=ast.Name(id=dest), slice=ast.Name(id=written))],
+                             value=ast.Name(id=stored))]:
+                pass
+            case _:
+                return fn, ()
+        match product:
+            case ast.BinOp(left=ast.Call(func=ast.Name(id=coef),
+                                         args=[ast.Name(id=first), ast.Name(id=second)], keywords=[]),
+                           op=ast.Mult(),
+                           right=ast.Subscript(value=ast.Name(id=source), slice=ast.Name(id=read))):
+                pass
+            case _:
+                return fn, ()
+        types = dict(params)
+        if (repr(zero) != "0.0" or acc != summed or acc != stored or written != row or read != col
+                or (first, second) not in ((row, col), (col, row))
+                or len({row, col, acc}) != 3 or {row, col, acc} & types.keys()
+                or source == dest or types.get(source) != ("list", FLOAT) or types.get(dest) != ("list", FLOAT)
+                or types.get(rows) != INT or types.get(cols) != INT):
+            return fn, ()
+        weights = self.defs_by_name.get(coef)
+        weight_params, weight_result = self.functions.get(coef, ([], None))
+        if not weights or [t for _, t in weight_params] != [INT, INT] or weight_result != FLOAT:
+            return fn, ()
+        match weights.body:
+            case [ast.Return(value=ast.expr() as expression)]:
+                pass
+            case _:
+                return fn, ()
+        valid = (ast.BinOp, ast.UnaryOp, ast.Name, ast.Constant, ast.Load, ast.Add, ast.Sub, ast.Mult,
+                 ast.Div, ast.FloorDiv, ast.Mod, ast.UAdd, ast.USub)
+        names = {name for name, _ in weight_params}
+        for node in ast.walk(expression):
+            if (not isinstance(node, valid) or isinstance(node, ast.Name) and node.id not in names
+                    or isinstance(node, ast.Constant) and type(node.value) not in (int, float)):
+                return fn, ()
+
+        prologue = ()
+        if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Div):
+            from reducciones import DIMENSION_LIMIT, reciprocal_differences, vector_reduction
+
+            axes = dict(zip((first, second), (name for name, _ in weight_params)))
+            coefficients = reciprocal_differences(expression, axes[row], axes[col])
+            if coefficients is not None:
+                helper = self.fresh("reciprocals")
+                self.extra.append(vector_reduction(helper, coefficients))
+                enabled = self.need("pyWideSimd")
+                prologue = (
+                    f"if {rows} >= 32 && {rows} <= {DIMENSION_LIMIT} && {cols} > 0 && {cols} <= {DIMENSION_LIMIT} && "
+                    f"{source}.len() >= {cols} && {dest}.len() >= {rows} && {enabled}() {{",
+                    f"    {helper}({source}, mut {dest}, {rows}, {cols})",
+                    "    return",
+                    "}",
+                )
+
+        # El argumento de salida es mutable. La frontera y el compilador ya comprueban
+        # que no puede compartir la lista de entrada. Cada fila conserva el orden de su suma.
+        blocks, block, start, lane, sums, value = (self.fresh(name) for name in
+                                                   ("blocks", "block", "start", "lane", "sums", "value"))
+        lowered = copy(fn)
+        lowered.body = ast.parse(f"""\
+if {rows} <= 0:
+    return
+{blocks} = {rows} // 8
+for {block} in range({blocks}):
+    {start} = {block} * 8
+    {sums} = [0.0] * 8
+    for {col} in range({cols}):
+        {value} = {source}[{col}]
+        for {lane} in range(8):
+            {row} = {start} + {lane}
+            {sums}[{lane}] += {coef}({first}, {second}) * {value}
+    for {lane} in range(8):
+        {dest}[{start} + {lane}] = {sums}[{lane}]
+for {row} in range({blocks} * 8, {rows}):
+    {acc} = 0.0
+    for {col} in range({cols}):
+        {acc} += {coef}({first}, {second}) * {source}[{col}]
+    {dest}[{row}] = {acc}
+""").body
+        return lowered, prologue
+
+    def interchange_float_product(self, fn):
+        params, result = self.functions[fn.name]
+        matrix = ("list", ("list", FLOAT))
+        if not (self.exact and result == matrix
+                and len(params) == 2 and all(t == matrix for _, t in params)):
+            return fn, ()
+        from productos import product_loop
+
+        description = product_loop(fn, [name for name, _ in params])
+        if description is None:
+            return fn, ()
+        body, (left, right, rows, cols, inner, dest, row, col, _, term) = description
+
+        self.guarded_builtins.update(("len", "range"))
+        if not self.strict_float:
+            return fn, ()
+        if "pyPeriodicProduct" not in HELPERS:
+            path = Path(__file__).with_name("producto_periodico.turi")
+            HELPERS["pyPeriodicProduct"] = path.read_text(encoding="utf-8")
+        helper = self.need("pyPeriodicProduct")
+        repeated = self.fresh("periodicProduct")
+        prologue = (f"let {repeated} = {helper}({left}, {right})",
+                    f"if {repeated}.len() > 0 {{", f"    return {repeated}", "}")
+
+        # Cada elemento recibe sus sumandos en el mismo orden. Se recorre la fila
+        # derecha de forma contigua y las filas de salida se construyen directamente.
+        result_row, left_row, right_row, factor = (self.fresh(name) for name in
+                                                    ("resultRow", "leftRow", "rightRow", "factor"))
+        lowered = copy(fn)
+        lowered.body = body[:3] + ast.parse(f"""\
+{dest} = []
+for {row} in range({rows}):
+    {result_row} = [0.0] * {cols}
+    if {cols} > 0:
+        {left_row} = {left}[{row}]
+        for {term} in range({inner}):
+            {right_row} = {right}[{term}]
+            {factor} = {left_row}[{term}]
+            for {col} in range({cols}):
+                {result_row}[{col}] += {factor} * {right_row}[{col}]
+    {dest}.append({result_row})
+return {dest}
+""").body
+        return lowered, prologue
 
     def check_signature(self, d):
         a = d.args
@@ -1050,8 +1651,24 @@ class Module:
                         types = ["none" if (isinstance(a, ast.Constant) and a.value is None) or
                                  (isinstance(a, ast.Name) and a.id in f.none_params and f.ty(a) is None)
                                  else f.ty(a) for a in n.args]
-                        if len(types) == len(callee.args.args) and all(complete(t) for t in types):
-                            self.functions[callee.name] = (list(zip([a.arg for a in callee.args.args], types)), None)
+                        if len(types) != len(callee.args.args):
+                            continue
+                        params = list(zip((a.arg for a in callee.args.args), types))
+                        if callee.name in self.captures and all(t is not None for t in types) and \
+                                not all(complete(t) for t in types):
+                            # Una captura como `s = set()` obtiene el tipo por las escrituras de la función interna.
+                            self.functions[callee.name] = (params, None)
+                            try:
+                                probe = Function(self, callee)
+                                probe.nullable = set()
+                                probe.infer_locals()
+                                inferred = [(name, probe.env.get(name, t)) for name, t in params]
+                            finally:
+                                del self.functions[callee.name]
+                            if not probe.conflicts:
+                                params = inferred
+                        if all(complete(t) for _, t in params):
+                            self.functions[callee.name] = (params, None)
             if repr(self.functions) == before:
                 self.infer_returns([d for d in flat if d.name in self.functions], rounds=1, must=False,
                                    optimistic=True)
@@ -1321,6 +1938,15 @@ def flatten_try(fn):
 
 
 RESIZERS = {"append", "extend", "pop", "insert", "remove", "clear", "add", "discard", "update"}
+HEAP_OPERATIONS = {"heappush": "pyHeapPush", "heappop": "pyHeapPop", "heapify": "pyHeapify"}
+
+
+def heap_operation(node):
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+            isinstance(node.func.value, ast.Name) and node.func.value.id == "heapq" and \
+            node.func.attr in HEAP_OPERATIONS:
+        return node.func.attr
+    return None
 
 
 def resize_names(body, resized=None, functions=None):
@@ -1330,6 +1956,10 @@ def resize_names(body, resized=None, functions=None):
         for n in ast.walk(stmt):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in RESIZERS:
                 name, depth = subscript_base(n.func.value)
+                if name and depth == 0:
+                    names.add(name)
+            elif heap_operation(n) in ("heappush", "heappop") and n.args:
+                name, depth = subscript_base(n.args[0])
                 if name and depth == 0:
                     names.add(name)
             elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
@@ -1369,7 +1999,8 @@ def mutation_events(body, mut_levels=None, functions=None):
                 name, depth = subscript_base(n.func.value)
                 if name:
                     events.add((name, depth))
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "shuffle" and n.args:
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.args and \
+                    (n.func.attr == "shuffle" or heap_operation(n)):
                 name, depth = subscript_base(n.args[0])
                 if name:
                     events.add((name, depth))
@@ -1392,6 +2023,7 @@ class Function:
         self.params, self.ret = module.functions[node.name]
         self.env = {name: t for name, t in self.params}
         self.subst = {}
+        self.constant_lists = {}
         self.lines = []
         self.declared = set(name for name, _ in self.params)
         self.hoisted = []
@@ -1418,9 +2050,23 @@ class Function:
 
     # ------------------------------------------------------------------ tipos
     def infer_locals(self):
+        captures = []
+        if self.m.captures:
+            for call in ast.walk(self.node):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and
+                        call.func.id in self.m.captures and call.func.id in self.m.functions):
+                    continue
+                count = self.m.captures[call.func.id]
+                params = self.m.functions[call.func.id][0][-count:]
+                captures.extend((arg.id, t) for arg, (_, t) in zip(call.args[-count:], params)
+                                if isinstance(arg, ast.Name) and complete(t))
         for _ in range(4):
             before = dict(self.env)
             self.infer_block(self.node.body)
+            for name, t in captures:
+                current = self.env.get(name)
+                if is_mutable(current) and not complete(current):
+                    self.merge(name, t)
             if before == self.env:
                 break
 
@@ -1490,6 +2136,8 @@ class Function:
                 self.infer_block(s.orelse)
             elif isinstance(s, ast.Expr) and isinstance(s.value, ast.Call):
                 call = s.value
+                if heap_operation(call) == "heappush" and len(call.args) == 2 and isinstance(call.args[0], ast.Name):
+                    self.merge(call.args[0].id, ("list", self.ty(call.args[1])))
                 if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Attribute) and call.args:
                     owner = self.ty(call.func.value.value)
                     if is_obj(owner) and owner[1] in self.m.classes and call.func.attr in ("append", "insert"):
@@ -1536,6 +2184,8 @@ class Function:
 
     def infer_for(self, target, it):
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name):
+            if getattr(it, "_tz_file_lines", False):
+                return self.infer_target(target, STR)
             if it.func.id == "range":
                 return self.infer_target(target, INT)
             if it.func.id == "enumerate" and isinstance(target, ast.Tuple) and len(target.elts) == 2:
@@ -1552,6 +2202,8 @@ class Function:
                 self.infer_target(target.elts[0], d[1])
                 self.infer_target(target.elts[1], d[2])
             return
+        if isinstance(it, ast.Tuple) and it.elts:
+            it = ast.List(it.elts, ast.Load())
         self.infer_target(target, self.elem(self.ty(it)))
 
     @staticmethod
@@ -1584,6 +2236,8 @@ class Function:
             a, b = self.ty(e.left), self.ty(e.right)
             if isinstance(e.op, ast.Div):
                 return FLOAT
+            if self.m.exact and isinstance(e.op, ast.Mod) and a == STR:
+                return STR
             if isinstance(e.op, ast.Mult) and STR in (a, b):
                 return STR
             if isinstance(e.op, ast.Mult) and isinstance(a, tuple):
@@ -1649,6 +2303,9 @@ class Function:
         return t
 
     def call_type(self, e):
+        specialized = getattr(e, "_tz_executable_call", None)
+        if specialized is not None and specialized[2] is not None:
+            return specialized[2]
         f = e.func
         if isinstance(f, ast.Name) and f.id.startswith("C_") and f.id[2:] in self.m.classes:
             return ("obj", f.id[2:])
@@ -1690,6 +2347,8 @@ class Function:
             return None
         if isinstance(f, ast.Attribute):
             attr = f.attr
+            if heap_operation(e) == "heappop" and len(e.args) == 1 and f.value.id not in self.env:
+                return self.elem(self.ty(e.args[0]))
             owner = self.ty(f.value)
             if is_obj(owner) and owner[1] in self.m.classes:
                 target = self.m.classes[owner[1]]["methods"].get(attr)
@@ -1718,6 +2377,8 @@ class Function:
                 return base[1]
             if attr == "get" and isinstance(base, tuple) and base[0] == "dict":
                 return base[2] or (self.ty(e.args[1]) if len(e.args) > 1 else None)
+            if attr == "items" and isinstance(base, tuple) and base[0] == "dict":
+                return ("list", ("tuple", (base[1], base[2])))
             if attr == "keys" and isinstance(base, tuple):
                 return ("list", base[1])
             if attr == "values" and isinstance(base, tuple):
@@ -1727,7 +2388,7 @@ class Function:
         return None
 
     # ------------------------------------------------------------------ emisión
-    def emit(self):
+    def emit(self, prologue=()):
         # `x = None` seguido de `x is None`: la variable guarda su valor y una marca aparte dice si
         # todavía no tiene ninguno.
         self.nullable = self.assigned_none()
@@ -1760,6 +2421,8 @@ class Function:
             params.append(f"{name}: {mut}{turi_type(t)}")
         ret = "" if self.ret in (None, "none") else " -> " + turi_type(self.ret)
         self.indent = 1
+        for line in prologue:
+            self.out(line)
         for name in sorted(self.none_params):
             t = self.env.get(name)
             self.out(f"var {name}: {turi_type(t)} = {zero_of(t)}")
@@ -1776,6 +2439,15 @@ class Function:
             self.out(f"var {name}IsInt = false")
         if self.has_sticky:
             self.out("var tzZ = false")
+        if self.m.exact:
+            used = {n.id for n in ast.walk(self.node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+            for name in sorted(used - self.env.keys()):
+                literal = self.m.constants.get(name)
+                if isinstance(literal, ast.List):
+                    local = self.m.fresh("k")
+                    text, _ = self.ex(literal)
+                    self.out(f"let {local} = {text}")
+                    self.constant_lists[name] = local
         self.block(self.node.body)
         if self.has_sticky and self.ret in (None, "none") and not isinstance(self.node.body[-1], ast.Return):
             self.out("assert !tzZ")
@@ -1963,8 +2635,8 @@ class Function:
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and \
                         subscript_base(n.func.value)[0] == name:
                     total += 1
-                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "shuffle" and \
-                        n.args and subscript_base(n.args[0])[0] == name:
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.args and \
+                        (n.func.attr == "shuffle" or heap_operation(n)) and subscript_base(n.args[0])[0] == name:
                     total += 1
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in self.m.mut_params:
                     total += sum(1 for a in n.args if subscript_base(a)[0] == name)
@@ -1984,13 +2656,23 @@ class Function:
                         return search(sub.body)
                 for j in range(i - 1, -1, -1):
                     prev = block[j]
-                    if isinstance(prev, ast.Assign) and len(prev.targets) == 1 and \
-                            isinstance(prev.targets[0], ast.Name) and prev.targets[0].id == name:
-                        value = prev.value
-                        if isinstance(value, ast.Name) or (
-                                isinstance(value, ast.Subscript) and not isinstance(value.slice, ast.Slice)):
+                    if not isinstance(prev, ast.Assign) or len(prev.targets) != 1:
+                        continue
+                    target, value = prev.targets[0], prev.value
+                    if isinstance(target, ast.Tuple) and any(isinstance(dest, ast.Name) and
+                            isinstance(dest.ctx, ast.Store) and dest.id == name for dest in ast.walk(target)):
+                        if not isinstance(value, ast.Tuple) or len(target.elts) != len(value.elts):
                             return False
-                        return self.count_mut(block[j:i + 1], name) == self.count_mut(self.node.body, name)
+                        sources = [v for dest, v in zip(target.elts, value.elts)
+                                   if isinstance(dest, ast.Name) and dest.id == name]
+                        if len(sources) != 1 or not isinstance(sources[0], ast.List):
+                            return False
+                    elif not isinstance(target, ast.Name) or target.id != name:
+                        continue
+                    elif isinstance(value, ast.Name) or (
+                            isinstance(value, ast.Subscript) and not isinstance(value.slice, ast.Slice)):
+                        return False
+                    return self.count_mut(block[j:i + 1], name) == self.count_mut(self.node.body, name)
                 return False
             return False
 
@@ -2121,7 +2803,9 @@ class Function:
 
         walk(self.node.body, ())
         self.hoist = []
-        self.loop_vars_outside = set()
+        self.loop_vars_outside = set(binders) & self.declared
+        if self.m.exact and self.loop_vars_outside & self.is_helper_mut:
+            raise Unsupported("un bucle reasigna un parámetro que también se modifica")
         for name, (path, stmt) in first.items():
             if name in self.declared:
                 continue
@@ -2480,10 +3164,16 @@ class Function:
         if isinstance(target, ast.Tuple):
             if isinstance(value, ast.Tuple) and len(value.elts) == len(target.elts):
                 temps = []
-                for v in value.elts:
+                for el, v in zip(target.elts, value.elts):
                     text, t = self.ex(v)
                     name = self.m.fresh("t")
-                    self.out(f"let {name} = {text}")
+                    annotation = ""
+                    if isinstance(el, ast.Name) and isinstance(v, ast.List) and not v.elts:
+                        inferred = self.env.get(el.id)
+                        if isinstance(inferred, tuple) and inferred[0] == "list" and complete(inferred):
+                            t = inferred
+                            annotation = f": {turi_type(t)}"
+                    self.out(f"let {name}{annotation} = {text}")
                     temps.append((name, t))
                 for el, (name, t) in zip(target.elts, temps):
                     self.store(el, name, t)
@@ -2499,25 +3189,25 @@ class Function:
             t = self.env.get(target.id)
             self.assign_name(target.id, "mapNew()", t)
             for k, v in zip(value.keys, value.values):
-                self.out(f"{target.id}[{self.ex(k)[0]}] = {self.ex(v)[0]}")
+                key = self.hash_key(self.ex(k)[0], t[1])
+                self.out(f"{target.id}[{key}] = {self.ex(v)[0]}")
             return
-        if isinstance(target, ast.Name) and (isinstance(value, (ast.Set, ast.SetComp)) or (
+        if isinstance(target, ast.Name) and isinstance(value, ast.SetComp):
+            text, t = self.ex(value)
+            return self.assign_name(target.id, text, t)
+        if isinstance(target, ast.Name) and (isinstance(value, ast.Set) or (
                 isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "set"
                 and not value.args)):
             t = self.env.get(target.id)
             self.assign_name(target.id, "setNew()", t)
             if isinstance(value, ast.Set):
                 for el in value.elts:
-                    self.out(f"{target.id}.add({self.ex(el)[0]})")
+                    key = self.hash_key(self.ex(el)[0], t[1])
+                    self.out(f"{target.id}.add({key})")
             elif isinstance(value, ast.Call) and value.args:
                 item = self.m.fresh("e")
                 self.out(f"for {item} in {self.iterable(value.args[0])} {{")
-                self.out(f"    {target.id}.add({item})")
-                self.out("}")
-            elif isinstance(value, ast.SetComp):
-                item = self.m.fresh("e")
-                self.out(f"for {item} in {self.ex(ast.ListComp(value.elt, value.generators))[0]} {{")
-                self.out(f"    {target.id}.add({item})")
+                self.out(f"    {target.id}.add({self.hash_key(item, t[1])})")
                 self.out("}")
             return
         if isinstance(target, ast.Name) and isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and \
@@ -2556,7 +3246,7 @@ class Function:
                 tmp = self.m.fresh("a")
                 self.out(f"let {tmp} = {text}")
                 text = tmp
-            return self.out(f"tzP_{owner[1]}[{obj}].v_{target.attr} = {text}")
+            return self.out(f"tzP_{owner[1]}[{obj}].v_{target.attr} = {pool_field_value(text, want)}")
         if isinstance(target, ast.Subscript):
             base, bt = self.place(target.value)
             if isinstance(target.slice, ast.Slice):
@@ -2566,8 +3256,8 @@ class Function:
                     bt[2] if isinstance(bt, tuple) and bt[0] == "dict" else None
                 if want is None or repr(want) != repr(t):
                     raise Unsupported("guardar en una lista o diccionario un valor de otro tipo")
-                if isinstance(bt, tuple) and bt[0] == "dict" and bt[1] not in (INT, STR, BOOL):
-                    raise Unsupported("diccionario con claves que no son enteros ni textos")
+                if isinstance(bt, tuple) and bt[0] == "dict" and not hash_key_type(bt[1]):
+                    raise Unsupported("diccionario con claves de un tipo no admitido")
             index = self.index(target.slice, base, bt)
             return self.out(f"{base}[{index}] = {text}")
         raise Unsupported("destino de asignación no admitido")
@@ -2583,15 +3273,17 @@ class Function:
             if isinstance(bt, tuple) and bt[0] == "list":
                 return f"{base}[{self.index(node.slice, base, bt)}]", bt[1]
             if isinstance(bt, tuple) and bt[0] == "dict" and self.m.exact:
-                key = self.ex(node.slice)[0]
+                key = self.index(node.slice, base, bt)
                 self.out(f"assert {base}.has({key})")
                 return f"{base}[{key}]", bt[2]
         return self.ex(node)
 
     def index(self, node, base, bt):
-        text, _ = self.ex(node)
+        text, t = self.ex(node)
         if isinstance(bt, tuple) and bt[0] == "dict":
-            return text
+            if self.m.exact and t != bt[1]:
+                raise Unsupported("clave de diccionario de otro tipo")
+            return self.hash_key(text, bt[1])
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant):
             return f"{base}.len() - {node.operand.value}"
         if isinstance(node, ast.Constant) or self.never_negative(node) or self.m.exact:
@@ -2613,6 +3305,26 @@ class Function:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "len":
             return True
         return False
+
+    def hash_key(self, text, key_type):
+        arity = packed_key_arity(key_type)
+        return f"{self.m.need(f'pyPackKey{arity}')}({text})" if arity else text
+
+    def hash_keys(self, text, table_type):
+        keys = f"{text}.keys()" if table_type[0] == "dict" else f"setItems({text})"
+        arity = packed_key_arity(table_type[1])
+        if arity:
+            keys += f".map(|tzk: int| {self.m.need(f'pyUnpackKey{arity}')}(tzk))"
+        return keys
+
+    def set_from(self, text, elem):
+        if packed_key_arity(elem):
+            key = self.hash_key("tzitem", elem)
+            return f"{self.m.need('pySetPacked')}({text}, |tzitem: {turi_type(elem)}| {key})"
+        name = {INT: "pySetInt", STR: "pySetStr"}.get(elem)
+        if not name:
+            raise Unsupported("set de un tipo no admitido")
+        return f"{self.m.need(name)}({text})"
 
     nonneg = frozenset()
 
@@ -2696,6 +3408,8 @@ class Function:
     def expr_stmt(self, e):
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "print" and self.m.exact:
             return self.print_call(e)
+        if heap_operation(e) in ("heappush", "heapify") and e.func.value.id not in self.env:
+            return self.out(self.heap_call(e))
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and self.m.exact and \
                 self.std_stream(e.func.value) is not None:
             stream = self.std_stream(e.func.value)
@@ -2726,8 +3440,6 @@ class Function:
                 raise Unsupported(f"{attr} en una lista de este tipo")
             if exact and attr == "sort" and self.elem(bt) == FLOAT:
                 self.out(f"assert {self.m.need('pySortable')}({base})")
-            if exact and attr == "remove" and bt[0] == "set":
-                self.out(f"assert {base}.has({args[0][0]})")
             if attr == "append":
                 return self.out(f"{base}.push({self.coerce(args[0], self.elem(bt))})")
             if attr == "extend":
@@ -2736,13 +3448,18 @@ class Function:
                 self.out(f"    {base}.push({item})")
                 return self.out("}")
             if attr == "add":
-                return self.out(f"{base}.add({args[0][0]})")
+                return self.out(f"{base}.add({self.hash_key(args[0][0], bt[1])})")
             if attr == "setdefault" and len(args) == 2:
-                self.out(f"if !{base}.has({args[0][0]}) {{")
-                self.out(f"    {base}[{args[0][0]}] = {args[1][0]}")
+                key = self.hash_key(args[0][0], bt[1])
+                self.out(f"if !{base}.has({key}) {{")
+                self.out(f"    {base}[{key}] = {args[1][0]}")
                 return self.out("}")
             if attr in ("remove", "discard") and isinstance(bt, tuple) and bt[0] == "set":
-                return self.out(f"setDel(mut {base}, {args[0][0]})")
+                key = self.hash_key(args[0][0], bt[1])
+                if exact and attr == "remove":
+                    key = self.once(key)
+                    self.out(f"assert {base}.has({key})")
+                return self.out(f"setDel(mut {base}, {key})")
             if attr == "sort" and not e.keywords:
                 return self.out(f"{base}.sort()")
             if attr == "sort" and len(e.keywords) == 1 and e.keywords[0].arg == "reverse" and \
@@ -2829,23 +3546,127 @@ class Function:
             return f"({text}.len() > 0)"
         raise Unsupported("condición de tipo desconocido: " + text)
 
-    def iterable(self, it):
+    def dictionary_view(self, node):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            return False
+        owner = self.ty(node.func.value)
+        return isinstance(owner, tuple) and owner[0] == "dict" and node.func.attr in ("keys", "values", "items")
+
+    def iterable(self, it, ordered=True):
         """Texto Turi de algo recorrible con `for x in ...` (arreglo o cadena)."""
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range":
             a, b, step = self.range_args(it)
             return f"{self.m.need('pyRange')}({a}, {b}, {step})"
+        if isinstance(it, ast.Tuple) and it.elts:
+            it = ast.List(it.elts, ast.Load())
+        if not ordered and self.dictionary_view(it):
+            if it.args or it.keywords:
+                raise Unsupported("vista de diccionario con argumentos")
+            return self.method(it, allow_unordered=True)
         text, t = self.ex(it)
         if isinstance(t, tuple) and t[0] in ("dict", "set"):
-            self.order_free(False)
-        if isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute) and it.func.attr in ("keys", "values"):
-            self.order_free(False)
+            self.order_free(not ordered)
+            return self.hash_keys(text, t)
         if self.m.exact and not (t == STR or (isinstance(t, tuple) and t[0] == "list")):
             raise Unsupported("recorrer algo que no es una lista ni un texto")
-        if isinstance(t, tuple) and t[0] == "dict":
-            return f"{text}.keys()"
-        if isinstance(t, tuple) and t[0] == "set":
-            return f"setItems({text})"
         return text
+
+    def order_pure(self, expr):
+        """Expresiones sin llamadas ni acceso a valores cuya comparación pueda ejecutar código Python."""
+        allowed = (ast.Name, ast.Load, ast.Constant, ast.Tuple, ast.List, ast.BinOp, ast.UnaryOp, ast.BoolOp,
+                   ast.Compare, ast.IfExp, ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        return all(isinstance(node, allowed) and
+                   (not isinstance(node, ast.Name) or not holds_obj(self.ty(node))) for node in ast.walk(expr))
+
+    def reorderable_loop(self, loop):
+        """Demuestra que la vuelta solo aporta a sumas enteras o inserta en conjuntos independientes."""
+        if loop.orelse:
+            return False
+        ids = {id(node) for node in ast.walk(loop)}
+        body_nodes = [node for stmt in loop.body for node in ast.walk(stmt)]
+        sums = {node.target.id for node in body_nodes if isinstance(node, ast.AugAssign) and
+                isinstance(node.op, ast.Add) and isinstance(node.target, ast.Name) and self.ty(node.target) == INT}
+        temps = {node.id for node in ast.walk(loop) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+        temps -= sums
+        if any(isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in temps and id(node) not in ids
+               for node in ast.walk(self.node)):
+            return False
+        written = self.mutated(loop.body) | sums
+        if any(isinstance(node, ast.Name) and node.id in written for node in ast.walk(loop.iter)):
+            return False
+
+        def usable(expr, bound):
+            return self.order_pure(expr) and all(
+                node.id not in written and (node.id not in temps or node.id in bound)
+                for node in ast.walk(expr) if isinstance(node, ast.Name)
+            )
+
+        def target_names(target):
+            parts = target.elts if isinstance(target, ast.Tuple) else [target]
+            return {part.id for part in parts} if all(isinstance(part, ast.Name) for part in parts) else set()
+
+        updates = {}
+
+        def counter(target, value, bound, augmented):
+            if not isinstance(target.value, ast.Name):
+                return False
+            table = self.ty(target.value)
+            if not (isinstance(table, tuple) and table[0] == "dict" and
+                    table[2] == INT and usable(target.slice, bound)):
+                return False
+            if not augmented:
+                if not isinstance(value, ast.BinOp) or not isinstance(value.op, ast.Add):
+                    return False
+                get = value.left
+                if not (isinstance(get, ast.Call) and isinstance(get.func, ast.Attribute) and
+                        get.func.attr == "get" and isinstance(get.func.value, ast.Name) and
+                        get.func.value.id == target.value.id and len(get.args) == 2 and not get.keywords and
+                        ast.dump(get.args[0]) == ast.dump(target.slice) and isinstance(get.args[1], ast.Constant) and
+                        type(get.args[1].value) is int and get.args[1].value == 0):
+                    return False
+                value = value.right
+            if not usable(value, bound) or self.ty(value) != INT:
+                return False
+            return updates.setdefault(target.value.id, augmented) == augmented
+
+        def check(body, bound):
+            for stmt in body:
+                if isinstance(stmt, ast.Pass):
+                    continue
+                if isinstance(stmt, ast.If) and usable(stmt.test, bound):
+                    then, other = check(stmt.body, set(bound)), check(stmt.orelse, set(bound))
+                    if then is None or other is None:
+                        return None
+                    bound = then & other
+                elif isinstance(stmt, ast.For) and not stmt.orelse and usable(stmt.iter, bound):
+                    names = target_names(stmt.target)
+                    if not names or names & written or check(stmt.body, bound | names) is None:
+                        return None
+                elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                    target = stmt.targets[0]
+                    if isinstance(target, ast.Name) and target.id in temps and target.id not in written and \
+                            not holds_mutable(self.ty(target)) and usable(stmt.value, bound):
+                        bound.add(target.id)
+                    elif not (isinstance(target, ast.Subscript) and counter(target, stmt.value, bound, False)):
+                        return None
+                elif isinstance(stmt, ast.AugAssign) and isinstance(stmt.op, ast.Add):
+                    target = stmt.target
+                    if isinstance(target, ast.Name) and target.id in sums and usable(stmt.value, bound) and self.ty(stmt.value) == INT:
+                        continue
+                    if not (isinstance(target, ast.Subscript) and counter(target, stmt.value, bound, True)):
+                        return None
+                elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    call = stmt.value
+                    if not (isinstance(call.func, ast.Attribute) and call.func.attr == "add" and
+                            isinstance(call.func.value, ast.Name) and len(call.args) == 1 and not call.keywords and
+                            usable(call.args[0], bound) and isinstance(t := self.ty(call.func.value), tuple) and t[0] == "set"):
+                        return None
+                else:
+                    return None
+            return bound
+
+        bound = target_names(loop.target)
+        return bool(bound) and not (bound & written) and check(loop.body, bound) is not None
 
     def order_free(self, ok):
         if self.m.exact and not ok:
@@ -2874,6 +3695,12 @@ class Function:
     def for_loop_inner(self, s):
         it, target = s.iter, s.target
         saved_nonneg = self.nonneg
+        if getattr(it, "_tz_file_lines", False):
+            return self.file_lines(s)
+        if self.m.exact and isinstance(target, ast.Name) and isinstance(it, ast.Call) and \
+                isinstance(it.func, ast.Attribute) and it.func.attr == "split" and not it.args and \
+                not it.keywords and self.ty(it.func.value) == STR:
+            return self.split_words(s)
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range" and \
                 isinstance(target, ast.Name):
             a, b, step = self.range_args(it)
@@ -2930,18 +3757,21 @@ class Function:
                 self.loop_bind(el.id, elem)
             self.nested_loop(s.body, {el.id for el in target.elts} - self.loop_vars_outside)
             return self.out("}")
-        if isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute) and it.func.attr == "items" and \
-                isinstance(target, ast.Tuple) and len(target.elts) == 2:
+        if not self.m.exact and isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute) and \
+                it.func.attr == "items" and isinstance(target, ast.Tuple) and len(target.elts) == 2:
             self.order_free(False)
-            d, _ = self.pure(it.func.value)
+            d, dt = self.pure(it.func.value)
             k, v = target.elts[0].id, target.elts[1].id
-            self.out(f"for {k} in {d}.keys() {{")
-            self.out(f"    let {v} = {d}[{k}]")
+            self.out(f"for {k} in {self.hash_keys(d, dt)} {{")
+            self.out(f"    let {v} = {d}[{self.hash_key(k, dt[1])}]")
             self.nested_loop(s.body, {k, v})
             return self.out("}")
+        it_type = self.ty(it)
+        unordered = self.m.exact and (self.dictionary_view(it) or
+                    (isinstance(it_type, tuple) and it_type[0] in ("dict", "set"))) and self.reorderable_loop(s)
         if isinstance(target, ast.Tuple) and all(isinstance(x, ast.Name) for x in target.elts):
             item = self.m.fresh("p")
-            self.out(f"for {item} in {self.iterable(it)} {{")
+            self.out(f"for {item} in {self.iterable(it, ordered=not unordered)} {{")
             for i, el in enumerate(target.elts):
                 self.loop_bind(el.id, f"{item}.{i}")
             self.nested_loop(s.body, {el.id for el in target.elts} - self.loop_vars_outside)
@@ -2958,11 +3788,63 @@ class Function:
             self.loop_bind(name, f"{it.id}[{k}]")
             self.nested_loop(s.body, set() if outside else {name})
             return self.out("}")
-        self.out(f"for {var} in {self.iterable(it)} {{")
+        self.out(f"for {var} in {self.iterable(it, ordered=not unordered)} {{")
         if outside:
             self.loop_bind(name, var)
         self.nested_loop(s.body, set() if outside else {name})
         self.out("}")
+
+    def file_lines(self, loop):
+        call = loop.iter
+        if call.func.id != "open" or not isinstance(loop.target, ast.Name):
+            raise Unsupported("bucle con un open que no es el de Python")
+        path, t = self.ex(call.args[0])
+        if t != STR:
+            raise Unsupported("ruta de archivo no textual")
+        self.m.uses_files = True
+        reader, content, start, end = (self.m.fresh(k) for k in ("file", "txt", "start", "end"))
+        self.m.need("pyReadAsciiFile")
+        self.out(f"let {reader} = pyOpenAsciiFile({path})")
+        self.out(f'var {content} = ""')
+        self.out(f"var {start} = 0")
+        self.out("while true {")
+        self.out(f"    if {start} == {content}.len() {{")
+        self.out(f"        {content} = pyAsciiFileChunk({reader})")
+        self.out(f"        if {content}.len() == 0 {{ break }}")
+        self.out(f"        {start} = 0")
+        self.out("    }")
+        self.out(f"    var {end} = {start}")
+        self.out(f"    while {end} < {content}.len() && {content}[{end}] != 10 {{")
+        self.out(f"        {end} += 1")
+        self.out("    }")
+        self.out(f"    if {end} < {content}.len() {{ {end} += 1 }}")
+        name = loop.target.id
+        self.loop_bind(name, f"{content}[{start}..{end}]")
+        self.out(f"    {start} = {end}")
+        self.nested_loop(loop.body, {name} - self.loop_vars_outside)
+        self.out("}")
+        return self.out(f"pyCloseAsciiFile({reader})")
+
+    def split_words(self, loop):
+        content, start, end = (self.m.fresh(k) for k in ("txt", "start", "end"))
+        source, _ = self.ex(loop.iter.func.value)
+        space = self.m.need("pySpaceByte")
+        self.out(f"let {content} = {source}")
+        self.out(f"var {start} = 0")
+        self.out(f"while {start} < {content}.len() {{")
+        self.out(f"    while {start} < {content}.len() && {space}({content}[{start}]) {{")
+        self.out(f"        {start} += 1")
+        self.out("    }")
+        self.out(f"    if {start} == {content}.len() {{ break }}")
+        self.out(f"    var {end} = {start} + 1")
+        self.out(f"    while {end} < {content}.len() && !{space}({content}[{end}]) {{")
+        self.out(f"        {end} += 1")
+        self.out("    }")
+        name = loop.target.id
+        self.loop_bind(name, f"{content}[{start}..{end}]")
+        self.out(f"    {start} = {end}")
+        self.nested_loop(loop.body, {name} - self.loop_vars_outside)
+        return self.out("}")
 
     def nested_loop(self, body, names):
         cut, self.next_cut = self.next_cut, None
@@ -3006,6 +3888,8 @@ class Function:
         if isinstance(e, ast.Name):
             if e.id in self.subst:
                 return self.subst[e.id], t
+            if e.id in self.constant_lists:
+                return self.constant_lists[e.id], t
             if e.id in self.m.constants and e.id not in self.env:
                 return self.ex(self.m.constants[e.id])
             if self.m.exact:
@@ -3089,6 +3973,8 @@ class Function:
             return "mapNew()", t
         if isinstance(e, (ast.ListComp, ast.GeneratorExp)):
             return self.comprehension(e), t
+        if isinstance(e, ast.SetComp):
+            return self.set_from(self.comprehension(e, unordered=True), t[1]), t
         if isinstance(e, ast.Subscript):
             return self.subscript(e), t
         if isinstance(e, ast.Call):
@@ -3098,7 +3984,8 @@ class Function:
             if e.attr not in self.m.classes[owner]["fields"]:
                 raise Unsupported(f"atributo {e.attr} que no es un campo de {owner}")
             obj, _ = self.ex(e.value)
-            return f"tzP_{owner}[{obj}].v_{e.attr}", t
+            text = f"tzP_{owner}[{obj}].v_{e.attr}"
+            return (f"int({text})" if is_obj(t) else text), t
         if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name) and e.value.id == "math":
             if e.attr == "pi":
                 return "3.141592653589793", FLOAT
@@ -3422,16 +4309,17 @@ class Function:
             a, at = self.ex(left)
             b, bt = self.ex(right)
             if isinstance(op, (ast.In, ast.NotIn)):
+                hashed = isinstance(bt, tuple) and bt[0] in ("dict", "set")
                 if self.m.exact:
                     inner = bt if bt == STR else self.elem(bt) if isinstance(right, ast.Name) or \
                         not isinstance(right, (ast.List, ast.Tuple, ast.Set)) else at
-                    if at not in (INT, STR, BOOL) or repr(inner) != repr(at):
+                    if (at not in (INT, STR, BOOL) and not (hashed and packed_key_arity(at))) or inner != at:
                         raise Unsupported("in con tipos distintos o con flotantes")
                     if isinstance(right, (ast.List, ast.Tuple, ast.Set)) and \
                             any(repr(self.ty(x)) != repr(at) for x in right.elts):
                         raise Unsupported("in con una lista de tipos distintos")
-                if isinstance(bt, tuple) and bt[0] in ("dict", "set"):
-                    text = f"{b}.has({a})"
+                if hashed:
+                    text = f"{b}.has({self.hash_key(a, bt[1])})"
                 elif isinstance(right, (ast.List, ast.Tuple, ast.Set)):
                     text = "(" + " || ".join(f"{a} == {self.ex(x)[0]}" for x in right.elts) + ")"
                 else:
@@ -3641,13 +4529,13 @@ class Function:
         if isinstance(bt, tuple) and bt[0] == "tuple" and isinstance(e.slice, ast.Constant):
             return f"{base}.{e.slice.value}"
         if isinstance(bt, tuple) and bt[0] == "dict":
-            key = self.ex(e.slice)[0]
+            key = self.index(e.slice, base, bt)
             if self.m.exact:
                 # En Python una clave que no está es un error; aquí detiene la función.
                 if not isinstance(e.slice, (ast.Name, ast.Constant)) and any(
                         isinstance(n, ast.Call) for n in ast.walk(e.slice)):
                     raise Unsupported("clave de diccionario con llamadas")
-                if repr(self.ty(e.slice)) != repr(bt[1]) or bt[1] not in (INT, STR, BOOL):
+                if not hash_key_type(bt[1]):
                     raise Unsupported("clave de diccionario de otro tipo")
                 return f"{self.m.need('pyNeed')}({base}.has({key}), {base}[{key}])"
             return f"{base}[{key}]"
@@ -3659,17 +4547,18 @@ class Function:
             return f"{base}[{index}..{index} + 1]"
         return f"{base}[{index}]"
 
-    def comprehension(self, e):
+    def comprehension(self, e, unordered=False):
         if len(e.generators) != 1:
             raise Unsupported("comprensión con varios for")
         gen = e.generators[0]
         saved_env, saved_subst = dict(self.env), dict(self.subst)
         self.infer_for(gen.target, gen.iter)
         it = gen.iter
+        unordered = unordered and all(self.order_pure(x) for x in [e.elt, *gen.ifs])
         var = None
         if isinstance(gen.target, ast.Name):
             var = gen.target.id
-            source = f"{self.ex(it)[0]}.chars()" if self.ty(it) == STR else self.iterable(it)
+            source = f"{self.ex(it)[0]}.chars()" if self.ty(it) == STR else self.iterable(it, ordered=not unordered)
         elif isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id in ("enumerate", "zip") and \
                 all(isinstance(x, ast.Name) for x in gen.target.elts):
             var = self.m.fresh("k")
@@ -3690,6 +4579,12 @@ class Function:
                 for el, (s, st) in zip(gen.target.elts, seqs):
                     self.subst[el.id] = f"{s}[{var}..{var} + 1]" if st == STR else f"{s}[{var}]"
                 source = f"{self.m.need('pyRange')}(0, {bound}, 1)"
+        elif isinstance(gen.target, ast.Tuple) and all(isinstance(x, ast.Name) for x in gen.target.elts) and \
+                self.dictionary_view(it) and it.func.attr == "items" and len(gen.target.elts) == 2:
+            var = self.m.fresh("pair")
+            for i, target in enumerate(gen.target.elts):
+                self.subst[target.id] = f"{var}.{i}"
+            source = self.iterable(it, ordered=not unordered)
         else:
             raise Unsupported("comprensión con destino compuesto")
         text = source
@@ -3704,6 +4599,12 @@ class Function:
         return text
 
     def call(self, e):
+        specialized = getattr(e, "_tz_executable_call", None)
+        if specialized is not None:
+            helper, operands, _, *signature = specialized
+            expected = signature[0] if signature else (INT,) * len(operands)
+            if tuple(self.ty(operand) for operand in operands) == expected:
+                return f"{helper}({', '.join(self.ex(operand)[0] for operand in operands)})"
         f = e.func
         args = e.args
         if isinstance(f, ast.Name):
@@ -3858,15 +4759,20 @@ class Function:
                     raise Unsupported(f"{name} de valores que no son booleanos")
                 return f"{self.listy(arg, ordered=False)}.{name}(|tzb| tzb)"
             if name == "sorted":
-                text = self.sorted_text(args[0])
+                if len(args) != 1:
+                    raise Unsupported("sorted necesita un iterable")
+                key, reverse = None, False
                 for kw in e.keywords:
-                    if kw.arg == "reverse" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
-                        text += ".reverse()"
-                    elif kw.arg == "reverse" and isinstance(kw.value, ast.Constant):
-                        pass
+                    if kw.arg == "reverse" and isinstance(kw.value, ast.Constant) and type(kw.value.value) is bool:
+                        reverse = kw.value.value
+                    elif kw.arg == "key":
+                        key = kw.value
                     else:
-                        raise Unsupported("sorted con key")
-                return text
+                        raise Unsupported("argumentos de sorted no admitidos")
+                if key is not None and not (isinstance(key, ast.Constant) and key.value is None):
+                    return self.sorted_by_key(args[0], key, reverse)
+                text = self.sorted_text(args[0])
+                return text + ".reverse()" if reverse else text
             if name == "reversed":
                 text, t = self.ex(args[0])
                 if self.m.exact and not (t == STR or (isinstance(t, tuple) and t[0] == "list")):
@@ -3901,10 +4807,7 @@ class Function:
                 return f"({self.m.need('pyFloorDiv')}({a}, {b}), {self.m.need('pyMod')}({a}, {b}))"
             if name == "set" and args:
                 elem = self.elem(self.ty(args[0]))
-                fn = {INT: "pySetInt", STR: "pySetStr"}.get(elem)
-                if not fn:
-                    raise Unsupported("set de un tipo no admitido")
-                return f"{self.m.need(fn)}({self.listy(args[0], ordered=False)})"
+                return self.set_from(self.listy(args[0], ordered=False), elem)
             if name == "format" and len(args) == 2 and isinstance(args[1], ast.Constant) and \
                     (not self.m.exact or self.ty(args[0]) == INT):
                 fn = {"x": "pyHexDigits", "b": "pyBinDigits"}.get(args[1].value)
@@ -4049,6 +4952,82 @@ class Function:
         self.out("}")
         return best
 
+    def sorted_by_key(self, source, key, reverse):
+        if not isinstance(key, ast.Lambda):
+            raise Unsupported("sorted con una key que no es una lambda")
+        args = key.args
+        if len(args.args) != 1 or args.posonlyargs or args.kwonlyargs or args.vararg or args.kwarg or args.defaults:
+            raise Unsupported("sorted necesita una lambda de un parámetro")
+        param = args.args[0].arg
+        parts = key.body.elts if isinstance(key.body, ast.Tuple) else [key.body]
+        if not 1 <= len(parts) <= 4:
+            raise Unsupported("sorted con una clave tupla de este tamaño")
+        source_type = self.ty(source)
+        elem = self.elem(source_type)
+        if not complete(elem):
+            raise Unsupported("sorted con key sobre elementos de tipo desconocido")
+        if self.m.exact and holds_mutable(elem):
+            raise Unsupported("sorted con key sobre elementos mutables")
+
+        dict_view = self.dictionary_view(source) and source.func.attr in ("keys", "items")
+        hash_iter = isinstance(source_type, tuple) and source_type[0] in ("dict", "set")
+        if dict_view or hash_iter:
+            items = dict_view and source.func.attr == "items"
+
+            def is_parameter(n):
+                return isinstance(n, ast.Name) and n.id == param
+
+            if items:
+                unique = any(isinstance(p, ast.Subscript) and is_parameter(p.value) and
+                             isinstance(p.slice, ast.Constant) and type(p.slice.value) is int and p.slice.value == 0
+                             for p in parts)
+            else:
+                unique = any(is_parameter(p) for p in parts)
+            # Si la tabla cambia el orden de evaluación de las claves, no debe cambiar ningún efecto de Python.
+            pure = not any(isinstance(n, (ast.Call, ast.NamedExpr, ast.Attribute, ast.Lambda, ast.comprehension))
+                           for part in parts for n in ast.walk(part))
+            self.order_free(unique and pure)
+            if dict_view:
+                if source.args or source.keywords:
+                    raise Unsupported("vista de diccionario con argumentos")
+                seq = self.method(source, allow_unordered=True)
+            else:
+                seq = self.ex(source)[0]
+                seq = self.hash_keys(seq, source_type)
+        else:
+            seq = self.listy(source)
+
+        bound = self.m.fresh("sortItem")
+        saved_env, saved_subst = self.env, self.subst
+        self.env = {**self.env, param: elem}
+        self.subst = {**self.subst, param: bound}
+        self.lazy += 1
+        try:
+            keys = [self.ex(part) for part in parts]
+        finally:
+            self.lazy -= 1
+            self.env, self.subst = saved_env, saved_subst
+        if any(t not in (INT, FLOAT, STR, BOOL) for _, t in keys):
+            raise Unsupported("sorted con una clave no comparable")
+        texts = [f"{self.m.need('pySortKeyFloat')}({text})" if t == FLOAT else text for text, t in keys]
+        kinds = tuple(t for _, t in keys)
+        key_value = texts[0] if len(texts) == 1 else f"({', '.join(texts)})"
+        return (f"{self.m.need('pySortedBy')}({seq}, |{bound}: {turi_type(elem)}| {key_value}, "
+                f"{self.key_comparator(kinds, len(kinds) > 1, reverse)})")
+
+    def key_comparator(self, kinds, tuple_key, reverse=False):
+        key_type = turi_type(("tuple", kinds) if tuple_key else kinds[0])
+        a, b = self.m.fresh("left"), self.m.fresh("right")
+        test = ""
+        for i in reversed(range(len(kinds))):
+            left, right = (f"{a}.{i}", f"{b}.{i}") if tuple_key else (a, b)
+            if kinds[i] == BOOL:
+                comparison = f"{left} && !{right}" if reverse else f"!{left} && {right}"
+            else:
+                comparison = f"{left} {'>' if reverse else '<'} {right}"
+            test = f"({comparison}) || ({left} == {right} && ({test}))" if test else comparison
+        return f"|{a}: {key_type}, {b}: {key_type}| {test}"
+
     def listy(self, node, ordered=True):
         """Texto de algo recorrible. `ordered=False`: a quien lo pide le da igual el orden."""
         self.unordered += not ordered
@@ -4061,9 +5040,9 @@ class Function:
         if self.m.exact and not (isinstance(t, tuple) and t[0] in ("list", "set", "dict") and complete(t)):
             raise Unsupported("se esperaba una lista de tipo conocido")
         if isinstance(t, tuple) and t[0] == "set":
-            return f"setItems({text})"
+            return self.hash_keys(text, t)
         if isinstance(t, tuple) and t[0] == "dict":
-            return f"{text}.keys()"
+            return self.hash_keys(text, t)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "range":
             return text
         return text
@@ -4075,10 +5054,8 @@ class Function:
         if t == STR:
             return f"{self.m.need('pySortedStr')}({text}.chars())"
         elem = self.elem(t)
-        if isinstance(t, tuple) and t[0] == "set":
-            text = f"setItems({text})"
-        if isinstance(t, tuple) and t[0] == "dict":
-            text = f"{text}.keys()"
+        if isinstance(t, tuple) and t[0] in ("dict", "set"):
+            text = self.hash_keys(text, t)
         fn = {INT: "pySortedInt", STR: "pySortedStr",
               FLOAT: "pySortedFloatExact" if self.m.exact else "pySortedFloat"}.get(elem)
         if not fn:
@@ -4135,9 +5112,31 @@ class Function:
             return f"{need('pyShuffle')}({h}, mut {base})"
         raise Unsupported(f"random.{attr}")
 
-    def method(self, e):
+    def heap_call(self, e):
+        attr = heap_operation(e)
+        if e.keywords or len(e.args) != (2 if attr == "heappush" else 1):
+            raise Unsupported(f"argumentos de heapq.{attr} no admitidos")
+        heap, heap_type = self.place(e.args[0])
+        if not isinstance(heap_type, tuple) or heap_type[0] != "list":
+            raise Unsupported(f"heapq.{attr} necesita una lista")
+        elem = heap_type[1]
+        tuple_key = isinstance(elem, tuple) and elem[0] == "tuple"
+        kinds = elem[1] if tuple_key else (elem,)
+        if not 1 <= len(kinds) <= 4 or any(kind not in (INT, STR, BOOL) for kind in kinds):
+            raise Unsupported(f"elementos de heapq.{attr} de un tipo no comparable")
+        item = ""
+        if attr == "heappush":
+            text, t = self.ex(e.args[1])
+            if t != elem:
+                raise Unsupported("heapq.heappush con un elemento de otro tipo")
+            item = f"{text}, "
+        return f"{self.m.need(HEAP_OPERATIONS[attr])}(mut {heap}, {item}{self.key_comparator(kinds, tuple_key)})"
+
+    def method(self, e, allow_unordered=False):
         f = e.func
         attr = f.attr
+        if heap_operation(e) == "heappop" and f.value.id not in self.env:
+            return self.heap_call(e)
         if self.is_random(f.value):
             return self.random_call(e)
         owner = self.ty(f.value)
@@ -4181,8 +5180,8 @@ class Function:
             raise Unsupported("math." + attr)
         if attr == "pop" and not e.args and isinstance(self.ty(f.value), tuple) and self.ty(f.value)[0] == "list":
             return f"{self.place(f.value)[0]}.pop()"
-        if attr in ("keys", "values"):
-            if self.m.exact and not self.unordered:
+        if attr in ("keys", "values", "items"):
+            if self.m.exact and not (self.unordered or allow_unordered):
                 self.order_free(False)
         if attr == "format" and self.m.exact and isinstance(f.value, ast.Constant) and isinstance(f.value.value, str):
             return self.str_format(f.value.value, e.args, e.keywords)
@@ -4205,6 +5204,18 @@ class Function:
                 raise Unsupported(f"str.{attr} con argumentos que no son textos")
             if e.keywords:
                 raise Unsupported("argumentos con nombre en un método de cadena")
+            if self.m.exact and attr in ("strip", "lstrip", "rstrip") and len(a) == 1:
+                left = "false" if attr == "rstrip" else "true"
+                right = "false" if attr == "lstrip" else "true"
+                chars = e.args[0]
+                if isinstance(chars, ast.Constant) and type(chars.value) is str and chars.value.isascii():
+                    masks = [0, 0]
+                    for ch in chars.value:
+                        code = ord(ch)
+                        masks[code >> 6] |= 1 << (code & 63)
+                    low, high = (m if m < 2 ** 63 else m - 2 ** 64 for m in masks)
+                    return f"{self.m.need('pyTrimMask')}({base}, {low}, {high}, {left}, {right})"
+                return f"{self.m.need('pyTrimSet')}({base}, {a[0]}, {left}, {right})"
             if self.m.exact and attr in ("replace", "count", "split") and a:
                 if attr == "replace" and len(a) == 2:
                     return f"{self.m.need('pyReplace')}({base}, {a[0]}, {a[1]})"
@@ -4237,17 +5248,27 @@ class Function:
                 if self.m.exact and (len(args) != 2 or repr(args[0][1]) != repr(bt[1]) or
                                      repr(args[1][1]) != repr(bt[2])):
                     raise Unsupported("dict.get sin valor por defecto o con otro tipo")
+                if a:
+                    a[0] = self.hash_key(a[0], bt[1])
                 if len(a) == 2 and a[1] in ("0", '""', "0.0", "false"):
                     return f"{base}[{a[0]}]"
                 if len(a) == 2:
                     return f"(if {base}.has({a[0]}) {{ {base}[{a[0]}] }} else {{ {a[1]} }})"
                 raise Unsupported("dict.get sin valor por defecto")
             if attr == "keys":
-                return f"{base}.keys()"
+                return self.hash_keys(base, bt)
             if attr == "values":
                 return f"{base}.values()"
             if attr == "items":
-                raise Unsupported("dict.items() fuera de un for")
+                if e.args or e.keywords or not complete(bt):
+                    raise Unsupported("dict.items() con argumentos o tipos desconocidos")
+                if self.m.exact and holds_mutable(bt[2]):
+                    raise Unsupported("dict.items() guarda valores mutables")
+                items = f"{self.m.need('pyDictItems')}({base})"
+                arity = packed_key_arity(bt[1])
+                if arity:
+                    items += f".map(|tzpair| ({self.m.need(f'pyUnpackKey{arity}')}(tzpair.0), tzpair.1))"
+                return items
             raise Unsupported("método de diccionario no admitido: " + attr)
         if isinstance(bt, tuple) and bt[0] == "list":
             if attr == "pop" and not a:

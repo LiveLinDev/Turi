@@ -11,8 +11,10 @@ tiene que seguir en Python (clases, generadores, excepciones, enteros sin límit
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from pathlib import Path
 
@@ -20,6 +22,15 @@ CLI = sys.argv[1]
 ROOT = Path(__file__).resolve().parent.parent
 RUNNER = ROOT / "tools" / "pyfront" / "turipy.py"
 LAUNCHER = ROOT / "tools" / "pyfront" / "run.py"
+PYTHON_INTERNAL_HEADERS = Path(sysconfig.get_path("include")) / "internal"
+NATIVE_FILE_READ = (
+    sys.implementation.name == "cpython"
+    and (3, 11) <= sys.version_info[:2] <= (3, 14)
+    and not sysconfig.get_config_var("Py_GIL_DISABLED")
+    and not sysconfig.get_config_var("WITH_DTRACE")
+    and all((PYTHON_INTERNAL_HEADERS / header).is_file()
+            for header in ("pycore_interp.h", "pycore_runtime.h"))
+)
 
 # (nombre, fuente, funciones que deben acabar en nativo, funciones que deben seguir en Python)
 CASES = [
@@ -341,14 +352,32 @@ def edges_total(edges):
         total += w * (b - a)
     return total
 
+def list_pair(n):
+    first, second = [], []
+    for i in range(n):
+        first.append(i)
+        second.append(i * i)
+    return first, second
+
+def borrowed_pair(values):
+    first, second = [], values
+    first.append(7)
+    return first, second
+
 print(closest([(0, 0), (3, 4), (1, 1)]), closest([(0, 0)]), closest([]))
 print(bounds([4, -2, 9]), pairs(4), swap((1, 2.5)), swap(("a", True)))
 print("%.3f" % edges_total([(0, 1, 2.5), (1, 3, 1.5)]))
+first, second = list_pair(3)
+first.append(9)
+print(first, second, list_pair(0))
+values = [1, 2]
+value_pair = borrowed_pair(values)
+print(value_pair, value_pair[1] is values)
 try:
     print(bounds([]))
 except IndexError as error:
     print("error", error)
-''', ["closest", "bounds", "pairs", "swap", "edges_total"], []),
+''', ["closest", "bounds", "pairs", "swap", "edges_total", "list_pair"], ["borrowed_pair"]),
 
     ("diccionarios", '''
 def most_common(words):
@@ -698,7 +727,10 @@ print(depth(300))
 ''', ["fib", "is_even", "hanoi"], ["walk"]),
 
     ("hilos", '''
+import sys
 import threading
+
+sys.setswitchinterval(0.00001)
 
 def work(n):
     total = 0
@@ -792,6 +824,8 @@ def report(xs, label):
         if i % 3 == 0:
             print(f"{label}[{i}] = {x:>6} total={total:,} hex={x:#x} {x:08.2f}")
     print("media:", total / len(xs), "max", max(xs), sep=" | ")
+    average = "%.3f" % (total / len(xs))
+    print(average, "%.2f" % (total / len(xs)))
     print("lista", xs[:3], (1, 2.5), [[1.5], []], ("a'b", 'c"d', "e"), "fin", end="!\\n")
     print("pct %5.1f%% de %d y %s %r" % (12.345, 7, "t", "q"), file=sys.stderr)
     print("{} y {:08.3f} y {!r} y {name:^9}".format(len(xs), 3.14159, "a'b", name="ok"))
@@ -1017,6 +1051,608 @@ for i in range(2000):
     root = insert(root, seed % 100000)
 print(height(root), root.key, root.left.key if root.left else None)
 ''', ["height", "total", "simulate"], []),
+
+    ("orden_y_constantes", '''
+import contextlib
+import io
+
+WEIGHTS = [-2, 4, 6]
+LABELS = ("uno", "dos")
+MUTABLE = [3, 4]
+OUTPUT_VALUES = [4, 8]
+
+class MutatingStream(io.StringIO):
+    def write(self, text):
+        globals()["OUTPUT_VALUES"][0] = 99
+        return super().write(text)
+
+def announce():
+    print(OUTPUT_VALUES[0])
+    return OUTPUT_VALUES[0]
+
+def from_constants(i):
+    acc = len(WEIGHTS)
+    for value in WEIGHTS:
+        acc += value
+    labels = [label for label in LABELS]
+    if i in WEIGHTS:
+        acc += len(labels)
+    return WEIGHTS[i] + acc
+
+def stable(rows, direction):
+    if direction:
+        return sorted(rows, key=lambda p: p[0], reverse=True)
+    return sorted(rows, key=lambda p: p[0])
+
+def ranked():
+    d = {"z": 2, "a": 2, "m": 3}
+    ordered = sorted(d.items(), key=lambda p: (-p[1], p[0]))
+    return [pair[0] for pair in ordered]
+
+def tied():
+    d = {"z": 2, "a": 2, "m": 3}
+    return sorted(d.items(), key=lambda p: -p[1])
+
+def mutable_first():
+    return MUTABLE[0]
+
+rows = [(1, 10), (1, 20), (0, 30), (2, 40)]
+print(from_constants(-2), from_constants(0))
+print(stable(rows, False), stable(rows, True))
+print(ranked(), tied())
+globals()["WEIGHTS"][0] = 20
+print(from_constants(0))
+MUTABLE[0] = 9
+print(mutable_first())
+assert announce() == 4
+with contextlib.redirect_stdout(MutatingStream()):
+    result = announce()
+print(result)
+''', ["from_constants", "stable", "ranked", "announce"], ["tied", "mutable_first"]),
+
+    ("monticulos", '''
+import heapq
+
+def mutate(items, priority):
+    heapq.heapify(items)
+    heapq.heappush(items, (priority, 9))
+    distance, node = heapq.heappop(items)
+    return distance * 10 + node
+
+def drain(n):
+    heap = []
+    for i in range(n):
+        heapq.heappush(heap, (n - i, i))
+    out = []
+    while heap:
+        distance, node = heapq.heappop(heap)
+        out.append(distance + 100 * node)
+    return out
+
+def pop_one(items):
+    return heapq.heappop(items)
+
+items = [(4, 3), (1, 3), (1, 1), (0, 1), (1, 1)]
+print(mutate(items, 1), items)
+print(drain(0), drain(8))
+nums = [1, 3, 5]
+print(pop_one(nums), nums)
+try:
+    pop_one([])
+except IndexError as error:
+    print(type(error).__name__)
+saved = heapq.heappop
+heapq.heappop = lambda heap: heap.pop()
+nums = [1, 3, 5]
+print(pop_one(nums), nums)
+heapq.heappop = saved
+''', ["mutate", "drain", "pop_one"], []),
+
+    ("claves_tupla", '''
+def counts_at(a, b):
+    active = {(a, b), (-2147483648, 2147483647)}
+    totals = {(a, b): 4}
+    rounds = 0
+    for point in active:
+        totals[point] = totals.get(point, 0) + 3
+        rounds += 1
+    filtered = {cell for cell, count in totals.items() if count >= 3 and cell in active}
+    filtered.discard((a - 1, b))
+    filtered.remove((a, b))
+    triples = {(a, 0, b): len(filtered) + 7}
+    return rounds, totals[(a, b)], triples[(a, 0, b)], len(filtered)
+
+def visible_order(n):
+    points = {(n, -2), (0, 8), (-3, 2)}
+    seen = []
+    for point in points:
+        seen.append(point[0])
+    return seen
+
+print(counts_at(2, -5), counts_at(-3, 0))
+print(counts_at(1048576, 0), counts_at(2147483648, 1))
+print(visible_order(7))
+''', ["counts_at"], ["visible_order"]),
+
+    ("cierres", '''
+def count(n):
+    hits = 0
+    selected = set()
+
+    def place(row):
+        nonlocal hits
+        if row == n:
+            hits += 1
+            return
+        for value in range(n):
+            if value in selected:
+                continue
+            selected.add(value)
+            place(row + 1)
+            selected.remove(value)
+
+    place(0)
+    return hits
+
+
+def change(xs):
+    total = 0
+
+    def add(i):
+        nonlocal total
+        xs[i] += i
+        total += xs[i]
+
+    for i in range(len(xs)):
+        add(i)
+    return total
+
+
+def escaped(n):
+    def read(i):
+        return n + i
+    return read
+
+
+def depth(n):
+    base = 1
+
+    def visit(step):
+        if step == 0:
+            return base
+        return 1 + visit(step - 1)
+
+    return visit(n)
+
+
+print(count(4), count(5))
+xs = [1, 2, 3, 4]
+print(change(xs), xs)
+print(escaped(3)(4), depth(8))
+import sys
+limit = sys.getrecursionlimit()
+sys.setrecursionlimit(80)
+try:
+    depth(120)
+except RecursionError:
+    print("límite de CPython")
+finally:
+    sys.setrecursionlimit(limit)
+''', ["count", "change", "depth"], ["escaped"]),
+
+    ("memoria_recursiva", '''
+import functools
+from functools import lru_cache
+import sys
+
+
+def evaluate(depth):
+    length = depth
+
+    @lru_cache(maxsize=None)
+    def recur(i, salt):
+        if i == length:
+            return salt + 1
+        if i + 1 == length:
+            return salt + 2
+        return (recur(i + 1, salt) + recur(i + 2, salt)) % 1021
+
+    return recur(0, 4)
+
+
+def impure(n):
+    visits = []
+
+    @lru_cache(maxsize=None)
+    def call(i, unused):
+        visits.append(i)
+        return 0 if i == n else 1 + call(i + 1, unused)
+
+    return call(0, 0) + len(visits)
+
+
+print(evaluate(8), evaluate(300), impure(4))
+limit = sys.getrecursionlimit()
+sys.setrecursionlimit(80)
+try:
+    evaluate(200)
+except RecursionError:
+    print("límite de CPython")
+finally:
+    sys.setrecursionlimit(limit)
+
+standard = functools.update_wrapper
+functools.update_wrapper = lambda wrapper, fn: lambda i, salt: 91
+try:
+    print(evaluate(8))
+finally:
+    functools.update_wrapper = standard
+
+standard_code = lru_cache.__code__
+
+
+substitute = lambda maxsize=128, typed=False: lambda fn: lambda i, salt: 77
+lru_cache.__code__ = substitute.__code__
+try:
+    print(evaluate(8))
+finally:
+    lru_cache.__code__ = standard_code
+print(evaluate(11))
+''', ["evaluate"], ["impure"]),
+    ("mochila_01", '''
+from functools import lru_cache
+import sys
+
+
+def choose(capacity, values, weights):
+    length = len(weights)
+
+    @lru_cache(maxsize=None)
+    def visit(row, remaining):
+        if row == length:
+            return 0
+        skip = visit(row + 1, remaining)
+        if weights[row] <= remaining:
+            return max(skip, values[row] + visit(row + 1, remaining - weights[row]))
+        return skip
+
+    return visit(0, capacity)
+
+
+w, v = [8, 8, 5, 9, 7, 4, 3], [21, 23, 9, 27, 17, 8, 8]
+for cap in (11, 0, 7, 16, 30, 90, -1):
+    print(choose(cap, v, w))
+print(choose(5, [1, 7, 5], [0, 0, 5]))
+print(choose(6, [1, -2, 7], [-1, 2, 7]))
+print(choose(3, [2 ** 31, 1], [2, 1]))
+print(choose(0, [], []))
+try:
+    choose(5, [12], [4, 2])
+except IndexError:
+    print("valores insuficientes")
+
+limit = sys.getrecursionlimit()
+sys.setrecursionlimit(80)
+try:
+    choose(60, [7] * 150, [2] * 150)
+except RecursionError:
+    print("límite de CPython")
+finally:
+    sys.setrecursionlimit(limit)
+''', ["choose"], []),
+    ("reinas_mascaras", '''
+def count_boards(side):
+    total = 0
+    vertical = set()
+    difference = set()
+    addition = set()
+
+    def next_row(x):
+        nonlocal total
+        if x == side:
+            total += 1
+            return
+        for y in range(side):
+            if y in vertical or (x - y) in difference or (x + y) in addition:
+                continue
+            vertical.add(y)
+            difference.add(x - y)
+            addition.add(x + y)
+            next_row(x + 1)
+            vertical.remove(y)
+            difference.remove(x - y)
+            addition.remove(x + y)
+
+    next_row(0)
+    return total
+
+
+print(count_boards(8), count_boards(7))
+for size in (7, 8, -9, 0, 1, 2, 3, 4, 5, 6, 9, 10, 11):
+    print(count_boards(size))
+
+range = lambda size: [0]
+print(count_boards(5))
+del range
+print(count_boards(6))
+''', ["count_boards"], []),
+    ("lectura_archivos", r'''
+import builtins
+import io
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+
+def summarize(path, divisor):
+    lines = chars = 0
+    longest = ""
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            lines += 1
+            chars += len(line) // divisor
+            value = line.rstrip("\n").strip("!?")
+            if len(value) > len(longest):
+                longest = value
+    return lines, chars, longest
+
+
+def tokens(text, limit):
+    parts = []
+    word = "-"
+    for word in text.split():
+        if word == "paso":
+            continue
+        parts.append(word)
+        if len(parts) == limit:
+            break
+    return parts, word
+
+
+print(tokens("   a\tpaso b\n c  ", 2), tokens(" ", 1), tokens("árbol\vfruta", 4))
+
+with TemporaryDirectory() as folder:
+    path = Path(folder) / "text.txt"
+    path.write_bytes(b"!ab!\r\n\r!c!?\rlast")
+    print(summarize(str(path), 1))
+    for _ in range(24):
+        assert summarize(str(path), 1) == (4, 15, "last")
+    path.write_bytes(b"!a\n" + b"b" * 65532 + b"\r\nend\r")
+    lines, chars, longest = summarize(str(path), 1)
+    print(lines, chars, len(longest), longest[:1], longest[-1:])
+    path.write_bytes(b"c" * 65536 + b"\nnext")
+    lines, chars, longest = summarize(str(path), 1)
+    print(lines, chars, len(longest), longest[:1], longest[-1:])
+    path.write_bytes(b"!ab!\r\n\r!c!?\rlast")
+    try:
+        summarize(str(path), 0)
+    except ZeroDivisionError:
+        print("fallo durante la lectura")
+    print(summarize(str(path), 1))
+    path.write_bytes(b"")
+    print(summarize(str(path), 1), summarize(os.devnull, 1))
+    path.write_bytes("árbol\r\n".encode("utf-8"))
+    print(summarize(str(path), 1))
+    path.write_bytes(b"\xff")
+    try:
+        summarize(str(path), 1)
+    except UnicodeDecodeError:
+        print("UTF-8 inválido")
+    try:
+        summarize(str(path.with_suffix(".missing")), 1)
+    except FileNotFoundError:
+        print("archivo ausente")
+    standard_open = builtins.open
+    builtins.open = lambda *args, **kwargs: io.StringIO("?alternativo!?\n")
+    try:
+        print(summarize(str(path), 1))
+    finally:
+        builtins.open = standard_open
+    path.write_bytes(b"z\n")
+    print(summarize(str(path), 1))
+    tracked = str(path)
+    openings = []
+
+    def audit(event, args):
+        if event == "open" and args[0] == tracked:
+            openings.append(args[1])
+
+    getattr(sys, "add" + "audithook")(audit)
+    print(summarize(tracked, 1), openings)
+''', ["tokens", "summarize"] if NATIVE_FILE_READ else ["tokens"], []),
+    ("constructor_directo", '''
+class Point:
+    def __init__(self, x, y):
+        self.y = y
+        self.x = x
+
+
+class Link:
+    def __init__(self, left, right):
+        self.left = left
+        self.right = right
+
+
+def run(n):
+    first = Point(n + 4, n)
+    second = Point(n, 3 * n)
+    pair = Link(first, second)
+    first.x += 1
+    return pair.left.x, pair.left.y, pair.right.x, pair.right.y
+
+
+print(run(4), run(-12), run(0))
+
+
+def redirect(pair, incoming):
+    previous = pair.left
+    pair.left = incoming
+    return previous
+
+
+left = Point(1, 2)
+right = Point(3, 4)
+link = Link(left, right)
+print(redirect(link, right) is left, link.left is right)
+print(redirect(link, None) is right, link.left is None)
+print(redirect(link, left) is None, link.left is left)
+''', ["run", "redirect"], []),
+
+    ("reduccion_filas", '''
+def weight(i, j):
+    return 0.125 * (i * 3 + j + 2)
+
+
+def weighted(source, dest, rows, cols):
+    """Acumula un producto matriz-vector rectangular."""
+    for row in range(rows):
+        total = 0.0
+        for col in range(cols):
+            total += weight(col, row) * source[col]
+        dest[row] = total
+
+
+def via_helper(rows):
+    source = [-2.25, 7.0, 0.125, -3.0]
+    dest = [-0.0] * 12
+    weighted(source, dest, rows, 4)
+    return dest
+
+
+def singular(i, j):
+    return 0.5 * (4 // (i - 3))
+
+
+def may_trap(source, dest, rows, cols):
+    for row in range(rows):
+        total = 0.0
+        for col in range(cols):
+            total += singular(row, col) * source[col]
+        dest[row] = total
+
+
+print(via_helper(-1))
+print(via_helper(0))
+print(via_helper(3))
+print(via_helper(8))
+print(via_helper(9))
+print(via_helper(12))
+
+source = [2.0, -3.0, 0.125]
+dest = [-0.0] * 9
+weighted(source, dest, 9, 0)
+print(dest)
+
+alias = [2.0, -3.0, 0.125] * 3
+weighted(alias, alias, 9, 3)
+print(alias)
+
+for action in (weighted, may_trap):
+    dest = [99.0] * 9
+    try:
+        action(source, dest, 9, 4 if action is weighted else 2)
+    except (IndexError, ZeroDivisionError) as error:
+        print(type(error).__name__, dest)
+''', ["via_helper", "weighted"], []),
+
+    ("reciprocos_pares", '''
+import struct
+
+
+def coefficient(col, row):
+    return 1.0 / (5 + 2 * row + 3 * col + ((row + col) * (row + col - 1)) // 2)
+
+
+def weighted(source, dest, rows, cols):
+    for row in range(rows):
+        total = 0.0
+        for col in range(cols):
+            total += coefficient(col, row) * source[col]
+        dest[row] = total
+
+
+def staircase(row, col):
+    return 1.0 / (1 + (row + col) // 2)
+
+
+def stepped(source, dest, rows, cols):
+    for row in range(rows):
+        total = 0.0
+        for col in range(cols):
+            total += staircase(row, col) * source[col]
+        dest[row] = total
+
+
+for rows, cols in ((31, 9), (32, 9), (48, 9), (56, 9), (63, 9), (65, 9), (33, 0)):
+    source = [0.0] * 9
+    source[rows % 9] = 1.0
+    dest = [-0.0] * rows
+    weighted(source, dest, rows, cols)
+    print(struct.pack(f"!{rows}d", *dest).hex())
+
+dest = [0.0] * 33
+stepped(source, dest, len(dest), len(source))
+print(struct.pack("!33d", *dest).hex())
+
+source = [2.0, -3.0, -0.0, 0.125, 2.0 ** -1074, 1.25, -5.0, 2.0, -25.0]
+shared = source * 4
+weighted(shared, shared, 32, 9)
+print([round(value, 12) for value in shared])
+
+for rows, cols in ((35, 10), (37, 9)):
+    dest = [-1.0] * 35
+    try:
+        weighted(source, dest, rows, cols)
+    except IndexError:
+        print([round(value, 12) for value in dest])
+''', ["weighted", "stepped"], []),
+
+    ("producto_rectangular", '''
+def product(right, left):
+    rows = len(left)
+    cols = len(right[0])
+    inner = len(right)
+    table = [[0.0] * cols for _ in range(rows)]
+    for row in range(rows):
+        for col in range(cols):
+            cell = 0.0
+            for k in range(inner):
+                cell += left[row][k] * right[k][col]
+            table[row][col] = cell
+    return table
+
+
+right = [[2.0, 0.5, 0.0, -3.0],
+         [-5.0, 1.0, 2.25, -0.5],
+         [1.0, 6.0, 1.5, 8.0]]
+left = [[3.0, -0.25, 2.0], [0.5, -0.0, -3.25]]
+print(product(right, left))
+print(product(right, left))
+print(product([[0.25, -0.0]], [[-1.0], [1.0]]))
+print(product([[]], [[-1.0], []]))
+shared = [[1.25, 2.0], [-0.5, 3.0]]
+print(product(shared, shared), shared)
+try:
+    product([[1.0, 2.0], [0.125]], [[-1.0, 1.0]])
+except IndexError:
+    print("fila corta")
+
+repeated_left = [[(i % 3 - k) / 8.0 for k in range(9)] for i in range(67)]
+repeated_right = [[((j % 11) * k - 17) / 32.0 for j in range(71)] for k in range(9)]
+result = product(repeated_right, repeated_left)
+print(result[0][-1], result[1][32], result[-1][-1])
+result[0][0] = 42.0
+print(result[3][0], repeated_left[0][0])
+repeated_right[4][-1] += 1.0
+changed = product(repeated_right, repeated_left)
+print(changed[0][-1], changed[1][32], changed[-1][-1])
+
+len = lambda value: 0
+print(product(repeated_right, repeated_left))
+del len
+print(product(right, left))
+''', ["product"], []),
 ]
 
 ENV_BASE = dict(os.environ)
@@ -1030,11 +1666,180 @@ def run(command, env):
                           env=env, timeout=1800)
 
 
+def cache_del_motor(folder):
+    base = Path(folder)
+    first, second = base / "motor_a", base / "motor_b"
+    for checkout in (first, second):
+        checkout.mkdir()
+        shutil.copyfile(LAUNCHER, checkout / "run.py")
+    engine = first / "turipy.py"
+    engine.write_text("def main(args):\n    print(main.__code__.co_filename == __file__)\n", encoding="utf-8")
+    shutil.copy2(engine, second / engine.name)
+    env = dict(ENV_BASE, TURIPY_CACHE=str(base / "motor_cache"))
+    for checkout in (first, second, first, second):
+        result = run([sys.executable, str(checkout / "run.py")], env)
+        if result.returncode or result.stdout.strip() != "True":
+            print(f"FALLA cache_del_motor en {checkout.name}: {result.stdout}{result.stderr}")
+            return False
+    print("ok cache_del_motor: trazas correctas en dos copias")
+    return True
+
+
+def ejecutable_independiente(folder):
+    source = Path(folder) / "programa independiente.py"
+    source.write_text('''\
+import sys
+
+def main():
+    n = int(sys.argv[1])
+    print(f"{n:0600d}")
+    print("estado", file=sys.stderr)
+    if n != 8:
+        print("x" * 9000)
+    if n == -1:
+        with open(sys.argv[2], encoding="utf-8") as handle:
+            for line in handle:
+                print(line.rstrip("\\n"))
+        return
+    print(100 // n, sys.argv[2])
+
+if __name__ == "__main__":
+    main()
+''', encoding="utf-8")
+    binary = Path(folder) / ("programa nativo ñ.exe" if os.name == "nt" else "programa_bin")
+    plain = Path(folder) / "texto ascii.txt"
+    unicode = Path(folder) / "texto unicode.txt"
+    plain.write_bytes(b"primera\r\nsegunda\rtercera\n")
+    unicode.write_bytes("línea en UTF-8\n".encode("utf-8"))
+    trap_case = (["0", "cero"], False)
+    cases = [(["7", 'bytes con espacios "y comillas"\\'], True), (["8", "ocho"], True), (["7", "árbol"], False),
+             trap_case, (["-1", str(plain)], True), (["-1", str(unicode)], False)]
+    expected = [subprocess.run([sys.executable, str(source), *args], capture_output=True, env=ENV_BASE, timeout=45)
+                for args, _ in cases]
+    build = run([sys.executable, str(LAUNCHER), "--veloz", str(Path(CLI).resolve()),
+                 "--exe", str(binary), str(source)], ENV_BASE)
+    if build.returncode or not binary.is_file():
+        print("FALLA ejecutable independiente al compilar", build.stderr)
+        return False
+    source.unlink()
+    for (args, native), reference in zip(cases, expected):
+        result = subprocess.run([str(binary), *args], capture_output=True, timeout=45,
+                                env=dict(ENV_BASE, TURIPY_EXE_TIME="1"))
+        if result.returncode != reference.returncode or result.stdout != reference.stdout:
+            print("FALLA ejecutable independiente en la salida o código", args, result.stderr)
+            return False
+        if native and not result.stderr.startswith(reference.stderr + b"TURI_EXE_MS="):
+            print("FALLA ejecutable independiente sin tiempo nativo", result.stderr)
+            return False
+        if not native and result.stderr != reference.stderr:
+            print("FALLA ejecutable independiente al recuperar", args, result.stderr, reference.stderr)
+            return False
+    source.write_text("raise AssertionError('archivo sustituido')\n", encoding="utf-8")
+    reference = expected[cases.index(trap_case)]
+    replayed = subprocess.run([str(binary), *trap_case[0]], capture_output=True, env=ENV_BASE, timeout=45)
+    if (replayed.returncode, replayed.stdout, replayed.stderr) != (reference.returncode, reference.stdout, reference.stderr):
+        print("FALLA ejecutable independiente con el archivo sustituido", replayed.stderr, reference.stderr)
+        return False
+    print("ok ejecutable independiente: salida en nativo y recuperación con el fuente incluido")
+    return True
+
+
+def ejecutable_contadores(folder):
+    cases = (
+        (ROOT / "benchmarks/python/palabras/palabras.py",
+         b"seed * 1103515245 + 12345", b"seed * 1103515245 + 12347", (0, 1, 7, 47, 48, 49, 127, 128, 129, 233, 4117)),
+        (ROOT / "benchmarks/python/criba/criba.py",
+         b"is_prime[0] = False", b"is_prime[0] = True", (2, 3, 7, 8, 49, 50, 51, 121, 122, 210, 211, 4531)),
+        (ROOT / "tools/pyfront/examples/fannkuch.py",
+         b"checksum += flips", b"checksum += flips + 1", (1, 3, 4, 5, 6, 7, 8)),
+        (ROOT / "benchmarks/python/dijkstra/dijkstra.py",
+         b"ni * 7 + nj * 13", b"ni * 7 + nj * 12", (1, 2, 9, 10, 11, 43)),
+        (ROOT / "benchmarks/python/vida/vida.py",
+         b"if c == 3 or", b"if c == 4 or", (-9, 0, 1, 10, 11, 64, 449, 511)),
+        (ROOT / "tools/pyfront/examples/mandelbrot.py",
+         b"range(50)", b"range(51)", (1, 7, 8, 9, 31, 32, 33, 64, 73, 117)),
+        (ROOT / "tools/pyfront/examples/spectralnorm.py",
+         b"%.9f", b"%.8f", (1, 9, 31, 32, 33, 64, 87, 173, 513)),
+        (ROOT / "tools/pyfront/examples/nbody.py",
+         b"dt / (d2 * sqrt(d2))", b"dt / (2.0 * d2 * sqrt(d2))", (0, 1, 17, 257, 4099)),
+        (ROOT / "benchmarks/python/cuerpos/cuerpos.py",
+         b"dt / (d2 * sqrt(d2))", b"dt / (2.0 * d2 * sqrt(d2))", (0, 1, 17, 257, 4099)),
+        (ROOT / "benchmarks/python/matmul/matmul.py",
+         b"% 97) / 97.0", b"% 89) / 89.0", (1, 7, 8, 31, 64, 96, 97, 98, 193, 194)),
+        (ROOT / "benchmarks/python/arboles/arboles.py",
+         b"1 + check(node.left)", b"2 + check(node.left)", (-1, 6, 7, 9, 11)),
+        (ROOT / "benchmarks/python/mochila/mochila.py",
+         b"values.append(10", b"values.append(11", (-1, 0, 6, 23, 63, 129)),
+    )
+    for source, fragment, replacement, sizes in cases:
+        name = source.stem
+        data = source.read_bytes()
+        for suffix, program in (("original", data), ("alterado", data.replace(fragment, replacement, 1))):
+            path = Path(folder) / f"{name}_{suffix}.py"
+            path.write_bytes(program)
+            binary = path.with_suffix(".exe" if os.name == "nt" else ".bin")
+            build = run([sys.executable, str(LAUNCHER), "--veloz", str(Path(CLI).resolve()),
+                         "--exe", str(binary), str(path)], ENV_BASE)
+            if build.returncode or not binary.is_file():
+                print("FALLA ejecutable de contadores", name, suffix, build.stderr)
+                return False
+            for n in sizes:
+                expected = subprocess.check_output([sys.executable, str(path), str(n)], env=ENV_BASE, timeout=45)
+                result = subprocess.run([str(binary), str(n)], capture_output=True, timeout=45,
+                                        env=dict(ENV_BASE, TURIPY_EXE_TIME="1"))
+                if result.returncode or result.stdout != expected or not result.stderr.startswith(b"TURI_EXE_MS="):
+                    print("FALLA contadores en nativo", name, suffix, n, result.stderr)
+                    return False
+    print("ok ejecutable de contadores: formas originales y alteradas coinciden con CPython")
+    return True
+
+
+def ejecutable_texto(folder):
+    base = Path(folder)
+    source = ROOT / "benchmarks/python/texto/texto.py"
+    binary = base / ("texto_bin.exe" if os.name == "nt" else "texto_bin")
+    build = run([sys.executable, str(LAUNCHER), "--veloz", str(Path(CLI).resolve()),
+                 "--exe", str(binary), str(source)], ENV_BASE)
+    if build.returncode or not binary.is_file():
+        print("FALLA ejecutable de texto al compilar", build.stderr)
+        return False
+    vocabulary = " ".join(f"pal{i:03}" for i in range(300)).encode("ascii")
+    cases = (
+        (b"", True),
+        (b"Ford! ford\r\nFORD\tbar\r  ,. bar bar\n", True),
+        (b"One two PalabraLarga!\r\n" * 4500 + b"one two palabraLarga", True),
+        (vocabulary + b"\n" + vocabulary.upper() + b"\nA A a", True),
+        ("Vía vía\r\nárbol, árbol\n".encode("utf-8"), False),
+    )
+    path = base / "texto_bloques.txt"
+    for data, native in cases:
+        path.write_bytes(data)
+        expected = subprocess.run([sys.executable, str(source), str(path)], capture_output=True,
+                                  timeout=45, env=ENV_BASE)
+        result = subprocess.run([str(binary), str(path)], capture_output=True, timeout=45,
+                                env=dict(ENV_BASE, TURIPY_EXE_TIME="1"))
+        if (result.returncode != expected.returncode or result.stdout != expected.stdout
+                or (native and not result.stderr.startswith(b"TURI_EXE_MS="))
+                or (not native and result.stderr != expected.stderr)):
+            print("FALLA ejecutable de texto", len(data), native, result.stderr)
+            return False
+    print("ok ejecutable de texto: bloques, claves largas, más de 256 claves y UTF-8")
+    return True
+
+
 def main():
     only = sys.argv[2:]
     cache = Path(CLI).resolve().parent / "turipy-cache"
     failures = 0
     with tempfile.TemporaryDirectory(prefix="turipy-") as tmp:
+        if (not only or "cache_del_motor" in only) and not cache_del_motor(tmp):
+            failures += 1
+        if (not only or "ejecutable_independiente" in only) and not ejecutable_independiente(tmp):
+            failures += 1
+        if (not only or "ejecutable_contadores" in only) and not ejecutable_contadores(tmp):
+            failures += 1
+        if (not only or "ejecutable_texto" in only) and not ejecutable_texto(tmp):
+            failures += 1
         for name, source, native, python in CASES:
             if only and name not in only:
                 continue

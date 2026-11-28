@@ -27,6 +27,8 @@ def main():
     if len(sys.argv) != 2:
         raise SystemExit("Uso: python tests/grammar.py RUTA_A_VELOZ")
     cli = Path(sys.argv[1]).resolve()
+    # Las gramáticas de generación describen la sintaxis canónica.
+    formatter = [cli, "fmt", "--strict"]
     subprocess.run([sys.executable, GRAMMAR / "sync.py", "--check"], check=True)
     examples = sorted((ROOT / "examples").glob("*.turi"))
     valid = [example.read_text(encoding="utf-8-sig") for example in examples] + [
@@ -270,18 +272,18 @@ fn aiExprAndUfcs(
         for source, expected in samples:
             original = source.encode("utf-8")
             file.write_bytes(original)
-            result = subprocess.run([cli, "fmt", file], capture_output=True, timeout=5)
+            result = subprocess.run([*formatter, file], capture_output=True, timeout=5)
             assert (result.returncode == 0) == expected, (expected, source, result.stderr)
             if expected:
                 pretty = file.read_bytes()
-                fixed = subprocess.run([cli, "fmt", file, "--check"], capture_output=True, timeout=5)
+                fixed = subprocess.run([*formatter, file, "--check"], capture_output=True, timeout=5)
                 assert fixed.returncode == 0 and pretty == file.read_bytes(), (source, fixed.stderr)
                 parser.parse(pretty.decode("utf-8"))
             else:
                 assert file.read_bytes() == original and json.loads(result.stderr)["id"]
         for raw in [b'fn main() { print("\xff") }', b'// \xc0\xaf', b'// \xed\xa0\x80', b'// \xf4\x90\x80\x80']:
             file.write_bytes(raw)
-            result = subprocess.run([cli, "fmt", file], capture_output=True, timeout=5)
+            result = subprocess.run([*formatter, file], capture_output=True, timeout=5)
             assert result.returncode and json.loads(result.stderr)["id"] == "E_UTF8", result.stderr
             assert file.read_bytes() == raw
     print(f"Parser, gramáticas y fmt verificados. {len(valid)} válidos, {len(invalid)} inválidos y 4 errores UTF-8.")

@@ -1,1 +1,17 @@
-{"args": ["{entrada}"], "input": ["generar.py", 400000], "about": "lee un archivo de texto línea a línea, cuenta palabras con un diccionario y ordena"}
+{
+  "args": ["{entrada}"],
+  "input": ["generar.py", 400000],
+  "about": "lee un archivo de texto línea a línea, cuenta palabras con un diccionario y ordena",
+  "c_extremo": {
+    "fuente": "texto_extremo.c",
+    "entrenamiento": [[18043, 97], [49871, 314], [107113, 827]],
+    "variantes": {
+      "vistas del archivo": [],
+      "claves de ocho bytes": ["-DTZ_TEXTO_COMPACTO"],
+      "bytes en orden nativo": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_NATIVO"],
+      "filas SIMD": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_FILAS_SIMD"],
+      "filas SIMD y bytes en orden nativo": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_NATIVO", "-DTZ_TEXTO_FILAS_SIMD"],
+      "filas y bytes nulos SIMD": ["-DTZ_TEXTO_COMPACTO", "-DTZ_TEXTO_NATIVO", "-DTZ_TEXTO_FILAS_SIMD", "-DTZ_TEXTO_FILAS_NUL"]
+    }
+  }
+}
